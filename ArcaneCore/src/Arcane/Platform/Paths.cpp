@@ -1,4 +1,5 @@
 #include <Arcane/Platform/Paths.hpp>
+#include <Arcane/Platform/Process.hpp>
 
 #include <cstdlib>
 #include <mutex>
@@ -10,6 +11,28 @@
 #else
 #include <unistd.h>    // getpid
 #endif
+
+namespace Arcane::Platform
+{
+    std::filesystem::path UserDataDirectory()
+    {
+#if ARC_PLATFORM_WINDOWS
+        if (const wchar_t* localAppData = ::_wgetenv(L"LOCALAPPDATA"); localAppData && *localAppData)
+            return std::filesystem::path(localAppData);
+        return {};
+#elif ARC_PLATFORM_MACOS
+        if (const char* home = std::getenv("HOME"); home && *home)
+            return std::filesystem::path(home) / "Library" / "Application Support";
+        return {};
+#else
+        if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg)
+            return std::filesystem::path(xdg);
+        if (const char* home = std::getenv("HOME"); home && *home)
+            return std::filesystem::path(home) / ".local" / "share";
+        return {};
+#endif
+    }
+}
 
 namespace Arcane::Paths
 {
@@ -31,16 +54,13 @@ namespace Arcane::Paths
             return {};
         }
 
-        // Per-user, machine-local data and config bases (XDG on Linux).
+        // LocalData is UserDataDirectory: %LOCALAPPDATA% on Windows,
+        // $XDG_DATA_HOME (else ~/.local/share) on Linux, ~/Library/Application
+        // Support on macOS. SessionLayoutDir and every other Paths consumer
+        // follow that root.
         std::filesystem::path LocalData()
         {
-#if defined(_WIN32)
-            return EnvDir("LOCALAPPDATA");
-#else
-            if (std::filesystem::path x = EnvDir("XDG_DATA_HOME"); !x.empty()) return x;
-            if (std::filesystem::path h = EnvDir("HOME"); !h.empty()) return h / ".local" / "share";
-            return {};
-#endif
+            return Arcane::Platform::UserDataDirectory();
         }
 
         std::string ProcessTag()

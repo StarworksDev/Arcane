@@ -8,6 +8,7 @@
 #include <Arcane/Base/Diagnostics.hpp>
 #include <Arcane/Base/DiagnosticsSettings.hpp>
 #include <Arcane/Base/Log.hpp>
+#include <Arcane/Platform/Platform.hpp>
 #include <Arcane/Project/Project.hpp>   // EditorLock: the direct-launch double-open guard
 #include <Arcane/Config/CVarTypes.hpp>
 #include <Arcane/Host/BootSplashWindow.hpp>
@@ -42,6 +43,7 @@ static constexpr const wchar_t* kAppUserModelId = L"dev.starworks.arcane";
 #endif
 
 // Agility SDK handshake: the exported version/path pair (Arcane/Render/AgilitySdk.hpp).
+// The macro is empty off Windows.
 ARC_AGILITY_SDK_EXPORTS();
 
 // ===== THE EDITOR'S FULL PROCESS EXIT-CODE TABLE ============================

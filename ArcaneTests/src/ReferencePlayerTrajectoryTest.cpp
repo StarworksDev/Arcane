@@ -15,6 +15,7 @@
 // gameplay change): set ARCANE_RECORD_TRAJECTORY=1 and run "[trajectory]".
 
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 
 #include <Arcane/Client/ClientRuntime.hpp>
 #include <Arcane/Host/ProjectBoot.hpp>
@@ -93,7 +94,7 @@ namespace
                 Arcane::HostBoot::GameplayInputLoadResult::Status::Loaded);
 
         Arcane::PluginHost host(Arcane::Test::Process(),
-                                std::filesystem::path("ReferenceGameUnderTest.dll"));
+                                std::filesystem::path(Arcane::Test::ModuleFile("ReferenceGameUnderTest")));
         REQUIRE(host.AttachRuntime(client.Core()));
         REQUIRE(host.Load());
 

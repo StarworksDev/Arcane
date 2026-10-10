@@ -296,7 +296,8 @@ TEST_CASE("cvar archive T3-D2: a write merges into the file -- foreign keys stay
     const auto older = std::filesystem::last_write_time(user / "editor.json") - std::chrono::hours(1);
     std::filesystem::last_write_time(user / "editor.json", older);
     WriteCVarArchive(reg, user);                          // nothing changed: the file is left alone
-    CHECK(std::filesystem::last_write_time(user / "editor.json") == older);
+    // Parenthesised: libc++ file_time_type has an __int128 rep Catch2 cannot stringify.
+    CHECK((std::filesystem::last_write_time(user / "editor.json") == older));
     std::filesystem::remove_all(user);
 }
 

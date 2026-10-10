@@ -1154,8 +1154,21 @@ namespace Arcane
     //     module was compiled against Arcane::ECS and Arcane::Physics2D;
     //     reject the pairing. ReferenceProject.arcproj and Aphelyon.arcproj
     //     restamped.
+    // v58 (2026-10-10, the Linux/macOS port -- adapter-keyed golden references):
+    //     `NriDeviceCaps` (held by value inside the exported `NriDevice`) gained
+    //     `adapterName` (std::string) and `softwareAdapter` -- layout.
+    //     `ReferenceLevel` gained `Adapter`; `ReferenceAdapterSet`, a four-
+    //     argument `ResolveReference` and `ResolveReferenceIn` are new
+    //     ARC_API exports (additive; `ReferenceResolution`'s layout did not
+    //     move). Consumed by the two hosts and ArcaneTests only -- no game
+    //     module names NriDevice or ReferenceImages -- but a v57 module was
+    //     compiled against the old NriDevice layout; reject the pairing.
+    //     ReferenceProject.arcproj restamped (Aphelyon.arcproj restamps with
+    //     its next engine sync). Main already consumed v52 through v57
+    //     (settings, physics events, namespace facades, the flat API), so
+    //     this layout change is v58.
     ARC_CONSTANT("ABI: the game-module ABI version; the host refuses a mismatched module")
-    inline constexpr uint32_t kGamePluginABIVersion = 57;
+    inline constexpr uint32_t kGamePluginABIVersion = 58;
 
     // The ABI version compiled into the LOADED Arcane.dll -- i.e. the one the
     // plugin gate actually enforces at runtime.

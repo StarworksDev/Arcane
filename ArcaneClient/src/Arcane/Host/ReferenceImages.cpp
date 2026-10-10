@@ -33,24 +33,64 @@ namespace Arcane
         return true;
     }
 
+    std::string ReferenceAdapterSet(const std::string& backend, const std::string& adapterName,
+                                    bool softwareAdapter)
+    {
+        if (!softwareAdapter)
+            return {};
+        // Mesa's lavapipe reports itself as "llvmpipe (LLVM <ver>, <bits> bits)";
+        // the version suffix is deliberately not part of the key.
+        if (adapterName.find("llvmpipe") != std::string::npos)
+            return backend + "-lavapipe";
+        if (adapterName.find("Microsoft Basic Render Driver") != std::string::npos)
+            return backend + "-warp";
+        return backend + "-software";
+    }
+
     ReferenceResolution ResolveReference(const fs::path& projectRoot,
                                          const std::string& name, const std::string& backend)
+    {
+        return ResolveReferenceIn(projectRoot / "Verify" / "References", name, backend, {});
+    }
+
+    ReferenceResolution ResolveReference(const fs::path& projectRoot, const std::string& name,
+                                         const std::string& backend, const std::string& adapterSet)
+    {
+        return ResolveReferenceIn(projectRoot / "Verify" / "References", name, backend, adapterSet);
+    }
+
+    ReferenceResolution ResolveReferenceIn(const fs::path& root, const std::string& name,
+                                           const std::string& backend, const std::string& adapterSet)
     {
         ReferenceResolution out;
         if (!ReferenceNameIsSafe(name) || !ReferenceNameIsSafe(backend))
             return out;   // level None, blessTarget empty -- refused
+        if (!adapterSet.empty() && !ReferenceNameIsSafe(adapterSet))
+            return out;
 
-        const fs::path root   = projectRoot / "Verify" / "References";
         const fs::path shared = root / (name + ".png");
         const fs::path keyed  = root / backend / (name + ".png");
 
         std::error_code ec;
+        fs::path adapter;
+        if (!adapterSet.empty())
+        {
+            adapter = root / adapterSet / (name + ".png");
+            out.triedPaths.push_back(adapter);
+            if (fs::exists(adapter, ec))
+            {
+                out.level = ReferenceLevel::Adapter;
+                out.path = adapter;
+                out.blessTarget = adapter;
+                return out;
+            }
+        }
         out.triedPaths.push_back(keyed);
         if (fs::exists(keyed, ec))
         {
             out.level = ReferenceLevel::Backend;
             out.path = keyed;
-            out.blessTarget = keyed;
+            out.blessTarget = adapter.empty() ? keyed : adapter;
             return out;
         }
         out.triedPaths.push_back(shared);
@@ -58,15 +98,16 @@ namespace Arcane
         {
             out.level = ReferenceLevel::Shared;
             out.path = shared;
-            out.blessTarget = shared;
+            out.blessTarget = adapter.empty() ? shared : adapter;
             return out;
         }
 
-        // Nothing resolved: a first bless creates the SHARED image. If the two
-        // backends turn out to disagree, the other one's failure is what tells
-        // us to split it -- we do not guess up front.
+        // Nothing resolved: a first bless creates the SHARED image (or, on an
+        // adapter set, the set's own). If the two backends turn out to
+        // disagree, the other one's failure is what tells us to split it --
+        // we do not guess up front.
         out.level = ReferenceLevel::None;
-        out.blessTarget = shared;
+        out.blessTarget = adapter.empty() ? shared : adapter;
         return out;
     }
 

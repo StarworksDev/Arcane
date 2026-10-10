@@ -74,7 +74,8 @@ namespace Arcane::Paths
     [[nodiscard]] ARC_CORE_API std::filesystem::path ResolveGameUserDir(const Config& config,
                                                                           HostPlatform platform, const PlatformDirs& dirs);
     [[nodiscard]] ARC_CORE_API PlatformDirs CurrentPlatformDirs();
-    // %LOCALAPPDATA%\Arcane (Windows), $XDG_DATA_HOME/Arcane or ~/.local/share/Arcane;
-    // empty when the base is unset. The Hub's files live under it too.
+    // %LOCALAPPDATA%\Arcane (Windows), $XDG_DATA_HOME/Arcane or ~/.local/share/Arcane
+    // (Linux), ~/Library/Application Support/Arcane (macOS). Empty when the
+    // base is unset. The Hub's files live under it too.
     [[nodiscard]] ARC_CORE_API std::filesystem::path UserRoot();
 }

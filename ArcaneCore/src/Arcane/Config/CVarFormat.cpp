@@ -1,4 +1,5 @@
 #include <Arcane/Config/CVarFormat.hpp>
+#include <Arcane/Util/CharConv.hpp>
 
 #include <charconv>
 #include <cmath>
@@ -73,7 +74,7 @@ namespace Arcane
         std::optional<F> ParseFinite(std::string_view text)
         {
             F v{};
-            const auto r = std::from_chars(text.data(), text.data() + text.size(), v);
+            const auto r = Arcane::FromChars(text.data(), text.data() + text.size(), v);
             if (r.ec != std::errc{} || r.ptr != text.data() + text.size() || !std::isfinite(v)) return std::nullopt;
             return v;
         }

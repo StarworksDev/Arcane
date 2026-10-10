@@ -27,6 +27,7 @@
 
 #include <Arcane/Base/Log.hpp>           // ARC_WARN/ARC_ERROR/ARC_INFO
 #include <Arcane/Base/Runtime.hpp>       // Runtime::ResetRegistry/Registry (BootScene)
+#include <Arcane/Platform/Platform.hpp>  // NativeModuleFileName/ModuleFileName (GameModule, PluginModules)
 #include <Arcane/Project/AssetId.hpp>    // AssetId::FromGuid (BootSceneFile)
 #include <Arcane/Project/Project.hpp>
 #include <Arcane/Scene/Components.hpp>            // Arcane::Transform (VerifySharedTypeContextFor's default probe)
@@ -134,7 +135,9 @@ namespace Arcane::ProjectHost
     {
         if (project && !project->Manifest().gameModule.empty())
         {
-            const std::string& mod = project->Manifest().gameModule;
+            // The manifest's authored name, in this platform's spelling
+            // (Name.dll -> Name.so off-Windows; identity on Windows).
+            const std::string mod = Arcane::Platform::NativeModuleFileName(project->Manifest().gameModule);
             std::error_code ec;
             const std::filesystem::path built = project->Root() / "Binaries" / mod;
             if (std::filesystem::exists(built, ec))
@@ -158,7 +161,7 @@ namespace Arcane::ProjectHost
         {
             if (!ref.enabled)
                 continue;
-            std::filesystem::path dll = project->Root() / "Plugins" / ref.name / "Binaries" / (ref.name + ".dll");
+            std::filesystem::path dll = project->Root() / "Plugins" / ref.name / "Binaries" / Arcane::Platform::ModuleFileName(ref.name);
             if (std::filesystem::exists(dll, ec))
                 out.push_back(std::move(dll));
         }

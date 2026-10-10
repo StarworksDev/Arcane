@@ -32,6 +32,14 @@ namespace Arcane
         // slash), so a naively-joined `rel` can escape `root`. Reject anything rooted
         // up front, then reject any ".."-climb that escapes the mount root once
         // joined and lexically normalized.
+        // An embedded scheme ("game://a://b") is malformed on EVERY platform.
+        // Windows rejects it below by accident of parsing ("a:" is a root
+        // name); POSIX would read "a:" as an ordinary directory and accept
+        // it, so the same mount path would be valid on one OS and not the
+        // other. Say it explicitly.
+        if (rel.find("://") != std::string_view::npos)
+            return std::nullopt;
+
         const std::filesystem::path relPath(rel);
         if (relPath.has_root_name() || relPath.has_root_directory())
             return std::nullopt;

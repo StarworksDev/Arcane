@@ -1,4 +1,5 @@
 #include <Arcane/Base/Runtime.hpp>
+#include <Arcane/Base/Engine.hpp>   // ExecutablePathUtf8: the exe directory off-Windows
 
 #include <Arcane/Assets/Assets.hpp>
 #include <Arcane/Config/Bindings/AstraBinding.hpp>
@@ -76,6 +77,9 @@ namespace Arcane
             wchar_t buf[MAX_PATH]{};
             if (GetModuleFileNameW(nullptr, buf, MAX_PATH) != 0)
                 return std::filesystem::path(buf).parent_path();
+#else
+            if (const std::string self = ExecutablePathUtf8(); !self.empty())
+                return std::filesystem::path(self).parent_path();
 #endif
             return std::filesystem::current_path();
         }

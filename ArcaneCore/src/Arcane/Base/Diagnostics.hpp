@@ -46,8 +46,15 @@
 // Reading it needs no debugger, which is the whole point -- the text file is
 // the artifact you paste into a bug report.
 //
-// Windows-only today; every entry point compiles and no-ops elsewhere so the
-// planned Linux port keeps linking.
+// Platforms: Windows (SEH, MiniDumpWriteDump; the backend inline in
+// Diagnostics.cpp) and Linux (fatal signals on a sigaltstack, a frame-pointer
+// walk, a Breakpad-format minidump as the `.dmp`; Base/Posix/, reached through
+// Base/DiagnosticsInternal.hpp). The Linux backend has no crash reporter or
+// monitor to hand off to yet (ArcaneCrashReporter is Windows-only): the
+// hand-off reports "failed" and launchMonitor is ignored with one line. On
+// Linux `ReportRequest::exceptionPointers` is the backend's own fault record
+// (only its signal handler passes one), and the console handler is
+// SIGINT/SIGTERM/SIGHUP. Every other platform compiles and no-ops.
 
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Base/DiagEnvelope.hpp>

@@ -339,3 +339,100 @@ TEST_CASE("a refused reference name records an empty search space", "[host][refe
     REQUIRE(res.level == Arcane::ReferenceLevel::None);
     REQUIRE(res.triedPaths.empty());   // refusal is not a search
 }
+
+// ---- the ADAPTER level (software rasterisers' own reference sets) ----------
+
+TEST_CASE("reference: only a SOFTWARE adapter names a reference set", "[reference]")
+{
+    CHECK(Arcane::ReferenceAdapterSet("vulkan", "NVIDIA GeForce RTX 4090", false).empty());
+    CHECK(Arcane::ReferenceAdapterSet("vulkan", "AMD Radeon RX 7900 XTX (RADV NAVI31)", false).empty());
+    // Mesa's lavapipe: the LLVM version in its name is not part of the key.
+    CHECK(Arcane::ReferenceAdapterSet("vulkan", "llvmpipe (LLVM 20.1.2, 256 bits)", true) == "vulkan-lavapipe");
+    CHECK(Arcane::ReferenceAdapterSet("vulkan", "llvmpipe (LLVM 17.0.6, 128 bits)", true) == "vulkan-lavapipe");
+    CHECK(Arcane::ReferenceAdapterSet("dx12", "Microsoft Basic Render Driver", true) == "dx12-warp");
+    CHECK(Arcane::ReferenceAdapterSet("vulkan", "SwiftShader Device (Subzero)", true) == "vulkan-software");
+    CHECK(Arcane::ReferenceNameIsSafe(Arcane::ReferenceAdapterSet("vulkan", "llvmpipe", true)));
+}
+
+TEST_CASE("reference: an adapter set's image WINS over the backend and shared images", "[reference]")
+{
+    const auto root = TempProject("adapter-wins");
+    const auto refs = root / "Verify" / "References";
+    WriteSolidPng(refs / "runtime-scene.png", 10);
+    WriteSolidPng(refs / "vulkan" / "runtime-scene.png", 20);
+    WriteSolidPng(refs / "vulkan-lavapipe" / "runtime-scene.png", 30);
+
+    const auto res = Arcane::ResolveReference(root, "runtime-scene", "vulkan", "vulkan-lavapipe");
+    CHECK(res.level == Arcane::ReferenceLevel::Adapter);
+    CHECK(res.path == refs / "vulkan-lavapipe" / "runtime-scene.png");
+    CHECK(res.blessTarget == res.path);
+    REQUIRE(res.triedPaths.size() == 1);
+
+    // No set (a hardware adapter) never sees the adapter level at all.
+    const auto hw = Arcane::ResolveReference(root, "runtime-scene", "vulkan", "");
+    CHECK(hw.level == Arcane::ReferenceLevel::Backend);
+    CHECK(hw.triedPaths.size() == 1);
+}
+
+TEST_CASE("reference: an adapter set falls through to compare, but blesses ONLY its own level",
+          "[reference]")
+{
+    const auto root = TempProject("adapter-fallthrough");
+    const auto refs = root / "Verify" / "References";
+    WriteSolidPng(refs / "editor-ui.png", 10);
+    WriteSolidPng(refs / "vulkan" / "runtime-scene.png", 20);
+
+    // Backend image, no set image: compared against the backend image...
+    const auto rt = Arcane::ResolveReference(root, "runtime-scene", "vulkan", "vulkan-lavapipe");
+    CHECK(rt.level == Arcane::ReferenceLevel::Backend);
+    CHECK(rt.path == refs / "vulkan" / "runtime-scene.png");
+    // ...but a bless writes the set's own image, never the hardware one.
+    CHECK(rt.blessTarget == refs / "vulkan-lavapipe" / "runtime-scene.png");
+    REQUIRE(rt.triedPaths.size() == 2);
+    CHECK(rt.triedPaths[0] == refs / "vulkan-lavapipe" / "runtime-scene.png");
+    CHECK(rt.triedPaths[1] == refs / "vulkan" / "runtime-scene.png");
+
+    // Shared image only: the same rule one level further down.
+    const auto ui = Arcane::ResolveReference(root, "editor-ui", "vulkan", "vulkan-lavapipe");
+    CHECK(ui.level == Arcane::ReferenceLevel::Shared);
+    CHECK(ui.blessTarget == refs / "vulkan-lavapipe" / "editor-ui.png");
+    CHECK(ui.triedPaths.size() == 3);
+
+    // Nothing anywhere: a first bless on the adapter still lands in its set.
+    const auto none = Arcane::ResolveReference(root, "fresh", "vulkan", "vulkan-lavapipe");
+    CHECK(none.level == Arcane::ReferenceLevel::None);
+    CHECK(none.blessTarget == refs / "vulkan-lavapipe" / "fresh.png");
+
+    // Blessing through the fall-through resolution leaves the hardware image alone.
+    std::vector<unsigned char> px(4 * 4 * 4, 99);
+    REQUIRE(Arcane::BlessReference(rt, 4, 4, px.data()));
+    Arcane::PixelData hwImage;
+    REQUIRE(Arcane::LoadPngRgba(refs / "vulkan" / "runtime-scene.png",
+                                hwImage.width, hwImage.height, hwImage.rgba));
+    CHECK(hwImage.rgba[0] == 20);
+    const auto after = Arcane::ResolveReference(root, "runtime-scene", "vulkan", "vulkan-lavapipe");
+    CHECK(after.level == Arcane::ReferenceLevel::Adapter);
+}
+
+TEST_CASE("reference: an unsafe adapter set is refused like an unsafe name", "[reference]")
+{
+    const auto root = TempProject("adapter-unsafe");
+    const auto res = Arcane::ResolveReference(root, "runtime-scene", "vulkan", "../escape");
+    CHECK(res.level == Arcane::ReferenceLevel::None);
+    CHECK(res.blessTarget.empty());
+    CHECK(res.triedPaths.empty());
+}
+
+TEST_CASE("reference: ResolveReferenceIn applies the same levels under any references directory",
+          "[reference]")
+{
+    const auto root = TempProject("resolve-in");
+    const auto thumbs = root / "Verify" / "References" / "thumbs";
+    WriteSolidPng(thumbs / "mesh-reference_cube.png", 10);
+    const auto res = Arcane::ResolveReferenceIn(thumbs, "mesh-reference_cube", "dx12", "");
+    CHECK(res.level == Arcane::ReferenceLevel::Shared);
+    CHECK(res.path == thumbs / "mesh-reference_cube.png");
+    const auto sw = Arcane::ResolveReferenceIn(thumbs, "mesh-reference_cube", "vulkan", "vulkan-lavapipe");
+    CHECK(sw.level == Arcane::ReferenceLevel::Shared);
+    CHECK(sw.blessTarget == thumbs / "vulkan-lavapipe" / "mesh-reference_cube.png");
+}

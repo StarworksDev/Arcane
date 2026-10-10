@@ -20,7 +20,10 @@ namespace arcbuild
         {
         case HostPlatform::Windows: return "vs2026";
         case HostPlatform::Linux:   return "gmake";
-        case HostPlatform::MacOS:   return "xcode4";
+        // macOS port (2026-10-07): gmake, the same Make backend as Linux --
+        // one POSIX build path, and the one the engine itself is built with.
+        // xcode4 stays a supported --action (an IDE build), not the default.
+        case HostPlatform::MacOS:   return "gmake";
         }
 
         return "";

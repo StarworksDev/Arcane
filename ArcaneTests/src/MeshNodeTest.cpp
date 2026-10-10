@@ -23,6 +23,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Arcane/Render/Nri/nodes/MeshNode.hpp>
+#include <Arcane/Platform/Platform.hpp>
 
 #include <Arcane/Assets/ImageCompare.hpp>
 #include <Arcane/Assets/ImageIo.hpp>
@@ -293,31 +294,56 @@ namespace
     constexpr std::uint32_t kParityW = 160;
     constexpr std::uint32_t kParityH = 96;
 
-    std::unique_ptr<Arcane::NriGraphContext> MakeParityContext()
+    // The parity vehicle OWNS its device pair, torn down in reverse
+    // (context, wrap, native) when the case's local goes out of scope.
+    //
+    // It used to keep the pair in function-local statics so one case's device
+    // outlived it until the next call reset it. That leaves the LAST case's
+    // device to a static destructor at process exit, which runs after
+    // everything registered later -- and the Vulkan validation layer is
+    // dlopened (its globals registered) only once the first device is
+    // created, so it was gone by then: vkDestroyDevice from __run_exit_handlers
+    // spun forever inside the layer's dispatch lookup (seen on Linux with
+    // VK_LAYER_KHRONOS_validation 1.4.328; the D3D12 debug layer let it pass).
+    struct ParityVehicle
+    {
+        std::unique_ptr<Arcane::NativeDeviceOwner> native;
+        std::unique_ptr<Arcane::NriDevice>         nri;
+        std::unique_ptr<Arcane::NriGraphContext>   ctx;
+
+        ParityVehicle() = default;
+        ParityVehicle(ParityVehicle&&) = default;
+        ParityVehicle& operator=(ParityVehicle&&) = delete;
+        ~ParityVehicle()
+        {
+            ctx.reset();      // WRAP BEFORE OWNER: the context borrows *nri,
+            nri.reset();      // which wraps *native -- releasing the owner first
+            native.reset();   // under a live wrap SIGSEGV'd the next case
+        }
+
+        Arcane::NriGraphContext* operator->() const noexcept { return ctx.get(); }
+        Arcane::NriGraphContext& operator*() const noexcept { return *ctx; }
+    };
+
+    ParityVehicle MakeParityContext()
     {
         Arcane::RenderDeviceDesc desc;
-        desc.backend = Arcane::GraphicsBackend::D3D12;
+        desc.backend = Arcane::Test::kNativeBackend;
 #if defined(ARC_BUILD_DEBUG)
         desc.enableValidation      = true;
         desc.enableD3D12DebugLayer = true;
         desc.enableSyncValidation  = true;
 #endif
-        static std::unique_ptr<Arcane::NativeDeviceOwner> native;
-        static std::unique_ptr<Arcane::NriDevice> nri;
-        // The previous case's pair goes first, WRAP BEFORE OWNER: reassigning
-        // `native` alone destroyed the old owner while the old `nri` still
-        // wrapped it, and the second MakeParityContext in a process SIGSEGV'd.
-        nri.reset();
-        native.reset();
-        native = Arcane::NativeDeviceOwner::Create(desc);
-        REQUIRE(native != nullptr);
-        nri = Arcane::NriDevice::Wrap(*native);
-        REQUIRE(nri != nullptr);
+        ParityVehicle v;
+        v.native = Arcane::NativeDeviceOwner::Create(desc);
+        REQUIRE(v.native != nullptr);
+        v.nri = Arcane::NriDevice::Wrap(*v.native);
+        REQUIRE(v.nri != nullptr);
         Arcane::HostConfig cfg;
-        cfg.backend = Arcane::GraphicsBackend::D3D12;
-        auto ctx = Arcane::NriGraphContext::CreateOffscreen(cfg, *nri, kParityW, kParityH, {});
-        REQUIRE(ctx != nullptr);
-        return ctx;
+        cfg.backend = Arcane::Test::kNativeBackend;
+        v.ctx = Arcane::NriGraphContext::CreateOffscreen(cfg, *v.nri, kParityW, kParityH, {});
+        REQUIRE(v.ctx != nullptr);
+        return v;
     }
 
     class ScopedEnvironmentValue
@@ -330,12 +356,22 @@ namespace
                 m_hadOld = true;
                 m_old = old;
             }
+#if ARC_PLATFORM_WINDOWS
             _putenv_s(name, value.c_str());
+#else
+            ::setenv(name, value.c_str(), 1);
+#endif
         }
 
         ~ScopedEnvironmentValue()
         {
+#if ARC_PLATFORM_WINDOWS
             _putenv_s(m_name, m_hadOld ? m_old.c_str() : "");
+#else
+            // _putenv_s(name, "") REMOVES the variable; POSIX spells that unsetenv.
+            if (m_hadOld) ::setenv(m_name, m_old.c_str(), 1);
+            else          ::unsetenv(m_name);
+#endif
         }
 
     private:
@@ -347,10 +383,10 @@ namespace
 
 TEST_CASE("mesh node: creation refuses when a fixed required shader artifact is missing", "[gpu][meshnode]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
 
     const std::filesystem::path source = Arcane::ShaderPaths::ResolveFlavorDir(
-        Arcane::GraphicsBackend::D3D12, "data/shaders");
+        Arcane::Test::kNativeBackend, "data/shaders");
     REQUIRE_FALSE(source.empty());
 
     const std::filesystem::path root = std::filesystem::temp_directory_path() / "arcane-task3-missing-mesh-artifact";
@@ -361,14 +397,14 @@ TEST_CASE("mesh node: creation refuses when a fixed required shader artifact is 
     REQUIRE(std::filesystem::remove(root / "dxil" / "mesh_masked_ps.bin"));
 
     Arcane::RenderDeviceDesc desc;
-    desc.backend = Arcane::GraphicsBackend::D3D12;
+    desc.backend = Arcane::Test::kNativeBackend;
     desc.enableValidation = Arcane::RenderDebugSettings{}.validation;   // the per-configuration default (on in Debug)
     auto native = Arcane::NativeDeviceOwner::Create(desc);
     REQUIRE(native != nullptr);
     auto nri = Arcane::NriDevice::Wrap(*native);
     REQUIRE(nri != nullptr);
     Arcane::HostConfig config;
-    config.backend = Arcane::GraphicsBackend::D3D12;
+    config.backend = Arcane::Test::kNativeBackend;
     {
         const ScopedEnvironmentValue shaderDir("ARCANE_SHADER_DIR", root.string());
         CHECK(Arcane::NriGraphContext::CreateOffscreen(config, *nri, 16, 16, {}) == nullptr);
@@ -380,7 +416,7 @@ TEST_CASE("mesh node: creation refuses when a fixed required shader artifact is 
 TEST_CASE("pixel: a cube drawn from the resident cache matches the ring's own pixels",
           "[gpu][meshnode]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     const std::uint64_t before = Arcane::RenderErrorCount();
 
     auto ctx = MakeParityContext();
@@ -445,7 +481,7 @@ TEST_CASE("pixel: a cube drawn from the resident cache matches the ring's own pi
 TEST_CASE("mesh node: ad-hoc instances past ScratchRows() are dropped by Prepare with ONE warn",
           "[gpu][meshnode][mesh][node]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     const std::uint64_t before = Arcane::RenderErrorCount();
 
     auto ctx = MakeParityContext();
@@ -513,7 +549,7 @@ TEST_CASE("mesh node: ad-hoc instances past ScratchRows() are dropped by Prepare
 TEST_CASE("pixel: an instance whose mesh is not resident is SKIPPED, not drawn wrong",
           "[gpu][meshnode]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     const std::uint64_t before = Arcane::RenderErrorCount();
 
     auto ctx = MakeParityContext();
@@ -557,7 +593,7 @@ TEST_CASE("pixel: an instance whose mesh is not resident is SKIPPED, not drawn w
 TEST_CASE("pixel: two sections of one mesh draw with distinct base colours",
           "[gpu][meshnode]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     auto ctx = MakeParityContext();
 
     // Two 1 m cubes as sections of ONE mesh, offset like NriGraphPixelTest's

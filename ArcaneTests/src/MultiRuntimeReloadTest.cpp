@@ -3,6 +3,7 @@
 // the re-registered factories; a reload is REFUSED while any attached Runtime
 // reports an active net driver (a test double until the replication arc).
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Plugin/PluginHost.hpp>
 #include <Arcane/Sim/NetDriver.hpp>
@@ -34,7 +35,7 @@ namespace
 
 TEST_CASE("snapshot-all / reload / restore-all across two live Runtimes", "[hotreload][netmode]")
 {
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll", std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"), std::filesystem::copy_options::overwrite_existing);
     Arcane::Runtime server(Arcane::Test::Process(), Arcane::NetMode::DedicatedServer);
     // The client world shares the primary's ComponentRegistry (spec s4) -- which is
     // what makes the cross-world snapshot/restore below meaningful: a registry of its
@@ -42,7 +43,7 @@ TEST_CASE("snapshot-all / reload / restore-all across two live Runtimes", "[hotr
     Arcane::Runtime client(Arcane::Test::Process(), Arcane::NetMode::Client, server.Components());
     server.Components()->RegisterComponent<Pulse>();
     server.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(server)); REQUIRE(host.AttachRuntime(client));
     REQUIRE(host.Load());
     // The module's OnInit creates its Pulse entity in the PRIMARY (server) world only;
@@ -53,7 +54,7 @@ TEST_CASE("snapshot-all / reload / restore-all across two live Runtimes", "[hotr
     const int serverPulse = ReadPulse(server);   // V1: +1 per step on the primary's own Pulse -> 2
     REQUIRE(serverPulse == 2);
 
-    std::filesystem::copy_file("../HotReloadPluginV2/HotReloadPluginV2.dll", "HotReloadPluginV1.dll", std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV2"), Arcane::Test::ModuleFile("HotReloadPluginV1"), std::filesystem::copy_options::overwrite_existing);
     REQUIRE(host.ForceReload());
     CHECK(ReadPulse(server) == 2);          // primary: module SaveState/LoadState round-trip
     CHECK(ReadPulse(client) == 100);        // secondary: registry snapshot/restore, untouched by the module's OnInit
@@ -62,7 +63,7 @@ TEST_CASE("snapshot-all / reload / restore-all across two live Runtimes", "[hotr
     StepAll(host, 1);
     CHECK(ReadPulse(server) == 12);         // V2's +10 ran on the restored primary world
     host.Unload();
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll", std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"), std::filesystem::copy_options::overwrite_existing);
 }
 
 TEST_CASE("hot reload is refused while any attached Runtime has an active net driver", "[hotreload][netmode]")
@@ -72,7 +73,7 @@ TEST_CASE("hot reload is refused while any attached Runtime has an active net dr
     a.Components()->RegisterComponent<Pulse>();
     a.Components()->RegisterComponent<RoleCounters>();
     FakeDriver drv; b.SetNetDriver(&drv);
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(a)); REQUIRE(host.AttachRuntime(b));
     REQUIRE(host.Load());
     const std::uint32_t gen = host.Generation();
@@ -96,7 +97,7 @@ TEST_CASE("DetachRuntime empties the leaving world: it drops out of every teardo
     Arcane::Runtime client(Arcane::Test::Process(), Arcane::NetMode::Client, server.Components());
     server.Components()->RegisterComponent<Pulse>();
     server.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(server)); REQUIRE(host.AttachRuntime(client));
     REQUIRE(host.Load());
 
@@ -126,7 +127,7 @@ TEST_CASE("DetachRuntime refuses the PRIMARY of a loaded host", "[hotreload][net
     Arcane::Runtime client(Arcane::Test::Process(), Arcane::NetMode::Client, server.Components());
     server.Components()->RegisterComponent<Pulse>();
     server.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(server)); REQUIRE(host.AttachRuntime(client));
     REQUIRE(host.Load());
     const std::uint32_t gen = host.Generation();

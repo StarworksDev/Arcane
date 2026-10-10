@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "Helpers/SettingsSweep.hpp"
+#include "Helpers/UserDataDirs.hpp"
 #include <Arcane/Config/ConsoleModel.hpp>
 #include "Settings/EditorConsoleSettings.hpp"
 #include "Settings/SettingsEdit.hpp"
@@ -99,10 +100,8 @@ TEST_CASE("sweep: a Console toolbar toggle replaces the loaded User record and i
     const std::filesystem::path local = std::filesystem::temp_directory_path() / "s6-41-console-toggle-archive";
     std::filesystem::remove_all(local);
     std::filesystem::create_directories(local);
-    std::wstring saved;
-    bool had = false;
-    if (const wchar_t* v = _wgetenv(L"LOCALAPPDATA")) { saved = v; had = true; }
-    _wputenv_s(L"LOCALAPPDATA", local.wstring().c_str());
+    Test::ScopedUserDataBase scopedUserData(local);
+    REQUIRE(scopedUserData.Ok());
     Editor::FlushSettingsArchives();   // whatever an earlier test left queued lands in the scratch folder
     REQUIRE_FALSE(Editor::SettingsHostArchivePending());
 
@@ -141,6 +140,5 @@ TEST_CASE("sweep: a Console toolbar toggle replaces the loaded User record and i
     CHECK(Settings<Editor::EditorConsoleSettings>().wrap);
     Editor::FlushSettingsArchives();
     CHECK_FALSE(Editor::SettingsHostArchivePending());
-    _wputenv_s(L"LOCALAPPDATA", had ? saved.c_str() : L"");
     std::filesystem::remove_all(local);
 }

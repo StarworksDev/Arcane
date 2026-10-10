@@ -2,6 +2,7 @@
 // swatches and the contrast warnings. The page writes cvars; the applier (S4-2)
 // re-themes, so these tests read the registry and the draw list.
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/UserDataDirs.hpp"
 #include "Settings/EditorThemeSettings.hpp"
 #include "Settings/SettingsHost.hpp"
 #include "Settings/SettingsModel.hpp"
@@ -146,10 +147,8 @@ TEST_CASE("Theme page: a swatch edit and a preset reach the debounced archive qu
     const std::filesystem::path local = std::filesystem::temp_directory_path() / "s4-theme-archive";
     std::filesystem::remove_all(local);
     std::filesystem::create_directories(local);
-    std::wstring saved;
-    bool had = false;
-    if (const wchar_t* v = _wgetenv(L"LOCALAPPDATA")) { saved = v; had = true; }
-    _wputenv_s(L"LOCALAPPDATA", local.wstring().c_str());
+    Arcane::Test::ScopedUserDataBase scopedUserData(local);
+    REQUIRE(scopedUserData.Ok());
     FlushSettingsArchives();   // whatever an earlier test left queued lands in the scratch folder
     REQUIRE_FALSE(SettingsHostArchivePending());
 
@@ -159,7 +158,12 @@ TEST_CASE("Theme page: a swatch edit and a preset reach the debounced archive qu
     CHECK_FALSE(SettingsHostArchivePending());
     bool archived = false;
     std::error_code ec;
-    for (const auto& e : std::filesystem::recursive_directory_iterator(local / "Arcane" / "Editor" / "Config", ec))
+    Arcane::Paths::Config paths;
+    paths.dist = false;
+    const auto editorConfig = Arcane::Paths::Resolve(Arcane::Paths::Location::EditorUserDir, paths) / "Config";
+    INFO("editor config dir " << editorConfig.string());
+    REQUIRE(Arcane::Test::IsUnder(editorConfig, local));   // the archive lands in the scratch base
+    for (const auto& e : std::filesystem::recursive_directory_iterator(editorConfig, ec))
         if (e.is_regular_file())
         {
             std::ifstream in(e.path());
@@ -174,7 +178,6 @@ TEST_CASE("Theme page: a swatch edit and a preset reach the debounced archive qu
 
     RevertEditorUser();
     FlushSettingsArchives();   // the reverted keys leave the scratch archive
-    _wputenv_s(L"LOCALAPPDATA", had ? saved.c_str() : L"");
     std::filesystem::remove_all(local);
 }
 

@@ -2,6 +2,7 @@
 // with the reporter staged beside it -- the copy WitnessScratch makes carries
 // ArcaneCrashReporter.exe, so the default reporterPath resolves inside the copy.
 #include "Helpers/HostWitness.hpp"
+#include <Arcane/Platform/Platform.hpp>   // ExecutableFileName: .exe on Windows only
 #include <Arcane/Base/DiagEnvelope.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -16,14 +17,14 @@ namespace
     std::filesystem::path StagedRuntimeDir()
     {
         const std::filesystem::path p = std::filesystem::absolute("../ArcaneRuntime");
-        REQUIRE(std::filesystem::exists(p / "ArcaneRuntime.exe"));
-        REQUIRE(std::filesystem::exists(p / "ArcaneCrashReporter.exe"));   // staged by the host's postbuild (task 4)
+        REQUIRE(std::filesystem::exists(p / Arcane::Platform::ExecutableFileName("ArcaneRuntime")));
+        REQUIRE(std::filesystem::exists(p / Arcane::Platform::ExecutableFileName("ArcaneCrashReporter")));   // staged by the host's postbuild (task 4)
         return p;
     }
     WitnessInvocation HostInv(const WitnessScratch& scratch, std::vector<std::string> extraArgs)
     {
         WitnessInvocation inv;
-        inv.exePath    = scratch.Dir() / "ArcaneRuntime.exe";
+        inv.exePath    = scratch.Dir() / Arcane::Platform::ExecutableFileName("ArcaneRuntime");
         inv.workingDir = scratch.Dir();
         inv.reportPath = scratch.Dir() / "witness-report.json";
         inv.args = { "--project", "ReferenceProject", "--headless", "--backend", "vulkan",

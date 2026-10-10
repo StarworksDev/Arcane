@@ -51,6 +51,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "ImGuiTestKeys.hpp"   // TestKeys::AddKeyEvent: Ctrl as this platform's user presses it
 
 using Arcane::Editor::DocServices;
 using Arcane::Editor::ShaderEditorDocument;
@@ -1759,10 +1760,10 @@ TEST_CASE("ShaderEditorDocument status: a recompile before the first lands (relo
 
 TEST_CASE("ShaderEditorDocument: the first non-null chromeGraph makes Tick build the preview vehicle exactly once", "[editor][material][preview][gpu]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     using Arcane::Editor::PreviewAvailability;
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(chrome != nullptr);
@@ -1792,10 +1793,10 @@ TEST_CASE("ShaderEditorDocument T3-D6: a MESH-surface material builds its previe
     // Before T3-D6 Tick refused a vehicle to every mesh surface ("an image
     // nothing ever draws"); now the tab/page draws it, so the vehicle is built
     // once and the status reports a bound image.
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     using Arcane::Editor::PreviewAvailability;
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(chrome != nullptr);
@@ -3285,9 +3286,9 @@ TEST_CASE("Node page s5.1.9: the page never creates, deletes, copies or pastes n
     h.Click(ImVec2(380.0f, 980.0f));                            // focus the page's window
     h.Key(ImGuiKey_Delete);
     ImGuiIO& io = ImGui::GetIO();
-    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, true);
     h.Key(ImGuiKey_C); h.Key(ImGuiKey_V); h.Key(ImGuiKey_D);
-    io.AddKeyEvent(ImGuiMod_Ctrl, false); h.Frame();
+    Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, false); h.Frame();
     CHECK(h.doc->PassGraph(0)->nodes.size() == count);
     CHECK_FALSE(h.stack.CanUndo());
 }

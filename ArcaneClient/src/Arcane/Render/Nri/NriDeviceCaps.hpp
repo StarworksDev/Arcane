@@ -13,6 +13,7 @@
 // once, no live nri::Device reference to keep alive.
 
 #include <cstdint>
+#include <string>
 
 namespace Arcane
 {
@@ -26,12 +27,24 @@ namespace Arcane
         std::uint32_t maxDescriptorSetUpdateAfterSetTextures = 0; // descriptorSet.updateAfterSet.textureMaxNum
         std::uint32_t maxPerStageUpdateAfterSetTextures = 0; // shaderStage.updateAfterSet.descriptorTextureMaxNum
 
+        // Adapter identity (adapterDesc.name / architecture). Read by the hosts'
+        // --compare to pick a software adapter's own reference set
+        // (Arcane::ReferenceAdapterSet) -- not a capability gate.
+        std::string  adapterName;
+        bool         softwareAdapter = false;               // adapterDesc.architecture == SOFTWARE
+
         [[nodiscard]] bool SupportsBindless() const noexcept { return bindlessTier > 0; }
+        // A table the device can build as update-after-set (MeshNode adds
+        // ALLOW_UPDATE_AFTER_SET exactly when SupportsTextureUpdateAfterSet
+        // holds) counts against the update-after-bind limits, not the plain
+        // ones (Vulkan: maxDescriptorSetSampledImages covers only sets WITHOUT
+        // the update-after-bind pool bit). MoltenVK is the case that tells
+        // them apart: 640/128 plain, 1000000/1000000 update-after-bind.
         [[nodiscard]] bool SupportsBindlessTextures(std::uint32_t required) const noexcept
         {
             return SupportsBindless()
-                && maxDescriptorSetTextures >= required
-                && maxPerStageTextures >= required;
+                && (SupportsTextureUpdateAfterSet(required)
+                    || (maxDescriptorSetTextures >= required && maxPerStageTextures >= required));
         }
         [[nodiscard]] bool SupportsTextureUpdateAfterSet(std::uint32_t required) const noexcept
         {

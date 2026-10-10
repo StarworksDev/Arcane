@@ -28,6 +28,7 @@ using SocketType = SOCKET;
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <unistd.h>
+#include <fcntl.h>      // fcntl/F_GETFL/F_SETFL/O_NONBLOCK (SetNonBlocking); glibc pulls nothing transitively
 #include <cerrno>
 using SocketType = int;
 #define INVALID_SOCK -1

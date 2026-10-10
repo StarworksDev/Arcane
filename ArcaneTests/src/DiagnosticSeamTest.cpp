@@ -30,6 +30,20 @@ namespace
                               std::vector<Arcane::Diagnostic>(diags.begin(), diags.end()));
     }
 
+    // Detaches the sink however the case exits. A failed REQUIRE throws past
+    // the case's own SetSink(nullptr, nullptr), which left `cap` (a stack
+    // local) installed: the NEXT Publish from any later case then wrote
+    // through a dangling pointer -- the Linux port's ArcaneTests SIGSEGV
+    // (inventory 2026-10-01 L6). The explicit detach lines stay; this is the
+    // backstop.
+    struct ScopedCaptureSink
+    {
+        explicit ScopedCaptureSink(Capture& cap) { Arcane::Diagnostics::SetSink(&CaptureSink, &cap); }
+        ~ScopedCaptureSink() { Arcane::Diagnostics::SetSink(nullptr, nullptr); }
+        ScopedCaptureSink(const ScopedCaptureSink&) = delete;
+        ScopedCaptureSink& operator=(const ScopedCaptureSink&) = delete;
+    };
+
     Arcane::Diagnostic MakeDiag(std::string code, Arcane::DiagSeverity sev)
     {
         Arcane::Diagnostic d;
@@ -44,7 +58,7 @@ namespace
 TEST_CASE("Diagnostics forwards a published set to the installed sink", "[diagnostics]")
 {
     Capture cap;
-    Arcane::Diagnostics::SetSink(&CaptureSink, &cap);
+    const ScopedCaptureSink sinkGuard(cap);
 
     const Arcane::Diagnostic diags[] = { MakeDiag("a.b", Arcane::DiagSeverity::Error) };
     Arcane::Diagnostics::Publish("scene:test", diags);
@@ -61,7 +75,7 @@ TEST_CASE("Diagnostics forwards a published set to the installed sink", "[diagno
 TEST_CASE("Diagnostics::Clear publishes an empty set for the key", "[diagnostics]")
 {
     Capture cap;
-    Arcane::Diagnostics::SetSink(&CaptureSink, &cap);
+    const ScopedCaptureSink sinkGuard(cap);
 
     Arcane::Diagnostics::Clear("scene:test");
 
@@ -82,7 +96,7 @@ TEST_CASE("Diagnostics with no sink installed is a silent no-op", "[diagnostics]
 TEST_CASE("Diagnostics::Publish is safe from multiple threads", "[diagnostics]")
 {
     Capture cap;
-    Arcane::Diagnostics::SetSink(&CaptureSink, &cap);
+    const ScopedCaptureSink sinkGuard(cap);
 
     constexpr int kThreads = 4;
     constexpr int kPerThread = 50;

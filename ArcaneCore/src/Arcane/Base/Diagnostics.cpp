@@ -3,6 +3,7 @@
 #include <Arcane/Base/CrashArena.hpp>     // the ONLY allocator the crash thread may use (spec S5.5)
 #include <Arcane/Core/Constant.hpp>
 #include <Arcane/Base/DiagEnvelope.hpp>   // Diag::Envelope -- the GPU provider's own field carrier
+#include <Arcane/Base/DiagnosticsInternal.hpp>   // the seam to the POSIX backend (Base/Posix/)
 #include <Arcane/Base/Engine.hpp>         // ExecutablePathUtf8(), BuildInfo()
 #include <Arcane/Base/ForeignModules.hpp> // ForeignModules::LastScan -- snapshotted OFF the crash path (R14)
 #include <Arcane/Base/Log.hpp>
@@ -48,9 +49,10 @@
 #include <crtdbg.h>   // _CrtSetReportMode/_CrtSetReportFile -- the Debug CRT's box, redirected to stderr
 #endif
 
-namespace Arcane::Diagnostics
-{
-namespace
+// The platform-neutral state and helpers live in Internal (declared in
+// DiagnosticsInternal.hpp) so the POSIX backend's TUs share them; the Win32
+// backend below keeps its own state in the anonymous namespace as before.
+namespace Arcane::Diagnostics::Internal
 {
     using Clock = std::chrono::steady_clock;
 
@@ -206,8 +208,6 @@ namespace
     // `ensure` comment). A HANDLE has no destructor and no such opinion.
 #if defined(_WIN32)
     HANDLE g_watchdogThread = nullptr;
-#else
-    std::thread g_watchdog;
 #endif
 
     // "The render layer has already CONFIRMED the GPU device is gone."
@@ -217,6 +217,25 @@ namespace
     // does with that device is post-mortem, and a re-armed device gets a
     // fresh process on the paths that matter (the hosts quit on the latch).
     std::atomic<bool> g_gpuDeviceLost{false};
+
+    // kReasonMax (DiagnosticsInternal.hpp) is platform-neutral: FormatReason
+    // sizes its per-thread buffer with it.
+
+    // The injected third-party modules (R14): one rendered line for the .txt
+    // and the base names for the envelope array. Guarded by its own mutex,
+    // which the crash thread only ever TRY-locks.
+    std::mutex  g_injectedMutex;
+    bool        g_injectedScanned = false;
+    char        g_injectedLine[2048]{};
+    char        g_injectedNames[kInjectedMax][64]{};
+    std::size_t g_injectedCount = 0;
+}   // namespace Arcane::Diagnostics::Internal
+
+namespace Arcane::Diagnostics
+{
+namespace
+{
+    using namespace Internal;
 
 #if defined(_WIN32)
     DWORD  g_mainThreadId = 0;
@@ -230,24 +249,8 @@ namespace
 
     // ---- crash thread -----------------------------------------------------
 
-    ARC_CONSTANT("crash-path capacity: a snapshotted path in UTF-8 bytes; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kPathMax    = 1024;   // UTF-8 bytes, generous vs MAX_PATH
-    ARC_CONSTANT("crash-path capacity: the crash reason text; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kReasonMax  = 1024;
-    ARC_CONSTANT("crash-path capacity: the walked stack frames; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kMaxFrames  = 96;
-    ARC_CONSTANT("crash-path capacity: the walked thread's text reservation; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kSectionRsv = 32 * 1024;   // the walked thread's text
-    ARC_CONSTANT("crash-path capacity: the .txt header reservation; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kHeaderRsv  = 8 * 1024;    // the .txt header
-    ARC_CONSTANT("crash-path capacity: one envelope's JSON reservation; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kEnvRsv     = 64 * 1024;   // one envelope's JSON
-    ARC_CONSTANT("crash-path capacity: the lean envelope's JSON reservation; the crash path cannot allocate or read cvars")
-    constexpr std::size_t kEnvLeanRsv = 8 * 1024;    // ...with the unbounded fields elided
-    // Worst case 8 + 32 + (64 + 8) + (64 + 8) = 184 KiB of
-    // CrashArena::kCapacity (256 KiB) -- both envelopes overrunning and
-    // both retrying lean -- which still leaves headroom rather than
-    // budgeting to the edge.
+    // kPathMax, kMaxFrames and the arena reserves: DiagnosticsInternal.hpp
+    // (ARC_CONSTANT lives on those declarations).
 
     // The one request in flight. Written by the SUBMITTING thread before it
     // signals, read by the crash thread after; the event pair is the
@@ -293,16 +296,7 @@ namespace
     char g_commandLineSnap[4096]{};
     char g_phaseSnap[256]{};
 
-    // The injected third-party modules (R14): one rendered line for the .txt
-    // and the base names for the envelope array. Guarded by its own mutex,
-    // which the crash thread only ever TRY-locks.
-    ARC_CONSTANT("crash-path capacity: the injected-module list the crash thread renders without allocating")
-    constexpr std::size_t kInjectedMax = 32;
-    std::mutex  g_injectedMutex;
-    bool        g_injectedScanned = false;
-    char        g_injectedLine[2048]{};
-    char        g_injectedNames[kInjectedMax][64]{};
-    std::size_t g_injectedCount = 0;
+    // The injected-module snapshot lives in Internal (shared with POSIX).
 
     // The reporter hand-off, prepared at Install: CreateProcessW needs a
     // WRITABLE command line, so the prefix lives here and the per-report
@@ -388,9 +382,13 @@ namespace
     EXCEPTION_RECORD g_walkedRecord{};
     bool             g_walkedContextValid = false;
 #endif
+}   // namespace
 
+namespace Internal
+{
     // The host exe's folder (the default report dir's parent), or "." when
-    // the exe path is unknown.
+    // the exe path is unknown. ReportDirFor (S7-SEC) refuses a dumpDir that
+    // could break the reporter command line and falls back to this folder.
     [[nodiscard]] std::filesystem::path HostExeDir()
     {
         const std::string exe = ExecutablePathUtf8();
@@ -429,7 +427,7 @@ namespace
         std::snprintf(out, cap, "%04u%02u%02u-%02u%02u%02u",
                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 #else
-        std::snprintf(out, cap, "unknown-time");
+        Posix::TimeStampForFilename(out, cap);
 #endif
     }
 
@@ -445,7 +443,7 @@ namespace
         std::snprintf(out, cap, "%04u-%02u-%02uT%02u:%02u:%02uZ",
                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 #else
-        std::snprintf(out, cap, "unknown-time");
+        Posix::TimestampUtcIso8601(out, cap);
 #endif
     }
 
@@ -493,7 +491,6 @@ namespace
         return "crash";
     }
 
-#if defined(_WIN32)
     // ---- fixed-storage snapshot helpers (all OFF the crash path) ----------
 
     void CopyInto(char* dst, std::size_t cap, const char* src) noexcept
@@ -505,81 +502,12 @@ namespace
         dst[n] = '\0';
     }
 
-    // UTF-8 -> UTF-16 into a caller buffer. No heap, no throw; an empty
-    // result on failure so a bad path simply fails the file open below.
-    const wchar_t* ToWide(const char* utf8, wchar_t* buf, int cap) noexcept
-    {
-        buf[0] = L'\0';
-        if (utf8 && *utf8)
-            MultiByteToWideChar(CP_UTF8, 0, utf8, -1, buf, cap);
-        return buf;
-    }
-    // ---- heap-free file IO ------------------------------------------------
-    // CreateFileW over a UTF-8 path converted in place: fopen's narrow path
-    // is ANSI on Windows, and std::ofstream/std::filesystem::path both
-    // allocate. Everything below runs on the crash thread.
-
-    HANDLE OpenForWrite(const char* utf8Path, bool append) noexcept
-    {
-        wchar_t wide[kPathMax];
-        ToWide(utf8Path, wide, static_cast<int>(kPathMax));
-        if (!wide[0]) return INVALID_HANDLE_VALUE;
-        return CreateFileW(wide,
-                           append ? FILE_APPEND_DATA : GENERIC_WRITE,
-                           FILE_SHARE_READ, nullptr,
-                           append ? OPEN_ALWAYS : CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    }
-
-    // Append to a file ANOTHER writer already holds open for writing -- the
-    // log file, which spdlog's live basic_file_sink_mt owns. OpenForWrite's
-    // FILE_SHARE_READ is not enough for that: a second open of a file held
-    // for WRITE must itself allow sharing for write, or CreateFileW fails
-    // with ERROR_SHARING_VIOLATION. FILE_APPEND_DATA keeps every write
-    // atomic at the current end of file, so interleaving with spdlog's own
-    // writes cannot overwrite them (plan 2, D9).
-    HANDLE OpenForAppendShared(const char* utf8Path) noexcept
-    {
-        wchar_t wide[kPathMax];
-        ToWide(utf8Path, wide, static_cast<int>(kPathMax));
-        if (!wide[0]) return INVALID_HANDLE_VALUE;
-        return CreateFileW(wide,
-                           FILE_APPEND_DATA,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    }
-
-    bool WriteAll(HANDLE h, std::string_view s) noexcept
-    {
-        if (h == INVALID_HANDLE_VALUE) return false;
-        const char* p = s.data();
-        std::size_t left = s.size();
-        while (left > 0)
-        {
-            const DWORD chunk = left > 0x04000000u ? 0x04000000u : static_cast<DWORD>(left);
-            DWORD wrote = 0;
-            if (!::WriteFile(h, p, chunk, &wrote, nullptr) || wrote == 0) return false;
-            p    += wrote;
-            left -= wrote;
-        }
-        return true;
-    }
-
-    bool WriteTwoParts(const char* utf8Path, std::string_view a, std::string_view b) noexcept
-    {
-        const HANDLE h = OpenForWrite(utf8Path, /*append*/false);
-        if (h == INVALID_HANDLE_VALUE) return false;
-        const bool ok = WriteAll(h, a) && (b.empty() || WriteAll(h, b));
-        CloseHandle(h);
-        return ok;
-    }
-
     // ---- hand-written envelope JSON ---------------------------------------
     // nlohmann allocates on every node, so the envelope the crash thread
     // writes is built by hand through the arena. Diag::Parse (lenient, and
     // the reporter's only reader) accepts exactly these keys -- keep this
-    // in step with DiagEnvelope.cpp's Serialize.
+    // in step with DiagEnvelope.cpp's Serialize. (EnvFields, EnvelopeJson
+    // and EnvelopeWrite are declared in DiagnosticsInternal.hpp.)
 
     [[nodiscard]] std::string_view SV(const char* s) noexcept
     {
@@ -670,27 +598,6 @@ namespace
         b.Append("\"");
     }
 
-    // Everything one envelope carries, as pointers into fixed storage / the
-    // arena. `gpu` is the provider's own Envelope (heap-backed, read-only
-    // here) or null for the minimal envelope written before it runs.
-    struct EnvFields
-    {
-        const char*      guid           = nullptr;
-        const char*      kind           = nullptr;
-        const char*      reason         = nullptr;
-        const char*      timestampUtc   = nullptr;
-        const char*      appName        = nullptr;
-        const char*      phase          = nullptr;
-        const char*      buildInfo      = nullptr;
-        std::string_view cpuThreadSummary;
-        const char*      siblingTxt     = nullptr;
-        const char*      siblingDmp     = nullptr;
-        const char*      siblingGpuDump = nullptr;
-        const char*      logPath        = nullptr;
-        const char*      commandLine    = nullptr;
-        int              exitCode       = 0;
-        const Diag::Envelope* gpu       = nullptr;
-    };
 
     // The injected-module snapshot, copied once per report so every step of
     // it reads the same list even if a Scan() lands mid-report (R14).
@@ -708,11 +615,6 @@ namespace
     // begin == cursor == end, which reads the same way). A body that fills
     // the reserve to the last byte exactly is treated as an overrun too --
     // conservative in the safe direction.
-    struct EnvelopeJson
-    {
-        std::string_view text;
-        bool             complete;
-    };
 
     // `elide` drops the two unbounded fields -- the stack text and
     // everything the GPU provider supplies -- so a LEAN envelope stays valid
@@ -812,9 +714,113 @@ namespace
         return { b.View(), b.cursor < b.end };
     }
 
-    // How an envelope write ended. NotWritten is what protects a valid
-    // envelope already on disk: the caller must NOT replace it.
-    enum class EnvelopeWrite { Written, WrittenElided, NotWritten };
+
+
+    // One consistent injected-module list for the whole report. TRY-lock
+    // only: a report must never block on a scan that is running, and a
+    // missing decoration is not worth a wedged crash path.
+    void CopyInjectedForReport() noexcept
+    {
+        std::unique_lock<std::mutex> lock(g_injectedMutex, std::try_to_lock);
+        if (!lock.owns_lock())
+        {
+            CopyInto(g_rptInjectedLine, sizeof(g_rptInjectedLine), "<snapshot unavailable>");
+            g_rptInjectedCount = 0;
+        }
+        else
+        {
+            CopyInto(g_rptInjectedLine, sizeof(g_rptInjectedLine),
+                     g_injectedScanned ? g_injectedLine : "<not scanned>");
+            g_rptInjectedCount = g_injectedCount;
+            for (std::size_t i = 0; i < g_rptInjectedCount; ++i)
+                CopyInto(g_rptInjectedNames[i], 64, g_injectedNames[i]);
+        }
+    }
+
+    // R95: the reports the hang protocol belongs to -- the host survives them
+    // (exit code 0) AND they are about a stall (spec s5.4's hang|gpu-stall).
+    // `kind` is DeriveKindCStr's static string, so strcmp is heap-free.
+    [[nodiscard]] bool IsHangProtocolReport(const char* kind, int exitCode) noexcept
+    {
+        return exitCode == 0 && kind &&
+               (std::strcmp(kind, "hang") == 0 || std::strcmp(kind, "gpu-stall") == 0);
+    }
+
+}   // namespace Internal
+
+namespace
+{
+#if defined(_WIN32)
+
+    // UTF-8 -> UTF-16 into a caller buffer. No heap, no throw; an empty
+    // result on failure so a bad path simply fails the file open below.
+    const wchar_t* ToWide(const char* utf8, wchar_t* buf, int cap) noexcept
+    {
+        buf[0] = L'\0';
+        if (utf8 && *utf8)
+            MultiByteToWideChar(CP_UTF8, 0, utf8, -1, buf, cap);
+        return buf;
+    }
+    // ---- heap-free file IO ------------------------------------------------
+    // CreateFileW over a UTF-8 path converted in place: fopen's narrow path
+    // is ANSI on Windows, and std::ofstream/std::filesystem::path both
+    // allocate. Everything below runs on the crash thread.
+
+    HANDLE OpenForWrite(const char* utf8Path, bool append) noexcept
+    {
+        wchar_t wide[kPathMax];
+        ToWide(utf8Path, wide, static_cast<int>(kPathMax));
+        if (!wide[0]) return INVALID_HANDLE_VALUE;
+        return CreateFileW(wide,
+                           append ? FILE_APPEND_DATA : GENERIC_WRITE,
+                           FILE_SHARE_READ, nullptr,
+                           append ? OPEN_ALWAYS : CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+
+    // Append to a file ANOTHER writer already holds open for writing -- the
+    // log file, which spdlog's live basic_file_sink_mt owns. OpenForWrite's
+    // FILE_SHARE_READ is not enough for that: a second open of a file held
+    // for WRITE must itself allow sharing for write, or CreateFileW fails
+    // with ERROR_SHARING_VIOLATION. FILE_APPEND_DATA keeps every write
+    // atomic at the current end of file, so interleaving with spdlog's own
+    // writes cannot overwrite them (plan 2, D9).
+    HANDLE OpenForAppendShared(const char* utf8Path) noexcept
+    {
+        wchar_t wide[kPathMax];
+        ToWide(utf8Path, wide, static_cast<int>(kPathMax));
+        if (!wide[0]) return INVALID_HANDLE_VALUE;
+        return CreateFileW(wide,
+                           FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+
+    bool WriteAll(HANDLE h, std::string_view s) noexcept
+    {
+        if (h == INVALID_HANDLE_VALUE) return false;
+        const char* p = s.data();
+        std::size_t left = s.size();
+        while (left > 0)
+        {
+            const DWORD chunk = left > 0x04000000u ? 0x04000000u : static_cast<DWORD>(left);
+            DWORD wrote = 0;
+            if (!::WriteFile(h, p, chunk, &wrote, nullptr) || wrote == 0) return false;
+            p    += wrote;
+            left -= wrote;
+        }
+        return true;
+    }
+
+    bool WriteTwoParts(const char* utf8Path, std::string_view a, std::string_view b) noexcept
+    {
+        const HANDLE h = OpenForWrite(utf8Path, /*append*/false);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        const bool ok = WriteAll(h, a) && (b.empty() || WriteAll(h, b));
+        CloseHandle(h);
+        return ok;
+    }
 
     // Build-and-write, with ONE bounded retry. Spec S5.5: on exhaustion the
     // crash thread writes what it has and SAYS SO -- what it must never do
@@ -1074,22 +1080,13 @@ namespace
     // calls only, no heap.
     //
     // R95 (fix round 1): the caller keys it on the KIND -- hang or gpu-stall,
-    // with exit code 0 (IsHangProtocolReport below) -- never on the exit code
+    // with exit code 0 (IsHangProtocolReport, Internal) -- never on the exit code
     // alone. Spec s5.4 scopes the protocol to the `--kind hang|gpu-stall`
     // spawn. A device-removed WriteReport("gpu-crash: ...") is exit-0 too, and
     // keyed on the exit code it was swallowed by a gpu-stall window's D12 gate
     // (the canonical TDR sequence) or, spawned first, blocked a later hang's.
     // Every other report gets a plain detached reporter whose handle is
     // closed: it is never gated by a hang window, and never gates one.
-    // R95: the reports the hang protocol belongs to -- the host survives them
-    // (exit code 0) AND they are about a stall (spec s5.4's hang|gpu-stall).
-    // `kind` is DeriveKindCStr's static string, so strcmp is heap-free.
-    [[nodiscard]] bool IsHangProtocolReport(const char* kind, int exitCode) noexcept
-    {
-        return exitCode == 0 && kind &&
-               (std::strcmp(kind, "hang") == 0 || std::strcmp(kind, "gpu-stall") == 0);
-    }
-
     [[nodiscard]] bool SpawnReporter(const char* stemUtf8, const char* kind, bool hangProtocol) noexcept
     {
         // Reset BEFORE the spawn gate, so a host with the spawn disabled (the
@@ -1176,25 +1173,8 @@ namespace
         arena.Reset();
         g_lastStemValid.store(false, std::memory_order_release);
 
-        // One consistent injected-module list for the whole report. TRY-lock
-        // only: a report must never block on a scan that is running, and a
-        // missing decoration is not worth a wedged crash path.
-        {
-            std::unique_lock<std::mutex> lock(g_injectedMutex, std::try_to_lock);
-            if (!lock.owns_lock())
-            {
-                CopyInto(g_rptInjectedLine, sizeof(g_rptInjectedLine), "<snapshot unavailable>");
-                g_rptInjectedCount = 0;
-            }
-            else
-            {
-                CopyInto(g_rptInjectedLine, sizeof(g_rptInjectedLine),
-                         g_injectedScanned ? g_injectedLine : "<not scanned>");
-                g_rptInjectedCount = g_injectedCount;
-                for (std::size_t i = 0; i < g_rptInjectedCount; ++i)
-                    CopyInto(g_rptInjectedNames[i], 64, g_injectedNames[i]);
-            }
-        }
+        // One consistent injected-module list for the whole report.
+        CopyInjectedForReport();
 
         // Paths. The report directory was snapshotted off-path; the stem is
         // "<dir>\<app>-<stamp>-pid<n>", the same spelling operator/ produced
@@ -1915,6 +1895,9 @@ namespace
         // R6: published so SubmitReport knows a report raised from HERE is
         // about the registered main thread, not about this one.
         g_watchdogThreadId.store(GetCurrentThreadId(), std::memory_order_release);
+#elif ARC_PLATFORM_POSIX
+        Posix::OnWatchdogThreadStart();
+        g_watchdogThreadId.store(Posix::CurrentThreadId(), std::memory_order_release);
 #endif
         const auto threshold = static_cast<double>(g_cfg.hangSeconds);
 
@@ -2077,6 +2060,8 @@ namespace
             // above both rules for that second reason. It covers the exit
             // deadline too: stepping through a teardown is not a hang at exit.
             if (IsDebuggerPresent()) continue;
+#elif ARC_PLATFORM_POSIX
+            if (Posix::DebuggerAttached()) continue;   // a ptrace tracer: gdb, lldb, rr
 #endif
 
             // A report is being written RIGHT NOW (the crash thread raises
@@ -2153,13 +2138,9 @@ namespace
         g_watchdogPaused.store(false, std::memory_order_release);
         g_watchdogThread = CreateThread(nullptr, 128 * 1024, &WatchdogThreadProc,
                                         nullptr, 0, nullptr);
-#else
-        if (!g_watchdog.joinable())
-        {
-            g_watchdogStop.store(false, std::memory_order_release);
-            g_watchdogPaused.store(false, std::memory_order_release);
-            g_watchdog = std::thread(&WatchdogMain);
-        }
+#elif ARC_PLATFORM_POSIX
+        // A raw pthread with the same orphan rule (Base/Posix/).
+        Posix::StartWatchdog(&WatchdogMain);
 #endif
     }
 
@@ -2194,8 +2175,8 @@ namespace
             }
             g_watchdogThread = nullptr;
         }
-#else
-        if (g_watchdog.joinable()) g_watchdog.join();
+#elif ARC_PLATFORM_POSIX
+        Posix::StopWatchdog();   // bounded, orphaning a watchdog parked mid-report
 #endif
         g_watchdogThreadId.store(0, std::memory_order_release);
     }
@@ -2900,6 +2881,11 @@ void Install(const Config& cfg)
     {
         g_consoleHandlerInstalled = true;
     }
+#elif ARC_PLATFORM_POSIX
+    // The same steps, the POSIX way (Base/Posix/DiagnosticsPosix.cpp): the
+    // fatal-signal family, the snapshots, the crash thread, the console
+    // signals. Reads g_cfg, already copied above.
+    Posix::Install();
 #endif
 
     if (cfg.startHangWatchdog)
@@ -2991,6 +2977,10 @@ void Shutdown() noexcept
     // joined just above and the watchdog (SignalRecovered) at the top.
     if (g_reporterProcess) { CloseHandle(g_reporterProcess); g_reporterProcess = nullptr; }
     if (g_recoveredEvent)  { CloseHandle(g_recoveredEvent);  g_recoveredEvent  = nullptr; }
+#elif ARC_PLATFORM_POSIX
+    // Console signals, the fatal-signal family, the snapshot signal and the
+    // crash thread -- restored, stopped and joined in the same order.
+    Posix::Shutdown();
 #endif
 
     // Neither the module table nor the log backlog may outlive this arming
@@ -3074,6 +3064,8 @@ void RetargetDumpDir(const std::filesystem::path& dir)
                      "two windows (the crash reporter's and the monitor's abnormal-exit report)",
                      previousReportDir, g_reportDirSnap);
     }
+#elif ARC_PLATFORM_POSIX
+    Posix::RetargetDumpDir();
 #endif
 }
 
@@ -3155,6 +3147,8 @@ void SetPhase(std::string phase)
     // std::string out would allocate and would take this same lock, and a
     // report must do neither.
     CopyInto(g_phaseSnap, sizeof(g_phaseSnap), g_phase.c_str());
+#elif ARC_PLATFORM_POSIX
+    Posix::SnapshotPhase(g_phase.c_str());
 #endif
 }
 
@@ -3173,6 +3167,8 @@ std::string LastReportStem()
 #if defined(_WIN32)
     if (!g_lastStemValid.load(std::memory_order_acquire)) return {};
     return std::string(g_lastStem);
+#elif ARC_PLATFORM_POSIX
+    return Posix::LastReportStem();
 #else
     return {};
 #endif
@@ -3180,7 +3176,8 @@ std::string LastReportStem()
 
 void SnapshotInjectedModules(std::span<const ForeignModules::Match> matches) noexcept
 {
-#if defined(_WIN32)
+    // Platform-neutral (the storage lives in Internal): every backend's
+    // report reads the same snapshot.
     std::lock_guard lock(g_injectedMutex);
     g_injectedScanned = true;
     g_injectedCount   = 0;
@@ -3213,9 +3210,6 @@ void SnapshotInjectedModules(std::span<const ForeignModules::Match> matches) noe
         if (g_injectedCount < kInjectedMax)
             CopyInto(g_injectedNames[g_injectedCount++], 64, m.module.c_str());
     }
-#else
-    (void)matches;
-#endif
 }
 
 void SubmitReport(const ReportRequest& request) noexcept
@@ -3331,8 +3325,12 @@ void SubmitReport(const ReportRequest& request) noexcept
 
     if (request.exitCode != 0)
         TerminateProcess(GetCurrentProcess(), request.exitCode);
+#elif ARC_PLATFORM_POSIX
+    // The same contract, the same steps -- crash thread, one deadline, a
+    // fatal report never returns (Base/Posix/DiagnosticsPosix.cpp).
+    Posix::SubmitReport(request);
 #else
-    // No report path off Windows yet; the CONTRACT still holds -- a fatal
+    // No report path on this platform; the CONTRACT still holds -- a fatal
     // submission ends the process rather than returning into a caller that
     // believes it died.
     if (request.exitCode != 0)
@@ -3366,6 +3364,10 @@ void GuaranteeStackForThisThread() noexcept
     // re-request.
     ULONG guarantee = 64 * 1024;
     SetThreadStackGuarantee(&guarantee);
+#elif ARC_PLATFORM_POSIX
+    // The POSIX reading of the same 64 KiB: a sigaltstack for this thread,
+    // so a SIGSEGV from an overflowed stack still has a stack to run on.
+    Posix::GuaranteeStackForThisThread();
 #endif
 }
 
@@ -3465,6 +3467,8 @@ bool SimulateConsoleCtrl(unsigned long ctrlType) noexcept
 {
 #if defined(_WIN32)
     return OnConsoleCtrl(static_cast<DWORD>(ctrlType)) != FALSE;
+#elif ARC_PLATFORM_POSIX
+    return Posix::SimulateConsoleCtrl(ctrlType);
 #else
     (void)ctrlType;
     return false;

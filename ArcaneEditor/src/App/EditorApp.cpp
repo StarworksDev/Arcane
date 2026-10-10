@@ -22,6 +22,8 @@
 //   EditorAppProject.cpp  Open Project, material/instance creation, the watcher.
 
 #include "App/EditorApp.hpp"
+#include <Arcane/Platform/Platform.hpp>
+
 #include "App/HostPresentation.hpp"   // HostPresentationFor: the splash/activation rule (T3-D6 fix round 1)
 #include "Settings/SettingsHost.hpp"
 #include "Settings/EditorRestart.hpp"
@@ -1756,9 +1758,11 @@ namespace Arcane::Editor
         // <EditorUserDir>\Layouts\Session\<project-guid>.ini ("default" for a
         // project-less session), resolved through Arcane::Paths (settings spec
         // s11.0). Settings S4 (spec s7.4): session layouts live in
-        // Layouts/Session; named layouts own Layouts/. Degraded, never broken:
-        // with LOCALAPPDATA unset or the folder unwritable, ImGui's exe-dir
-        // imgui.ini default stands.
+        // Layouts/Session; named layouts own Layouts/. Paths::UserRoot follows
+        // Platform::UserDataDirectory, so Linux is XDG and macOS is
+        // ~/Library/Application Support. Degraded, never broken: with the user
+        // dir unset or the folder unwritable, ImGui's exe-dir imgui.ini
+        // default stands.
         const std::filesystem::path dir = Arcane::Editor::SessionLayoutDir();
         if (dir.empty())
             return;
@@ -3445,6 +3449,7 @@ namespace Arcane::Editor
                     {
                         case Arcane::ReferenceLevel::Shared:  return "shared";
                         case Arcane::ReferenceLevel::Backend: return "backend";
+                        case Arcane::ReferenceLevel::Adapter: return "adapter";
                         default:                               return "none";
                     }
                 };
@@ -3500,7 +3505,7 @@ namespace Arcane::Editor
                     // the reference actually ended up.
                     const Arcane::ReferenceResolution after =
                         Arcane::ResolveReference(projectRoot, m_config.compareReference,
-                                                  backendName);
+                                                  backendName, m_compareAdapterSet);
                     resolvedLevel = levelName(after.level);
                     referencePath = after.path.string();
                     triedPaths    = stringifyTriedPaths(after.triedPaths);

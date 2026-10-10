@@ -14,6 +14,7 @@
 // cases as skipped, so a GPU-less runner says how many tests it did not run
 // instead of quietly running fewer.
 
+#include <Arcane/Platform/Platform.hpp>
 #include <Arcane/Render/GraphicsBackend.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -28,6 +29,21 @@ namespace Arcane::Test
 
     // The human name used in the skip message.
     [[nodiscard]] const char* BackendName(GraphicsBackend backend);
+
+    // The backend a case runs on when it is about the engine, not about one
+    // graphics API: D3D12 on Windows (where those cases were written and their
+    // expectations measured -- unchanged), Vulkan everywhere else, where D3D12
+    // does not exist. A case that IS about one API names it, in code and in its
+    // "(d3d12)"/"(vulkan)" title, and keeps skipping where that API is absent.
+    // kNativeBackendCli is the same choice in the hosts' --backend spelling,
+    // for the witness cases that spawn a host process.
+#if ARC_PLATFORM_WINDOWS
+    inline constexpr GraphicsBackend kNativeBackend    = GraphicsBackend::D3D12;
+    inline constexpr const char*     kNativeBackendCli = "dx12";
+#else
+    inline constexpr GraphicsBackend kNativeBackend    = GraphicsBackend::Vulkan;
+    inline constexpr const char*     kNativeBackendCli = "vulkan";
+#endif
 }
 
 // Skip the current test case, with a stated reason, when the backend is absent.

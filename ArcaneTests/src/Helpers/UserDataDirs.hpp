@@ -86,7 +86,9 @@ namespace Arcane::Test
     }
 
     // The OS per-user bases Paths reads: LOCALAPPDATA on Windows; XDG_DATA_HOME
-    // (UserRoot) and XDG_CONFIG_HOME (a Dist GameUserDir) elsewhere.
+    // (UserRoot) and XDG_CONFIG_HOME (a Dist GameUserDir) on Linux. macOS
+    // UserRoot is ~/Library/Application Support/Arcane, so HOME is redirected
+    // too; GameUserDir still follows XDG_CONFIG_HOME.
     using EnvString = std::filesystem::path::string_type;
 #if defined(_WIN32)
     inline constexpr const wchar_t* kUserDataEnv[] = { L"LOCALAPPDATA" };
@@ -99,8 +101,12 @@ namespace Arcane::Test
     {
         return _wputenv_s(name, value ? value->c_str() : L"") == 0;   // L"" removes it
     }
+#elif defined(__APPLE__)
+    inline constexpr const char* kUserDataEnv[] = { "XDG_DATA_HOME", "XDG_CONFIG_HOME", "HOME" };
 #else
     inline constexpr const char* kUserDataEnv[] = { "XDG_DATA_HOME", "XDG_CONFIG_HOME" };
+#endif
+#if !defined(_WIN32)
     inline std::optional<EnvString> GetUserDataEnv(const char* name)
     {
         if (const char* v = std::getenv(name)) return EnvString(v);

@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Arcane/Host/Verdict.hpp>
+#include <Arcane/Platform/Platform.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -17,11 +18,18 @@ using Arcane::Test::WitnessInvocation;
 using Arcane::Test::RunWitness;
 using Arcane::Test::GradeProcessFacts;
 
+// The platform's command interpreter: cmd.exe /c on Windows, /bin/sh -c on
+// POSIX (Linux port). Each case below spells its command in both dialects.
 static WitnessInvocation CmdInv(std::string cmdArg, std::filesystem::path reportPath = {})
 {
     WitnessInvocation inv;
+#if ARC_PLATFORM_WINDOWS
     inv.exePath    = "C:/Windows/System32/cmd.exe";
     inv.args       = { "/c", std::move(cmdArg) };
+#else
+    inv.exePath    = "/bin/sh";
+    inv.args       = { "-c", std::move(cmdArg) };
+#endif
     inv.workingDir = std::filesystem::temp_directory_path();
     inv.reportPath = std::move(reportPath);
     return inv;
@@ -36,7 +44,11 @@ TEST_CASE("witness: exit code is captured", "[witness-unit]")
 
 TEST_CASE("witness: hard cap kills and reports timedOut", "[witness-unit]")
 {
+#if ARC_PLATFORM_WINDOWS
     auto inv = CmdInv("ping -n 30 127.0.0.1 >nul");
+#else
+    auto inv = CmdInv("sleep 30");
+#endif
     inv.hardCapMs = 1500;
     auto run = RunWitness(inv);
     REQUIRE(run.timedOut);

@@ -148,10 +148,10 @@ namespace
 TEST_CASE("pixel: two meshes harvested through ONE preview vehicle each render their "
           "OWN geometry", "[gpu][thumbs]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
 
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(chrome != nullptr);
@@ -170,7 +170,7 @@ TEST_CASE("pixel: two meshes harvested through ONE preview vehicle each render t
         MaterialPreviewHarvester::Services s;
         s.chromeGraph = [&]() { return &chrome->Graph(); };
         s.hostConfig  = &cfg;
-        s.backend     = Arcane::GraphicsBackend::D3D12;
+        s.backend     = Arcane::Test::kNativeBackend;
         // No compiler and no source provider: a mesh asset compiles nothing, which
         // is the whole reason Subject::Mesh has no `pending` stage.
         s.resolveAsset = [&](const Guid& g) -> std::optional<fs::path>
@@ -374,51 +374,23 @@ namespace
     // THE BACKEND DIRECTORY NAME, not Arcane::ToString(backend). "dx12"/"vulkan"
     // is the CLI's spelling and therefore the one the reference hierarchy's
     // directories are named with (RuntimeApp.cpp's CompareBackendName says why
-    // the two spellings must not be conflated).
-    constexpr const char* kThumbBackendDir = "dx12";
+    // the two spellings must not be conflated). The native backend's: "dx12"
+    // on Windows, where the set was blessed.
+    constexpr const char* kThumbBackendDir = Arcane::Test::kNativeBackendCli;
 
     // ReferenceImages.hpp's resolution rule, applied under a thumbs/
-    // subdirectory. ResolveReference itself cannot be called: it hardcodes
-    // <root>/Verify/References and a reference NAME may not contain a
-    // separator (ReferenceNameIsSafe refuses '/'), so there is no argument that
-    // spells "one directory deeper". What IS reused is everything that matters
-    // -- the exported ReferenceNameIsSafe guard, the ReferenceResolution shape,
-    // the probe ORDER (backend override first, shared second), the "nothing
-    // resolved -> a first bless creates the SHARED image" rule, and
-    // BlessReference as the only writer. Only the two candidate paths are
-    // local, and they differ from ResolveReference's by one path component.
+    // subdirectory through ResolveReferenceIn -- the same probe order (adapter
+    // set, backend override, shared), the same "nothing resolved -> a first
+    // bless creates the SHARED image (or the adapter set's own)" rule, and
+    // BlessReference as the only writer. `adapterSet` is the vehicle device's
+    // Arcane::ReferenceAdapterSet: "" on hardware, e.g. "vulkan-lavapipe" on
+    // Mesa's CPU rasteriser, whose bless never touches the hardware images.
     Arcane::ReferenceResolution ResolveThumbReference(const fs::path& projectRoot,
-                                                      const std::string& name)
+                                                      const std::string& name,
+                                                      const std::string& adapterSet)
     {
-        Arcane::ReferenceResolution out;
-        if (!Arcane::ReferenceNameIsSafe(name) ||
-            !Arcane::ReferenceNameIsSafe(kThumbBackendDir))
-            return out;   // level None, blessTarget empty -- refused
-
-        const fs::path root   = projectRoot / "Verify" / "References" / "thumbs";
-        const fs::path keyed  = root / kThumbBackendDir / (name + ".png");
-        const fs::path shared = root / (name + ".png");
-
-        std::error_code ec;
-        out.triedPaths.push_back(keyed);
-        if (fs::exists(keyed, ec))
-        {
-            out.level = Arcane::ReferenceLevel::Backend;
-            out.path = keyed;
-            out.blessTarget = keyed;
-            return out;
-        }
-        out.triedPaths.push_back(shared);
-        if (fs::exists(shared, ec))
-        {
-            out.level = Arcane::ReferenceLevel::Shared;
-            out.path = shared;
-            out.blessTarget = shared;
-            return out;
-        }
-        out.level = Arcane::ReferenceLevel::None;
-        out.blessTarget = shared;
-        return out;
+        return Arcane::ResolveReferenceIn(projectRoot / "Verify" / "References" / "thumbs",
+                                          name, kThumbBackendDir, adapterSet);
     }
 
     bool ThumbBlessRequested()
@@ -432,10 +404,10 @@ namespace
 }
 
 TEST_CASE("golden: the harvester's own 64px renders of five ReferenceProject subjects "
-          "match their committed references at a zero budget (d3d12)",
+          "match their committed references at a zero budget (native backend)",
           "[gpu][thumbs][golden]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
 
     const bool bless = ThumbBlessRequested();
 
@@ -490,10 +462,14 @@ TEST_CASE("golden: the harvester's own 64px renders of five ReferenceProject sub
 
     // ---- THE VEHICLE ----------------------------------------------------
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(chrome != nullptr);
+    const Arcane::NriDeviceCaps& caps = chrome->Graph().Device().Caps();
+    const std::string adapterSet =
+        Arcane::ReferenceAdapterSet(kThumbBackendDir, caps.adapterName, caps.softwareAdapter);
+    INFO("adapter '" << caps.adapterName << "' -> reference set '" << adapterSet << "'");
 
     // Never the project's own Saved/Thumbnails: this case must not write into
     // the tracked source tree, and a scratch directory also guarantees every
@@ -506,7 +482,7 @@ TEST_CASE("golden: the harvester's own 64px renders of five ReferenceProject sub
     s.hostConfig  = &cfg;
     s.compiler    = &compiler;
     s.sources     = &sources;
-    s.backend     = Arcane::GraphicsBackend::D3D12;
+    s.backend     = Arcane::Test::kNativeBackend;
     s.resolveAsset = [proj](const Guid& g) -> std::optional<fs::path>
     {
         return proj->ResolveAsset(Arcane::AssetId::FromGuid(g));
@@ -593,19 +569,20 @@ TEST_CASE("golden: the harvester's own 64px renders of five ReferenceProject sub
             // Writes at the level the reference RESOLVED from -- an existing
             // backend override is overwritten in place, never flattened into
             // the shared slot, which is the host --bless rule this mirrors.
-            const auto target = ResolveThumbReference(sourceRoot, sub.reference);
+            const auto target = ResolveThumbReference(sourceRoot, sub.reference, adapterSet);
             REQUIRE_FALSE(target.blessTarget.empty());   // a refused name writes nothing
             REQUIRE(Arcane::BlessReference(target, actual.width, actual.height,
                                            actual.rgba.data()));
             WARN("thumbs bless: wrote " << target.blessTarget.string() << " ("
-                 << (target.level == Arcane::ReferenceLevel::Backend ? "backend"
-                     : target.level == Arcane::ReferenceLevel::Shared ? "shared"
-                                                                      : "new/shared")
+                 << (target.blessTarget != target.path ? "new"
+                     : target.level == Arcane::ReferenceLevel::Adapter ? "adapter"
+                     : target.level == Arcane::ReferenceLevel::Backend ? "backend"
+                                                                       : "shared")
                  << ")");
             continue;   // a bless run compares nothing, by design
         }
 
-        const auto resolved = ResolveThumbReference(stagedRoot, sub.reference);
+        const auto resolved = ResolveThumbReference(stagedRoot, sub.reference, adapterSet);
         if (resolved.level == Arcane::ReferenceLevel::None)
         {
             // A MISSING REFERENCE IS A REFUSAL, NOT A SILENT CREATE -- the lit

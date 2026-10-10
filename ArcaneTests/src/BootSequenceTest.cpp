@@ -104,7 +104,7 @@ TEST_CASE("the presenter keeps ticking while a worker stage overlaps", "[boot]")
     struct Counter final : Arcane::IBootPresenter
     {
         std::atomic<bool>* inFlight = nullptr;
-        int overlapTicks = 0;
+        std::atomic<int> overlapTicks{0};
         bool Present(const Arcane::BootProgress&) override
         {
             if (inFlight->load()) ++overlapTicks;
@@ -117,14 +117,18 @@ TEST_CASE("the presenter keeps ticking while a worker stage overlaps", "[boot]")
     stages.push_back(Stage("slow_worker", {}, [&]
     {
         workerInFlight = true;
-        // 60ms against the scheduler's 8ms pump cadence (BootSequence.cpp)
-        // yields roughly 7 in-flight ticks -- a >=3 floor leaves about 2x
-        // margin under the observed count even before accounting for a slow
-        // CI box, while still being unreachable by the starving scheduler
-        // (which produces 0 in-flight ticks: its one "waiting" tick lands
-        // before the freshly-dispatched worker thread has set the flag, and
-        // its one "done" tick lands after the worker already cleared it).
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        // The stage stays in flight until the presenter has ticked 3 times
+        // during it, or 2 s pass. The scheduler's 8ms pump cadence
+        // (BootSequence.cpp) gets there in ~25ms on a desk, and a slow CI VM
+        // (the macos-15 runner saw ONE tick in a fixed 60ms window) simply
+        // takes longer -- while the starving scheduler still never gets there
+        // (it produces 0 in-flight ticks: its one "waiting" tick lands before
+        // the freshly-dispatched worker thread has set the flag, and its one
+        // "done" tick lands after the worker already cleared it), so it waits
+        // out the deadline and fails the >= 3 check below.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (counter.overlapTicks.load() < 3 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         workerInFlight = false;
         return true;
     }, Arcane::BootThread::Worker));
@@ -133,7 +137,7 @@ TEST_CASE("the presenter keeps ticking while a worker stage overlaps", "[boot]")
     const Arcane::BootResult r = seq.Run(&counter);
 
     CHECK(r.ok);
-    CHECK(counter.overlapTicks >= 3);
+    CHECK(counter.overlapTicks.load() >= 3);
 }
 
 TEST_CASE("a dependency cycle is refused and names the offenders", "[boot]")

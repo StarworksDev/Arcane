@@ -91,9 +91,17 @@ namespace Arcane::Editor
             }
         if (m_threadIndex >= m_view.threads.size()) m_threadIndex = 0;
 
-        const std::chrono::time_zone* zone = nullptr;
+        const R::TimeZone* zone = nullptr;
+#if defined(ARC_HAS_TZDB)
         try { zone = std::chrono::current_zone(); } catch (...) { zone = nullptr; }   // no tzdb: fall back to the stem
+#endif
+#if defined(ARC_HAS_TZDB)
         const std::string stamp = R::FormatLocalStamp(m_envelope.timestampUtc, zone);
+#else
+        // No tzdb (Apple libc++): the C library's local zone stands in.
+        (void)zone;
+        const std::string stamp = R::FormatSystemLocalStamp(m_envelope.timestampUtc);
+#endif
         m_title = stamp.empty() ? m_path.stem().string() : m_view.headline + " -- " + stamp;
         m_windowLabel = m_title + "###crashdoc_" + m_envelope.guid.ToString();   // the id is unchanged
     }

@@ -4,7 +4,9 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <system_error>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -14,6 +16,20 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+// POSIX twin (Linux port, 2026-10-05): fork/execv + waitpid(WNOHANG) slices,
+// stdio redirected to files, /proc/<pid>/stat for the CPU sample, SIGKILL at
+// the hard cap -- the same observable facts the Windows half records.
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <thread>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <Arcane/Platform/Process.hpp>
+#endif
 #endif
 
 namespace Arcane::Test
@@ -209,6 +225,75 @@ namespace Arcane::Test
     }
 #endif
 
+#ifndef _WIN32
+    namespace
+    {
+        std::uint64_t FileSizeOrZero(const std::filesystem::path& p)
+        {
+            std::error_code ec;
+            const auto sz = std::filesystem::file_size(p, ec);
+            return ec ? 0 : static_cast<std::uint64_t>(sz);
+        }
+
+        // utime + stime in clock ticks (fields 14/15 of /proc/<pid>/stat) --
+        // the same "monotonic CPU scalar" ProcessCpu100ns is on Windows.
+        std::uint64_t ProcessCpuTicks(pid_t pid)
+        {
+#if defined(__APPLE__)
+            // No /proc on macOS: proc_pidinfo's task times, in nanoseconds
+            // (Platform::QueryProcess). Only ever compared with itself.
+            return Arcane::Platform::QueryProcess(static_cast<std::uint32_t>(pid)).cpuNs;
+#endif
+            std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+            std::string all((std::istreambuf_iterator<char>(f)), {});
+            const std::size_t close = all.rfind(')');   // comm may contain spaces
+            if (close == std::string::npos)
+                return 0;
+            std::istringstream rest(all.substr(close + 2));
+            std::string field;
+            std::uint64_t utime = 0, stime = 0;
+            for (int i = 3; i <= 15 && rest >> field; ++i)
+            {
+                if (i == 14) utime = std::strtoull(field.c_str(), nullptr, 10);
+                if (i == 15) stime = std::strtoull(field.c_str(), nullptr, 10);
+            }
+            return utime + stime;
+        }
+
+        // Same placement rule as the Windows ResolveStdioPaths: beside
+        // reportPath when one is given, else a unique per-run temp dir.
+        std::pair<std::filesystem::path, std::filesystem::path> ResolveStdioPaths(
+            const WitnessInvocation& inv)
+        {
+            std::error_code ec;
+            if (!inv.reportPath.empty())
+            {
+                const std::filesystem::path dir = inv.reportPath.parent_path();
+                if (!dir.empty())
+                    std::filesystem::create_directories(dir, ec);
+                const std::string stem = inv.reportPath.stem().string();
+                return { dir / (stem + ".stdout.txt"), dir / (stem + ".stderr.txt") };
+            }
+            static std::atomic<int> s_counter{ 0 };
+            const std::filesystem::path uniqueDir =
+                std::filesystem::temp_directory_path() / "arcane-witness-stdio" /
+                (std::to_string(::getpid()) + "-" +
+                 std::to_string(s_counter.fetch_add(1, std::memory_order_relaxed)));
+            std::filesystem::create_directories(uniqueDir, ec);
+            return { uniqueDir / "stdout.txt", uniqueDir / "stderr.txt" };
+        }
+
+        int ExitCodeOf(int status)
+        {
+            if (WIFEXITED(status))
+                return WEXITSTATUS(status);
+            if (WIFSIGNALED(status))
+                return 128 + WTERMSIG(status);   // the shell's convention
+            return -1;
+        }
+    }
+#endif
+
     WitnessRun RunWitness(const WitnessInvocation& inv)
     {
         WitnessRun run;
@@ -362,7 +447,128 @@ namespace Arcane::Test
             }
         }
 #else
-        (void)inv;
+        const auto [stdoutPath, stderrPath] = ResolveStdioPaths(inv);
+        run.stdoutPath = stdoutPath;
+        run.stderrPath = stderrPath;
+
+        // Everything the child needs is prepared BEFORE fork: only
+        // async-signal-safe calls run between fork and exec.
+        const std::string exe = inv.exePath.string();
+        std::vector<std::string> argStore;
+        argStore.reserve(inv.args.size() + 1);
+        argStore.push_back(exe);
+        for (const std::string& a : inv.args)
+            argStore.push_back(a);
+        std::vector<char*> argv;
+        for (std::string& a : argStore)
+            argv.push_back(a.data());
+        argv.push_back(nullptr);
+        const std::string cwd = inv.workingDir.string();
+
+        const int outFd = ::open(stdoutPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        const int errFd = ::open(stderrPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        const int nullFd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+        const auto start = std::chrono::steady_clock::now();
+        const pid_t pid = ::fork();
+        if (pid == 0)
+        {
+            // dup2 clears FD_CLOEXEC on the target descriptor.
+            if (nullFd >= 0) ::dup2(nullFd, STDIN_FILENO);   // the child never reads stdin
+            if (outFd >= 0)  ::dup2(outFd, STDOUT_FILENO);
+            if (errFd >= 0)  ::dup2(errFd, STDERR_FILENO);
+            if (!cwd.empty() && ::chdir(cwd.c_str()) != 0)
+                ::_exit(127);
+            ::execv(exe.c_str(), argv.data());
+            ::_exit(127);   // exec failed: the shell's "command not found" code
+        }
+        if (outFd >= 0)  ::close(outFd);
+        if (errFd >= 0)  ::close(errFd);
+        if (nullFd >= 0) ::close(nullFd);
+
+        if (pid > 0)
+        {
+            constexpr std::uint32_t kSliceMs = 250;
+            std::uint64_t elapsedMs      = 0;
+            std::uint64_t lastStdoutSize = 0;
+            std::uint64_t lastCpu        = 0;
+            bool          haveSample     = false;
+            int           status         = 0;
+            bool          exited         = false;
+
+            for (;;)
+            {
+                std::uint32_t waitMs = kSliceMs;
+                if (elapsedMs + kSliceMs >= inv.hardCapMs)
+                    waitMs = (inv.hardCapMs > elapsedMs)
+                                 ? static_cast<std::uint32_t>(inv.hardCapMs - elapsedMs)
+                                 : 0;
+
+                // waitpid has no timeout: poll WNOHANG in short steps across the slice.
+                const auto sliceEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+                pid_t w = 0;
+                for (;;)
+                {
+                    w = ::waitpid(pid, &status, WNOHANG);
+                    if (w != 0 || std::chrono::steady_clock::now() >= sliceEnd)
+                        break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                elapsedMs += waitMs;
+
+                if (w == pid)
+                {
+                    exited = true;
+                    break;
+                }
+                if (w < 0 && errno != EINTR)
+                    break;   // lost the child (should not happen): exitCode stays -1
+
+                const std::uint64_t curSize = FileSizeOrZero(run.stdoutPath);
+                const std::uint64_t curCpu  = ProcessCpuTicks(pid);
+                const bool stdoutGrew  = haveSample && (curSize > lastStdoutSize);
+                const bool cpuAdvanced = haveSample && (curCpu > lastCpu);
+                lastStdoutSize = curSize;
+                lastCpu        = curCpu;
+                haveSample     = true;
+
+                if (elapsedMs >= inv.hardCapMs)
+                {
+                    run.timedOut          = true;
+                    run.progressingAtKill = stdoutGrew || cpuAdvanced;
+                    ::kill(pid, SIGKILL);
+                    // Same bounded reap as the Windows half: never hang the suite.
+                    for (int i = 0; i < 600 && !exited; ++i)
+                    {
+                        if (::waitpid(pid, &status, WNOHANG) == pid)
+                            exited = true;
+                        else
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    break;
+                }
+            }
+            run.exitCode = exited ? ExitCodeOf(status) : -1;
+        }
+
+        run.wallMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start)
+                .count());
+
+        if (!inv.reportPath.empty())
+        {
+            std::error_code ec;
+            run.reportFound = std::filesystem::exists(inv.reportPath, ec);
+            if (run.reportFound)
+            {
+                std::ifstream rf(inv.reportPath, std::ios::binary);
+                nlohmann::json parsed = nlohmann::json::parse(rf, nullptr, false);
+                run.reportParsed = !parsed.is_discarded();
+                if (run.reportParsed)
+                    run.report = std::move(parsed);
+            }
+        }
 #endif
 
         return run;
@@ -383,7 +589,7 @@ namespace Arcane::Test
 #ifdef _WIN32
         const std::uint32_t pid = ::GetCurrentProcessId();
 #else
-        const std::uint32_t pid = 0;
+        const std::uint32_t pid = static_cast<std::uint32_t>(::getpid());
 #endif
         const std::filesystem::path root = std::filesystem::temp_directory_path() / "arcane-witness";
         m_dir = root / (scenarioName + "-" + std::to_string(pid));

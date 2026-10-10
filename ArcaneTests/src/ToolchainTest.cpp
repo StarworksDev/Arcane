@@ -15,6 +15,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <Arcane/Platform/Platform.hpp>
+
 #include <Arcane/Build/Toolchain.hpp>
 
 // TempDir (unique temp dir per SECTION run, removed by the guard) and
@@ -35,6 +37,12 @@ namespace
     {
         fs::create_directories(p.parent_path());
         std::ofstream(p.string()) << "x";
+#if !ARC_PLATFORM_WINDOWS
+        // POSIX FindOnPath only accepts a file with an executable bit (the
+        // PATHEXT analogue); a case that needs a NON-executable file sets
+        // its permissions explicitly after this.
+        fs::permissions(p, fs::perms::owner_all, fs::perm_options::replace);
+#endif
     }
 }
 
@@ -84,16 +92,16 @@ TEST_CASE("Toolchain::ResolvePremake returns the SDK's bundled premake, else a c
     TempDir sdk("premake");
     SECTION("bundled copy present")
     {
-        Touch(sdk.path / "ThirdParty" / "premake5" / "premake5.exe");
+        Touch(sdk.path / "ThirdParty" / "premake5" / Arcane::Platform::ExecutableFileName("premake5"));
         const fs::path found = Arcane::Toolchain::ResolvePremake(sdk.path);
-        CHECK(found.filename() == "premake5.exe");
+        CHECK(found.filename() == Arcane::Platform::ExecutableFileName("premake5"));
         CHECK(found.is_absolute());
         // lexically_normal'd: no "." / ".." elements survive.
         CHECK(found == found.lexically_normal());
     }
     SECTION("bundled copy present, sdkRoot given RELATIVE -- the answer is still absolute (the file's 'absolute or empty' contract)")
     {
-        Touch(sdk.path / "ThirdParty" / "premake5" / "premake5.exe");
+        Touch(sdk.path / "ThirdParty" / "premake5" / Arcane::Platform::ExecutableFileName("premake5"));
 
         // A relative sdkRoot only makes sense against the process cwd, so
         // enter the temp dir's parent for the scope and hand in the leaf.
@@ -105,17 +113,20 @@ TEST_CASE("Toolchain::ResolvePremake returns the SDK's bundled premake, else a c
         REQUIRE_FALSE(found.empty());
         CHECK(found.is_absolute());
         CHECK(found == found.lexically_normal());
-        CHECK(found == (sdk.path / "ThirdParty" / "premake5" / "premake5.exe").lexically_normal());
+        // equivalent(), not ==: the relative root resolves against the cwd,
+        // which the OS reports through any symlink (macOS's /var ->
+        // /private/var), so the spelling may differ while the file is the same.
+        CHECK(fs::equivalent(found, sdk.path / "ThirdParty" / "premake5" / Arcane::Platform::ExecutableFileName("premake5")));
     }
     SECTION("bundled copy absent -> the concrete PATH hit, never a bare 'premake5'")
     {
         TempDir onPath("premake_onpath");
-        Touch(onPath.path / "premake5.exe");
+        Touch(onPath.path / Arcane::Platform::ExecutableFileName("premake5"));
         EnvOverride path("PATH", onPath.path.string());
         EnvOverride pathExt("PATHEXT", ".COM;.EXE;.BAT;.CMD");
 
         const fs::path found = Arcane::Toolchain::ResolvePremake(sdk.path);
-        CHECK(found == (onPath.path / "premake5.exe").lexically_normal());
+        CHECK(found == (onPath.path / Arcane::Platform::ExecutableFileName("premake5")).lexically_normal());
         CHECK(found != fs::path("premake5"));
     }
     SECTION("neither bundled nor PATH has one -> empty, never an optimistic bare name")
@@ -132,13 +143,13 @@ TEST_CASE("Toolchain::ResolvePremake: the bundled copy wins even when PATH also 
 {
     TempDir sdk("premake_bundled_wins");
     TempDir onPath("premake_bundled_wins_path");
-    Touch(sdk.path / "ThirdParty" / "premake5" / "premake5.exe");
-    Touch(onPath.path / "premake5.exe");
+    Touch(sdk.path / "ThirdParty" / "premake5" / Arcane::Platform::ExecutableFileName("premake5"));
+    Touch(onPath.path / Arcane::Platform::ExecutableFileName("premake5"));
     EnvOverride path("PATH", onPath.path.string());
     EnvOverride pathExt("PATHEXT", ".COM;.EXE;.BAT;.CMD");
 
     const fs::path found = Arcane::Toolchain::ResolvePremake(sdk.path);
-    CHECK(found == (sdk.path / "ThirdParty" / "premake5" / "premake5.exe").lexically_normal());
+    CHECK(found == (sdk.path / "ThirdParty" / "premake5" / Arcane::Platform::ExecutableFileName("premake5")).lexically_normal());
 }
 
 TEST_CASE("Toolchain::ResolveMake/ResolveNinja are empty (not a bare name) when PATH has neither", "[build]")
@@ -154,11 +165,18 @@ TEST_CASE("Toolchain::ResolveMake/ResolveNinja are empty (not a bare name) when 
 TEST_CASE("Toolchain::ResolveNinja returns the concrete PATH hit when ninja IS there", "[build]")
 {
     TempDir onPath("ninja_onpath");
-    Touch(onPath.path / "ninja.exe");
+    // The on-disk tool is the platform's executable spelling: ninja.exe found
+    // through PATHEXT on Windows; ninja with its executable bit on POSIX
+    // (FindOnPath's POSIX contract skips a non-executable file).
+    const fs::path ninja = onPath.path / Arcane::Platform::ExecutableFileName("ninja");
+    Touch(ninja);
+#if !ARC_PLATFORM_WINDOWS
+    fs::permissions(ninja, fs::perms::owner_all, fs::perm_options::replace);
+#endif
     EnvOverride path("PATH", onPath.path.string());
     EnvOverride pathExt("PATHEXT", ".COM;.EXE;.BAT;.CMD");
 
-    CHECK(Arcane::Toolchain::ResolveNinja() == (onPath.path / "ninja.exe").lexically_normal());
+    CHECK(Arcane::Toolchain::ResolveNinja() == ninja.lexically_normal());
 }
 
 TEST_CASE("Toolchain::ResolveXcodeBuild is empty off macOS, even when something answers to the name on PATH",

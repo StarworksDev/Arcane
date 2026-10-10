@@ -7,6 +7,7 @@
 #include "Helpers/UserDataDirs.hpp"
 
 #include <Arcane/Base/Assert.hpp>
+#include <Arcane/Platform/Platform.hpp>
 #include <Arcane/Client/ClientRuntime.hpp>
 #include <Arcane/Render/AgilitySdk.hpp>
 #include <Astra/Core/TypeContext.hpp>
@@ -14,6 +15,7 @@
 #include <cstdio>
 
 // Agility SDK handshake: the exported version/path pair (Arcane/Render/AgilitySdk.hpp).
+// The macro is empty off Windows.
 ARC_AGILITY_SDK_EXPORTS();
 
 int main(int argc, char* argv[]) {

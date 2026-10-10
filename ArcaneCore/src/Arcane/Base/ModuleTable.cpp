@@ -7,6 +7,7 @@
 
 #include <Arcane/Base/ModuleTable.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -54,7 +55,11 @@ namespace Arcane::Diagnostics
             ModuleEntry& e = g_tables[inactive][i];
             e.base = modules[i].base;
             e.size = modules[i].size;
-            strncpy_s(e.name, modules[i].name.c_str(), _TRUNCATE);
+            // Portable spelling of strncpy_s(..., _TRUNCATE) (MSVC CRT only):
+            // copy at most sizeof-1 bytes and always NUL-terminate.
+            const std::size_t n = std::min(modules[i].name.size(), sizeof(e.name) - 1);
+            std::memcpy(e.name, modules[i].name.data(), n);
+            e.name[n] = '\0';
         }
         g_counts[inactive].store(count, std::memory_order_release);
 

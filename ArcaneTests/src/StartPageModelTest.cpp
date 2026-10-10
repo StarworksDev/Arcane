@@ -1,5 +1,7 @@
 // Start page (spec 2026-09-30 s8.4): the pure model the window draws.
 #include <catch2/catch_test_macros.hpp>
+
+#include <Arcane/Platform/Platform.hpp>
 #include "Project/StartPageModel.hpp"
 #include <ctime>
 
@@ -64,9 +66,17 @@ TEST_CASE("start page: the rows mirror the selection in order, and the hidden li
 TEST_CASE("start page: DialogStartDir is the parent of the first row's project folder", "[editor]")
 {
     CHECK(DialogStartDir(Sel({})).empty());
+#if ARC_PLATFORM_WINDOWS
     CHECK(DialogStartDir(Sel({ P("C:\\Games\\Alpha", "Alpha", 0) })) == "C:\\Games");                    // folder-shaped
     CHECK(DialogStartDir(Sel({ P("C:\\Games\\Alpha\\", "Alpha", 0) })) == "C:\\Games");                  // trailing separator
     CHECK(DialogStartDir(Sel({ P("C:\\Games\\Beta\\Beta.arcproj", "Beta", 0), P("D:\\x\\y", "y", 0) })) == "C:\\Games");   // .arcproj-shaped, first row wins
+#else
+    // The same three shapes in native POSIX paths: std::filesystem only treats
+    // '/' as a separator there, so "C:\\Games\\Alpha" is one file name.
+    CHECK(DialogStartDir(Sel({ P("/home/u/Games/Alpha", "Alpha", 0) })) == "/home/u/Games");                    // folder-shaped
+    CHECK(DialogStartDir(Sel({ P("/home/u/Games/Alpha/", "Alpha", 0) })) == "/home/u/Games");                   // trailing separator
+    CHECK(DialogStartDir(Sel({ P("/home/u/Games/Beta/Beta.arcproj", "Beta", 0), P("/x/y", "y", 0) })) == "/home/u/Games");   // .arcproj-shaped, first row wins
+#endif
 }
 
 TEST_CASE("start page: the appearance focus waits until it can land (docked, no modal), then fires once", "[editor]")

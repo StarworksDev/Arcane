@@ -9,6 +9,7 @@
 // reach it, SKIPping unless ARCANE_BUILD_DESK names a project directory.
 
 #include <cerrno>
+#include <Arcane/Platform/Platform.hpp>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -329,7 +330,7 @@ TEST_CASE("arcbuild default action is host-specific", "[build]")
 {
     CHECK(DefaultActionFor(HostPlatform::Windows) == "vs2026");
     CHECK(DefaultActionFor(HostPlatform::Linux) == "gmake");
-    CHECK(DefaultActionFor(HostPlatform::MacOS) == "xcode4");
+    CHECK(DefaultActionFor(HostPlatform::MacOS) == "gmake");
 }
 
 TEST_CASE("arcbuild::MakeCli + RequestFromCli carry every flag of spec s3", "[build]")
@@ -690,7 +691,7 @@ TEST_CASE("arcbuild slot inspection distinguishes a missing slot from an unreada
 
     SECTION("directory in place of module")
     {
-        fs::create_directories(project.root / "Binaries" / "Fixture.dll");
+        fs::create_directories(project.root / "Binaries" / Arcane::Platform::ModuleFileName("Fixture"));
         CHECK(inspector.Inspect(project, "Debug").state == SlotState::Unreadable);
     }
 }
@@ -738,7 +739,7 @@ TEST_CASE("arcbuild clean runs filesystem cleanup after a backend failure", "[bu
 TEST_CASE("arcbuild::SlotPath is <root>/Binaries/<gameModule>, empty for a content-only project", "[build]")
 {
     ProjectLayout project = AphelyonProject();
-    CHECK(SlotPath(project) == fs::path("D:/dev/starworks/Gacha/Game") / "Binaries" / "Aphelyon.dll");
+    CHECK(SlotPath(project) == fs::path("D:/dev/starworks/Gacha/Game") / "Binaries" / Arcane::Platform::ModuleFileName("Aphelyon"));
     project.gameModule.clear();
     CHECK(SlotPath(project).empty());
 }
@@ -746,7 +747,14 @@ TEST_CASE("arcbuild::SlotPath is <root>/Binaries/<gameModule>, empty for a conte
 TEST_CASE("arcbuild::SolutionPath: a discovered workspace file wins over the <name>.slnx convention", "[build]")
 {
     const ProjectLayout project = AphelyonProject();
-    CHECK(SolutionPath(project, "D:/dev/starworks/Gacha/Game/Other.sln") == fs::path("D:/dev/starworks/Gacha/Game/Other.sln"));
+    // An ABSOLUTE discovery is used as-is. "D:/..." is absolute only on
+    // Windows; POSIX spells an absolute path with a leading '/'.
+#if ARC_PLATFORM_WINDOWS
+    const fs::path discovered = "D:/dev/starworks/Gacha/Game/Other.sln";
+#else
+    const fs::path discovered = "/dev/starworks/Gacha/Game/Other.sln";
+#endif
+    CHECK(SolutionPath(project, discovered) == discovered);
     CHECK(SolutionPath(project, {}) == fs::path("D:/dev/starworks/Gacha/Game") / "Aphelyon.slnx");
     // ComposeMsBuild does not cd: a relative discovery is joined onto root
     // rather than assumed absolute (DiscoverSolution is absolute iff projectRoot is).
@@ -970,7 +978,7 @@ TEST_CASE("arcbuild::NinjaLinkOutput is Intermediate/<config>/Ninja/Binaries/<ga
     const ProjectLayout project = AphelyonProject();
 
     const fs::path debug = NinjaLinkOutput(project, "Debug");
-    CHECK(debug == fs::path("D:/dev/starworks/Gacha/Game") / "Intermediate" / "Debug" / "Ninja" / "Binaries" / "Aphelyon.dll");
+    CHECK(debug == fs::path("D:/dev/starworks/Gacha/Game") / "Intermediate" / "Debug" / "Ninja" / "Binaries" / Arcane::Platform::ModuleFileName("Aphelyon"));
     CHECK(NinjaLinkOutput(project, "Release").generic_string().find("/Intermediate/Release/Ninja/Binaries/") != std::string::npos);
 
     // Inside Intermediate/<config>/ -- the clean contract that makes a
@@ -995,8 +1003,8 @@ TEST_CASE("arcbuild::StageBuiltModule copies the built module (and its .pdb) ove
           "[build]")
 {
     TempDir root("stage_built_module");
-    const fs::path built = root.path / "Intermediate" / "Debug" / "Ninja" / "Binaries" / "Fixture.dll";
-    const fs::path slot  = root.path / "Binaries" / "Fixture.dll";
+    const fs::path built = root.path / "Intermediate" / "Debug" / "Ninja" / "Binaries" / Arcane::Platform::ModuleFileName("Fixture");
+    const fs::path slot  = root.path / "Binaries" / Arcane::Platform::ModuleFileName("Fixture");
 
     SECTION("built module + pdb -> slot + pdb, Binaries/ created on the way")
     {
@@ -1791,12 +1799,24 @@ TEST_CASE("arcbuild::BackendResolver turns an empty low-level tool lookup into a
         CHECK(result.error().find("Ninja") != std::string::npos);
     }
 
+#ifdef __APPLE__
+    // On a Mac the toolchain is never a PATH question: ResolveXcodeBuild
+    // takes /usr/bin/xcodebuild (the xcode-select shim every macOS has)
+    // first, so even the empty PATH above resolves it.
+    SECTION("XcodeBuild: the fixed /usr/bin shim, whatever PATH says")
+    {
+        const auto result = resolver.ResolveBuilder(BuildBackend::XcodeBuild);
+        REQUIRE(result.has_value());
+        CHECK(result->filename() == "xcodebuild");
+    }
+#else
     SECTION("XcodeBuild: no macOS toolchain to find")
     {
         const auto result = resolver.ResolveBuilder(BuildBackend::XcodeBuild);
         REQUIRE_FALSE(result.has_value());
         CHECK(result.error().find("xcodebuild") != std::string::npos);
     }
+#endif
 }
 
 TEST_CASE("arcbuild::BackendResolver reports a missing generated build context descriptively", "[build]")
@@ -2200,7 +2220,7 @@ TEST_CASE("arcbuild's bundled Premake characterizes real gmake/ninja/xcode4 outp
             for (std::string line; std::getline(ninjaFile, line);)
             {
                 if (line.rfind("build ", 0) == 0 &&
-                    line.find("Fixture.dll") != std::string::npos &&
+                    line.find(Arcane::Platform::ModuleFileName("Fixture")) != std::string::npos &&
                     line.find(": link_") != std::string::npos)
                 {
                     // "build <output> | <implicit outputs>: link_msc ..."

@@ -1,4 +1,5 @@
 #include <Arcane/Material/MaterialSource.hpp>
+#include <Arcane/Util/CharConv.hpp>   // FromChars: std::from_chars incl. floating point on every standard library
 
 #include <Arcane/Base/Assert.hpp>
 #include <Arcane/Material/GlobalParams.hpp>
@@ -54,7 +55,7 @@ namespace Arcane
             s = TrimView(s);
             if (s.empty())
                 return false;
-            const auto r = std::from_chars(s.data(), s.data() + s.size(), out);
+            const auto r = Arcane::FromChars(s.data(), s.data() + s.size(), out);
             return r.ec == std::errc() && r.ptr == s.data() + s.size();
         }
 

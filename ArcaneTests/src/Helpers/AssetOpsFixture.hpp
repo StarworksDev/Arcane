@@ -12,7 +12,7 @@
 // Tree reuses AssetOpsWorld's tree, registry and Facts() lambdas; only Host is a
 // second AssetFileOpHost (an accepted, plan-mandated exception).
 
-#include "Helpers/AssetFileOpsFakes.hpp"
+#include "AssetFileOpsFakes.hpp"   // same directory: GCC/Clang search only the includer's own dir, not its includers' (MSVC does)
 #include "Project/AssetFileOps.hpp"
 
 #include <Arcane/Edit/CommandStack.hpp>

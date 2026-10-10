@@ -22,7 +22,7 @@ namespace Arcane
     // what it needs.
     struct RenderDeviceDesc
     {
-        GraphicsBackend backend = GraphicsBackend::D3D12;   // render.backend
+        GraphicsBackend backend = kDefaultGraphicsBackend;   // D3D12 on Windows, Vulkan elsewhere
 
         // NRI validation layer + Vulkan validation (render.debug.validation).
         bool enableValidation = false;

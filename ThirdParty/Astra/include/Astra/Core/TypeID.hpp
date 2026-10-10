@@ -187,6 +187,15 @@ namespace Astra
             if (end == std::string_view::npos || end <= start)
                 return "Unknown";
 
+            #if defined(ASTRA_COMPILER_GCC)
+                // GCC lists the function's OTHER bindings after T, ';'-separated:
+                // "[with T = Arcane::Transform; std::string_view = std::basic_string_view<char>]".
+                // Without this cut every GCC type name (and so every TypeHash) carries
+                // that tail, and name-keyed lookups ("Arcane::Transform") never match.
+                if (const size_t semi = funcName.find(';', start); semi != std::string_view::npos && semi < end)
+                    end = semi;
+            #endif
+
             // Extract the type name
             std::string_view typeName = funcName.substr(start, end - start);
 

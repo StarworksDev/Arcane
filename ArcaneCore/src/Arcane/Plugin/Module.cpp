@@ -1,5 +1,6 @@
 #include <Arcane/Plugin/Module.hpp>
 
+#include <Arcane/Base/Engine.hpp>           // ExecutablePathUtf8 -- the application directory (POSIX bare-name search)
 #include <Arcane/Base/ForeignModules.hpp>   // ForeignModules::NoteOwned -- what we load ourselves is ours
 
 #include <algorithm>
@@ -20,8 +21,13 @@
     #endif
     #include <windows.h>
     #include <tlhelp32.h>
+#elif defined(__APPLE__)
+    #include <dlfcn.h>
+    #include <mach-o/dyld.h>     // the dyld image list: the loaded image's header + slide
+    #include <Arcane/Platform/Process.hpp>   // MachImageExtent: its LC_SEGMENT_64 extent
 #else
     #include <dlfcn.h>
+    #include <link.h>   // dlinfo(RTLD_DI_LINKMAP), dl_iterate_phdr: the loaded image's extent
 #endif
 
 namespace
@@ -106,12 +112,82 @@ namespace Arcane
             t_lastLoadError = "error " + std::to_string(err) + ": " + buf;
         }
 #else
-        NativeHandle handle = ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (!handle)
+        // A BARE file name ("HotReloadPluginV1.so"): dlopen would search only
+        // the loader's library path, while LoadLibraryW searches the
+        // application directory first. Mirror that order -- the exe's
+        // directory, then the current directory, then the system search -- so
+        // a host or test names a module beside itself the same way on both
+        // platforms. Any path with a directory part is used exactly as given.
+        std::filesystem::path resolved = path;
+        if (!path.empty() && !path.has_parent_path())
         {
-            const char* err = ::dlerror();
-            t_lastLoadError = err ? err : "dlopen failed";
+            std::error_code ec;
+            const std::string self = ExecutablePathUtf8();
+            const std::filesystem::path besideExe =
+                self.empty() ? std::filesystem::path{} : std::filesystem::path(self).parent_path() / path;
+            if (!besideExe.empty() && std::filesystem::exists(besideExe, ec))
+                resolved = besideExe;
+            else if (std::filesystem::exists(path, ec))
+                resolved = std::filesystem::path(".") / path;
         }
+        NativeHandle handle = ::dlopen(resolved.c_str(), RTLD_NOW | RTLD_LOCAL);
+
+        // The DEPENDENCY half of the same rule. The PE loader maps a module's
+        // own imports (a game module's ArcaneClient.dll) from the application
+        // directory too; ELF looks only at the module's RUNPATH,
+        // LD_LIBRARY_PATH and the system paths -- and a hot-reload copy runs
+        // from a temp directory, where $ORIGIN finds nothing. So when the
+        // failure names a missing DEPENDENCY that sits beside the exe, map it
+        // from there and retry: an already-loaded library satisfies a later
+        // DT_NEEDED by name. Bounded; anything else fails as before.
+        for (int attempt = 0; !handle && attempt < 8; ++attempt)
+        {
+            const char* raw = ::dlerror();
+            const std::string err = raw ? raw : "dlopen failed";
+            t_lastLoadError = err;
+
+#if defined(__APPLE__)
+            // dyld: "dlopen(<module>, 0x0002): Library not loaded:
+            // @rpath/<dependency>\n  Referenced from: ...". A Mach-O module
+            // names its engine dylibs by install name (@rpath/libX.dylib);
+            // the leaf is what sits beside the exe.
+            constexpr std::string_view kNotLoaded = "Library not loaded: ";
+            const std::size_t at = err.find(kNotLoaded);
+            if (at == std::string::npos)
+                break;
+            std::string dependency = err.substr(at + kNotLoaded.size());
+            dependency = dependency.substr(0, dependency.find_first_of("\r\n"));
+            if (const std::size_t slash = dependency.rfind('/'); slash != std::string::npos &&
+                dependency.rfind("@rpath/", 0) == 0)
+                dependency = dependency.substr(slash + 1);
+#else
+            // glibc: "<dependency>: cannot open shared object file: ..."
+            constexpr std::string_view kMissing = ": cannot open shared object file";
+            const std::size_t tail = err.find(kMissing);
+            if (tail == std::string::npos)
+                break;
+            const std::size_t head = err.rfind(": ", tail == 0 ? 0 : tail - 1);
+            const std::string dependency =
+                err.substr(head == std::string::npos ? 0 : head + 2,
+                           tail - (head == std::string::npos ? 0 : head + 2));
+#endif
+            const std::string self = ExecutablePathUtf8();
+            if (dependency.empty() || dependency.find('/') != std::string::npos || self.empty())
+                break;   // the module itself is missing, or the name is a path: not this rule
+            std::error_code ec;
+            const std::filesystem::path besideExe = std::filesystem::path(self).parent_path() / dependency;
+            if (!std::filesystem::exists(besideExe, ec))
+                break;
+            if (!::dlopen(besideExe.c_str(), RTLD_NOW | RTLD_LOCAL))
+            {
+                const char* depErr = ::dlerror();
+                t_lastLoadError = depErr ? depErr : err;
+                break;
+            }
+            handle = ::dlopen(resolved.c_str(), RTLD_NOW | RTLD_LOCAL);
+        }
+        if (handle)
+            t_lastLoadError.clear();
 #endif
         if (!handle)
             return std::nullopt;
@@ -140,11 +216,16 @@ namespace Arcane
 
     namespace
     {
-        Module::ImageSpan ImageFromHandle(void* handle) noexcept
+        // identityPath is the file the handle was opened from. Mach-O has no
+        // handle-to-image query; the dyld name can also disagree with the path
+        // we loaded (/private/var vs /var/folders on the macos-15 runner), so
+        // the Apple walk falls back to filesystem::equivalent against it.
+        Module::ImageSpan ImageFromHandle(void* handle, const std::filesystem::path& identityPath = {}) noexcept
         {
             if (!handle)
                 return {};
 #if defined(_WIN32)
+            (void)identityPath;
             // On Windows an HMODULE IS the image base. SizeOfImage is read straight
             // out of the mapped PE headers rather than via GetModuleInformation so
             // this costs no psapi link. Both signatures are checked because a bad
@@ -158,16 +239,96 @@ namespace Arcane
             if (nt->Signature != IMAGE_NT_SIGNATURE)
                 return {};
             return Module::ImageSpan{handle, static_cast<std::size_t>(nt->OptionalHeader.SizeOfImage)};
-#else
-            (void)handle;
+#elif defined(__APPLE__)
+            // Mach-O (macOS port, 2026-10-07): dyld has no handle -> image query,
+            // but a handle for an already-loaded image is exactly what dlopen
+            // returns for that image's own path with RTLD_NOLOAD (refcounted, so
+            // closed again). The matching image's LC_SEGMENT_64 commands, slid,
+            // span the mapped image (Platform::MachImageExtent) -- the Mach-O
+            // reading of PE's [base, base + SizeOfImage). No match is "unknown".
+            // equivalent() compares device + inode, which no symlink spelling of
+            // the path can defeat.
+            const std::uint32_t count = ::_dyld_image_count();
+            for (std::uint32_t i = 0; i < count; ++i)
+            {
+                const char* name = ::_dyld_get_image_name(i);
+                if (!name)
+                    continue;
+                bool match = false;
+                if (void* probe = ::dlopen(name, RTLD_LAZY | RTLD_NOLOAD))
+                {
+                    match = probe == handle;
+                    ::dlclose(probe);
+                }
+                if (!match && !identityPath.empty())
+                {
+                    std::error_code ec;
+                    match = std::filesystem::equivalent(std::filesystem::path(name), identityPath, ec) && !ec;
+                }
+                if (!match)
+                    continue;
+
+                const Arcane::Platform::ImageExtent extent =
+                    Arcane::Platform::MachImageExtent(::_dyld_get_image_header(i), ::_dyld_get_image_vmaddr_slide(i));
+                if (extent.size == 0)
+                    return {};
+                return Module::ImageSpan{ reinterpret_cast<const void*>(extent.base), static_cast<std::size_t>(extent.size) };
+            }
             return {};
+#else
+            (void)identityPath;
+            // ELF (Linux port, 2026-10-05): the object's link_map names its load
+            // bias (l_addr); dl_iterate_phdr then yields that same object's
+            // program headers, and the PT_LOAD segments' union IS the mapped
+            // image -- the ELF reading of PE's [base, base + SizeOfImage).
+            // Matched on BOTH the load bias and the link_map's name, so a
+            // mismatch is "unknown" (callers skip disowning) rather than a range
+            // that would disown another module's descriptors.
+            link_map* map = nullptr;
+            if (::dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || !map)
+                return {};
+
+            struct Query
+            {
+                const link_map*     map = nullptr;
+                Module::ImageSpan   span{};
+            } query{ map, {} };
+
+            ::dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* user) -> int
+            {
+                auto* q = static_cast<Query*>(user);
+                if (info->dlpi_addr != q->map->l_addr)
+                    return 0;
+                const char* a = info->dlpi_name ? info->dlpi_name : "";
+                const char* b = q->map->l_name ? q->map->l_name : "";
+                if (std::strcmp(a, b) != 0)
+                    return 0;
+
+                ElfW(Addr) lo = ~ElfW(Addr){ 0 };
+                ElfW(Addr) hi = 0;
+                for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i)
+                {
+                    const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+                    if (ph.p_type != PT_LOAD)
+                        continue;
+                    lo = std::min(lo, ph.p_vaddr);
+                    hi = std::max(hi, ph.p_vaddr + ph.p_memsz);
+                }
+                if (hi > lo)
+                {
+                    q->span.base = reinterpret_cast<const void*>(info->dlpi_addr + lo);
+                    q->span.size = static_cast<std::size_t>(hi - lo);
+                }
+                return 1;   // found the object: stop iterating
+            }, &query);
+            return query.span;
 #endif
         }
     }
 
     Module::ImageSpan Module::Image() const noexcept
     {
-        return ImageFromHandle(m_handle);
+        return ImageFromHandle(m_handle, m_path);
     }
 
     Module::ImageSpan Module::MappedImage(const std::filesystem::path& path) noexcept
@@ -179,7 +340,7 @@ namespace Arcane
         void* handle = ::dlopen(path.c_str(), RTLD_LAZY | RTLD_NOLOAD);
         if (!handle)
             return {};
-        const ImageSpan span = ImageFromHandle(handle);
+        const ImageSpan span = ImageFromHandle(handle, path);
         ::dlclose(handle);
         return span;
 #endif

@@ -8,14 +8,133 @@
 
 -- vcpkg required for SDL3 (platform layer; deep build system -> vcpkg per
 -- the repo rule). Overlay triplet x64-windows-static-md pins v143 + /MD.
+-- Linux/macOS (Linux port, 2026-10-05): SDL3 is NOT taken from vcpkg there --
+-- it comes from the system (pkg-config `sdl3`, e.g. a from-source install in
+-- /usr/local; Ubuntu 24.04 does not package SDL3). VCPKG_ROOT is therefore a
+-- Windows-target requirement only, and VCPKG_INSTALLED_MD is nil elsewhere.
 VCPKG_ROOT = os.getenv("VCPKG_ROOT")
+if os.target() == "windows" then
 if not VCPKG_ROOT then
     error("VCPKG_ROOT environment variable is not set.\nSet it to your vcpkg installation directory, e.g.:\n  setx VCPKG_ROOT C:\\vcpkg\nThen restart your terminal and re-run GenerateProjects.bat.")
 end
 VCPKG_INSTALLED_MD = VCPKG_ROOT .. "/installed/x64-windows-static-md"
+SDL3_INCLUDE_DIR = VCPKG_INSTALLED_MD .. "/include"
+else
+    -- `pkg-config --variable=includedir sdl3` names the include ROOT (the one
+    -- holding SDL3/SDL.h), which is what every <SDL3/...> include expects.
+    -- SDL3_ROOT (an install prefix) overrides it; neither -> the compiler's
+    -- default search path, which already covers /usr/include and /usr/local/include.
+    local sdlRoot = os.getenv("SDL3_ROOT")
+    if sdlRoot then
+        SDL3_INCLUDE_DIR = sdlRoot .. "/include"
+        SDL3_LIB_DIR     = sdlRoot .. "/lib"
+    else
+        local inc, ok = os.outputof("pkg-config --variable=includedir sdl3 2>/dev/null")
+        local lib = os.outputof("pkg-config --variable=libdir sdl3 2>/dev/null")
+        if inc and inc ~= "" then SDL3_INCLUDE_DIR = inc end
+        if lib and lib ~= "" then SDL3_LIB_DIR = lib end
+    end
+    SDL3_INCLUDE_DIR = SDL3_INCLUDE_DIR or "/usr/local/include"
+end
+
+-- ---- Per-target file-name spellings (Linux port, 2026-10-05) ---------------
+-- Every postbuild line below names a built binary. A Windows target keeps its
+-- exact historical spelling (Foo.dll / Foo.exe / {COPYDIR}); an ELF target
+-- spells the same artifact libFoo.so / Foo / a contents-copy. Premake's
+-- POSIX {COPYDIR} is a bare `cp -rf src dst`, which NESTS src inside dst on
+-- every build after the first (xcopy copies contents) -- hence arcane_copydir.
+ARCANE_WINDOWS = (os.target() == "windows")
+-- A workspace SharedLib that consumers LINK (ArcaneCore, ArcaneClient): ELF
+-- keeps premake's lib prefix so -lArcaneCore resolves.
+function arcane_shlib(name)
+    if ARCANE_WINDOWS then return name .. ".dll" end
+    if os.target() == "macosx" then return "lib" .. name .. ".dylib" end
+    return "lib" .. name .. ".so"
+end
+-- A LOADED module (game module, test plugin): no lib prefix anywhere, the
+-- platform's shared-library extension (Arcane::Platform::kSharedLibraryExtension).
+function arcane_module(name)
+    if ARCANE_WINDOWS then return name .. ".dll" end
+    if os.target() == "macosx" then return name .. ".dylib" end
+    return name .. ".so"
+end
+function arcane_exe(name)
+    return ARCANE_WINDOWS and (name .. ".exe") or name
+end
+function arcane_copydir(src, dst)
+    if ARCANE_WINDOWS then return '{COPYDIR} "' .. src .. '" "' .. dst .. '"' end
+    return 'mkdir -p "' .. dst .. '" && cp -rf "' .. src .. '/." "' .. dst .. '"'
+end
+-- A postbuild line that only means something on a Windows target (the crash
+-- reporter, the vendored dxc DLLs, the D3D12 Agility SDK). Returns false
+-- elsewhere; arcane_cmds drops the falses, so a Windows target's command list
+-- stays byte-identical, in its original order.
+function arcane_win(cmd)
+    if ARCANE_WINDOWS then return cmd end
+    return false
+end
+function arcane_posix(cmd)
+    if ARCANE_WINDOWS then return false end
+    return cmd
+end
+-- The runtime compile service's DXC library, staged beside a host/test exe
+-- when present (never vendored off-Windows). Linux: libdxcompiler.so +
+-- libdxil.so from scripts/fetch-dxc-linux.sh. macOS: libdxcompiler.dylib
+-- from the Vulkan SDK (scripts/fetch-vulkan-sdk-macos.sh links it into
+-- ThirdParty/tools/dxc-macos/); no libdxil -- a Mac emits SPIR-V only.
+function arcane_stage_dxc()
+    if ARCANE_WINDOWS then return false end
+    if os.target() == "macosx" then
+        return 'if [ -f "%{wks.location}/ThirdParty/tools/dxc-macos/lib/libdxcompiler.dylib" ]; then cp -fL "%{wks.location}/ThirdParty/tools/dxc-macos/lib/libdxcompiler.dylib" "%{cfg.buildtarget.directory}/"; fi'
+    end
+    return 'if [ -f "%{wks.location}/ThirdParty/tools/dxc-linux/lib/libdxcompiler.so" ]; then cp -f "%{wks.location}/ThirdParty/tools/dxc-linux/lib/libdxcompiler.so" "%{wks.location}/ThirdParty/tools/dxc-linux/lib/libdxil.so" "%{cfg.buildtarget.directory}/"; fi'
+end
+function arcane_cmds(list)
+    local out = {}
+    for _, c in ipairs(list) do
+        if c then table.insert(out, c) end
+    end
+    return out
+end
+
+-- imgui's IMGUI_API spelling per target. __declspec is a PE/COFF-only
+-- keyword: GCC rejects it outright on ELF and Clang needs -fdeclspec. ELF
+-- exports every default-visibility symbol (no import decoration exists), so
+-- the empty spelling is exact there while the workspace keeps default
+-- visibility (no -fvisibility=hidden).
+if ARCANE_WINDOWS then
+    ARCANE_IMGUI_EXPORT = "__declspec(dllexport)"
+    ARCANE_IMGUI_IMPORT = "__declspec(dllimport)"
+else
+    ARCANE_IMGUI_EXPORT = ""
+    ARCANE_IMGUI_IMPORT = ""
+end
+
+-- macOS port (2026-10-07): a Mac target builds for the HOST's architecture --
+-- arm64 on Apple Silicon (the supported Mac), x86_64 on an Intel Mac --
+-- overridable with ARCANE_MAC_ARCH=arm64|x86_64 (e.g. to cross-generate from
+-- Linux with --os=macosx). Every other target keeps "x64". premake reports
+-- ARM64 as %{cfg.architecture} = "AARCH64", so the Mac bin dirs are
+-- bin/<Config>-macosx-AARCH64-md (scripts/arcane-bin-dir.sh spells it once).
+-- build/arcane.lua carries the same rule so a game module matches its engine.
+function arcane_mac_architecture()
+    local want = os.getenv("ARCANE_MAC_ARCH")
+    if not want or want == "" then
+        if os.host() == "macosx" then
+            want = os.outputof("uname -m") or "arm64"
+        else
+            want = "arm64"
+        end
+    end
+    want = want:lower()
+    if want == "arm64" or want == "aarch64" then return "ARM64" end
+    if want == "x86_64" or want == "x64" then return "x86_64" end
+    error("ARCANE_MAC_ARCH must be arm64 or x86_64, got '" .. want .. "'")
+end
+ARCANE_ARCH = (os.target() == "macosx") and arcane_mac_architecture() or "x64"
 
 workspace "Arcane"
-    architecture "x64"
+    architecture(ARCANE_ARCH)
     startproject "ArcaneTests"
     configurations { "Debug", "Release", "Dist" }
     multiprocessorcompile "On"
@@ -26,6 +145,33 @@ workspace "Arcane"
         buildoptions { "/utf-8", "/arch:AVX2" }   -- AVX2 is the x86 min-spec for the engine (Arcane::Simd)
     filter { "system:linux or system:macosx", "architecture:x86_64" }
         buildoptions { "-mavx2", "-mfma" }         -- gcc/clang x64 parity; ARM port supplies NEON flags later
+    -- ELF: every static lib that links INTO a shared object (enkiTS +
+    -- Manifold2D into libArcaneCore.so, NRI/imgui/freetype/msdfgen into
+    -- libArcaneClient.so) must be position-independent, or ld refuses the
+    -- relocation (R_X86_64_TPOFF32 against enkiTS's thread_local, first).
+    -- -ffp-contract=off: the determinism rule. MSVC's /fp:strict never fuses
+    -- a*b+c; GCC/Clang with -mfma do by default (premake's floatingpoint
+    -- "Strict" gives GCC only the x87-only -ffloat-store and Clang nothing),
+    -- which would diverge the physics parity tests and goldens.
+    filter "system:not windows"
+        pic "On"
+        buildoptions { "-ffp-contract=off", "-fno-fast-math" }
+        -- The crash path walks a FOREIGN thread's stack (a faulting thread
+        -- parked in its signal handler, a hung main thread) by its frame-
+        -- pointer chain (Base/PortableStack.cpp): ELF has no PE-style
+        -- RtlVirtualUnwind over an arbitrary context, and a DWARF unwinder
+        -- for one is a libunwind-sized dependency. Kept in every config, as
+        -- Ubuntu 24.04 and Fedora now do distro-wide; the cost is one
+        -- register, low single-digit percent at worst.
+        buildoptions { "-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer" }
+        -- $ORIGIN FIRST: the staged layout (libArcaneCore.so/libArcaneClient.so
+        -- beside the exe) must win, exactly as the PE loader searches the exe
+        -- directory first -- otherwise the dev-tree bin/<cfg>/ArcaneCore copy
+        -- loads and the injected-module census calls the engine foreign.
+        -- runpathdirs (unlike linkoptions) is emitted AHEAD of the
+        -- ../ArcaneCore-style entries premake adds for linked siblings, which
+        -- stay as the fallback for an unstaged tool.
+        runpathdirs { "%{cfg.targetdir}" }
     filter {}
 
     -- C4251 ("needs to have dll-interface"): disabled workspace-wide, deliberately.
@@ -36,7 +182,11 @@ workspace "Arcane"
     -- structurally impossible here. The "real" fixes (pimpl-everything, function-
     -- only exports) buy nothing under that contract; Unreal ships with 4251
     -- disabled engine-wide for the same reason.
-    disablewarnings { "4251" }
+    -- MSVC-numbered, so MSVC-only: premake passes it through verbatim to
+    -- GCC/Clang as -Wno-4251 (Clang: -Wunknown-warning-option on every TU).
+    filter "system:windows"
+        disablewarnings { "4251" }
+    filter {}
 
     -- Each module's own name, for the cvar registry's module capture (settings
     -- spec s4.3/s4.4, O1): Arcane/Config/CVarModule.hpp stringizes it, so an
@@ -56,16 +206,16 @@ workspace "Arcane"
     THIRDPARTY_PROJECT_LOCATION = "ide-md"
     -- imgui wrapper: SDL3 backend includes come from the same vcpkg -md install
     -- used by the rest of the workspace (identical path to IncludeDir["SDL3"]).
-    THIRDPARTY_SDL3_INCLUDE     = VCPKG_INSTALLED_MD .. "/include"
+    THIRDPARTY_SDL3_INCLUDE     = SDL3_INCLUDE_DIR
     -- imgui lives inside ArcaneClient.dll (ImGuiLayer + the frame graph's ImGuiNriNode).
     -- Export it so GImGui and the sdl3 backend symbols live in ONE module:
     -- the imgui static lib builds with dllexport, the DLL's own TUs match,
     -- and consumers (ArcaneTests/ArcaneRuntime) import. Without this each module
     -- keeps its own null GImGui and ShowDemoWindow() from the test exe asserts.
-    THIRDPARTY_IMGUI_API        = "__declspec(dllexport)"
+    THIRDPARTY_IMGUI_API        = ARCANE_IMGUI_EXPORT
     -- imgui-node-editor links into ArcaneEditor.exe, which IMPORTS imgui from
     -- ArcaneClient.dll -- its ImGui calls must be dllimport (see the wrapper).
-    THIRDPARTY_NODE_EDITOR_IMGUI_API = "__declspec(dllimport)"
+    THIRDPARTY_NODE_EDITOR_IMGUI_API = ARCANE_IMGUI_IMPORT
 
     IncludeDir = {}
     IncludeDir["ArcaneCore"]       = "%{wks.location}/ArcaneCore/src"
@@ -89,7 +239,7 @@ workspace "Arcane"
     IncludeDir["DirectXHeaders"]   = "%{wks.location}/ThirdParty/DirectX-Headers/include"
     IncludeDir["VMA"]              = "%{wks.location}/ThirdParty/VMA/include"
     IncludeDir["D3D12MA"]          = "%{wks.location}/ThirdParty/D3D12MA/include"
-    IncludeDir["SDL3"]             = VCPKG_INSTALLED_MD .. "/include"
+    IncludeDir["SDL3"]             = SDL3_INCLUDE_DIR
     IncludeDir["imgui"]            = "%{wks.location}/ThirdParty/imgui"
     IncludeDir["imguinodeeditor"]  = "%{wks.location}/ThirdParty/imgui-node-editor"
     IncludeDir["Manifold2D"]       = "%{wks.location}/ThirdParty/Manifold2D/include"
@@ -186,6 +336,27 @@ project "ArcaneCore"
         -- user32/gdi32: Platform/NativeWindow.cpp (crash window plan 2) --
         -- explicit rather than inherited from the VS default list.
         links { "dbghelp", "user32", "gdi32" }
+        -- The POSIX backend of Diagnostics (signals, the snapshot signal, the
+        -- Breakpad-format minidump) never builds into a PE image.
+        removefiles { "%{prj.location}/src/Arcane/Base/Posix/**" }
+
+    -- ELF: dlopen/dladdr (Module, ForeignModules) and threads; -z defs makes
+    -- an unresolved symbol a link error HERE, not at the first exe link.
+    -- Hidden visibility (inventory G1): the PE model, where a DLL exports
+    -- ONLY what ARCANE_CORE_API marks and every header-defined static (the
+    -- spdlog registry, Logger's sink stack, Astra's per-module statics) is
+    -- the module's own. With default visibility ELF exported ~59k symbols
+    -- and silently unified those statics across the exe and both engine
+    -- .so's -- state the engine's Windows-designed cross-module seams
+    -- (SharedTypeContext, Log::Engine) assume is per-module.
+    filter "system:not windows"
+        links { "dl", "pthread" }
+        visibility "Hidden"
+        inlinesvisibility "Hidden"
+    -- Mach-O's ld64 already refuses undefined symbols in a dylib by default
+    -- (-undefined error); -z defs is a GNU ld spelling it rejects.
+    filter "system:linux"
+        linkoptions { "-Wl,-z,defs" }
 
     filter "configurations:Debug"
         defines { "ARC_BUILD_DEBUG" }
@@ -323,9 +494,9 @@ project "arccook"
 
     -- Core-DLL split: ArcaneCore is a DLL now, loaded from this exe's own
     -- directory (dev bin layout: bin/<cfg>/arccook/).
-    postbuildcommands {
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-    }
+    postbuildcommands(arcane_cmds {
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+    })
 
     defines {
         "_CRT_SECURE_NO_WARNINGS",
@@ -409,9 +580,9 @@ project "arcbuild"
     -- The driver loads ArcaneCore.dll from its own directory (dev bin
     -- layout: bin/<cfg>/arcbuild/); a packaged layout ships it beside the
     -- editor, where the DLL already is.
-    postbuildcommands {
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-    }
+    postbuildcommands(arcane_cmds {
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+    })
 
     filter "system:windows"
         systemversion "latest"
@@ -502,12 +673,11 @@ end   -- arcbuild-process-fixture: Windows target only (Task 6)
 -- own include root plus the two vendored header-only deps those headers
 -- pull in transitively (spdlog via Log.hpp, Mosaic via Assert.hpp/Log.hpp).
 --
--- Windows target only, same gate as arcbuild-process-fixture above (R7):
--- Diagnostics is Windows-only today (Base/Diagnostics.hpp's own header
--- comment says every entry point no-ops elsewhere), so a Linux generation
--- would build a fixture that could never prove anything.
+-- Every target since the Diagnostics POSIX port (2026-10-05): the fixture
+-- proves the signal-based crash path exactly as it proves the SEH one. Only
+-- its `--reporter`/`--monitor` hand-off stays Windows-only (below), because
+-- ArcaneCrashReporter does.
 -- ============================================================================
-if os.target() == "windows" then
 project "death-fixture"
     location "ArcaneTests/death-fixture"
     kind "ConsoleApp"
@@ -562,22 +732,30 @@ project "death-fixture"
         defines { "ARC_BUILD_DIST", "NDEBUG" }
         runtime "Release"
         optimize "speed"
-        symbols "off"
+        -- ON, unlike the engine's Dist: the fixture is a test program, and
+        -- "reporter: symbolizes the death fixture's minidump" asserts that
+        -- dbgeng resolves death-fixture.pdb (`!main`, DeathFixtureMain.cpp).
+        -- With symbols off the Dist suite had no PDB to find and that case
+        -- failed on the hosted Windows lane (Release passes it with the same
+        -- optimizer settings and symbols on).
+        symbols "on"
     filter {}
 
     -- Crash window plan 2 (spec §12 item 2): the fixture's `--reporter` mode
     -- hands off to the STAGED reporter beside it, exactly as a host does, so
-    -- the hand-off is proven end to end as two real processes.
-    dependson { "ArcaneCrashReporter" }
+    -- the hand-off is proven end to end as two real processes. The reporter
+    -- is a Windows-target project (its own gate below).
+    if os.target() == "windows" then
+        dependson { "ArcaneCrashReporter" }
+    end
 
     -- The fixture loads ArcaneCore.dll from its own directory, same as every
     -- other consumer (mirrors ArcaneTests' matching postbuild line).
-    postbuildcommands {
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
+    postbuildcommands(arcane_cmds {
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
         -- Crash window plan 2 (spec §12 item 2): the reporter this host hands off to lives beside it.
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"',
-    }
-end   -- death-fixture: Windows target only (task 6, mirrors arcbuild-process-fixture's gate)
+        arcane_win('{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"'),
+    })
 
 -- ============================================================================
 -- ArcaneCrashReporter (crash window plan 2; spec §6): the out-of-process crash
@@ -646,9 +824,9 @@ project "ArcaneCrashReporter"
 
     -- The reporter loads ArcaneCore.dll from its own directory, same as every
     -- other consumer (arcbuild's matching postbuild line is the template).
-    postbuildcommands {
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-    }
+    postbuildcommands(arcane_cmds {
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+    })
 
     filter "system:windows"
         systemversion "latest"
@@ -685,9 +863,26 @@ project "ArcaneClient"
 
     -- Shaders are data: compiled at build time, loaded by name at runtime,
     -- hot-reloadable. The script is the single swap point for ShaderMake.
-    prebuildcommands {
-        'call "%{wks.location}/data/shaders/compile-shaders.bat"',
-    }
+    -- Windows: compile-shaders.bat over the vendored dxc.exe. Elsewhere its
+    -- POSIX twin (same entry points, same flags) over a Linux dxc -- see that
+    -- script's header for how it resolves the binary.
+    filter "system:windows"
+        prebuildcommands {
+            'call "%{wks.location}/data/shaders/compile-shaders.bat"',
+        }
+    filter "system:not windows"
+        prebuildcommands {
+            'sh "%{wks.location}/data/shaders/compile-shaders.sh"',
+        }
+        -- The two D3D12-only TUs (device creation + the DRED crash backend)
+        -- include <d3d12.h>/<dxgi1_6.h> unconditionally; a Vulkan-only (non-
+        -- Windows) build does not compile them. DeviceRemovedD3D12Stub.cpp is
+        -- their link-time twin there.
+        removefiles {
+            "%{prj.location}/src/Arcane/Render/DeviceCreationD3D12.cpp",
+            "%{prj.location}/src/Arcane/Render/GpuCrashD3D12.cpp",
+        }
+    filter {}
 
     includedirs {
         "%{prj.location}/src",
@@ -722,6 +917,47 @@ project "ArcaneClient"
     -- NOTE: Linux port needs --whole-archive/-l imgui --no-whole-archive instead.
     filter "system:windows"
         linkoptions { "/WHOLEARCHIVE:imgui" }
+    -- ELF twin of /WHOLEARCHIVE: the archive path is spelled out because
+    -- --whole-archive applies to the inputs that FOLLOW it on the command line.
+    -- -z defs: an ELF shared object otherwise links with undefined symbols
+    -- and they surface only at the exe link (84 SDL_* did, inventory A11).
+    filter "system:linux"
+        linkoptions {
+            "-Wl,--whole-archive",
+            "%{wks.location}/ThirdParty/imgui/bin/" .. outputdir .. "/imgui/libimgui.a",
+            "-Wl,--no-whole-archive",
+            "-Wl,-z,defs",
+        }
+    -- Mach-O twin: ld64's -force_load takes the archive as its argument
+    -- (undefined symbols are already a dylib link error by default there).
+    -- SDL3 is a from-source dylib whose install name is @rpath/libSDL3.0.dylib,
+    -- so the dylib that links it carries an rpath to its lib dir; dyld resolves
+    -- @rpath through every image on the load chain, so the hosts need nothing.
+    filter "system:macosx"
+        linkoptions {
+            "-Wl,-force_load,%{wks.location}/ThirdParty/imgui/bin/" .. outputdir .. "/imgui/libimgui.a",
+        }
+        if SDL3_LIB_DIR then linkoptions { "-Wl,-rpath," .. SDL3_LIB_DIR } end
+    filter "system:not windows"
+        -- SDL3 (shared, from the system -- see SDL3_INCLUDE_DIR at the top),
+        -- dlopen/dladdr, threads.
+        links { "SDL3", "dl", "pthread" }
+        -- Hidden visibility, as ArcaneCore (inventory G1): only ARCANE_API
+        -- leaves the .so. imgui is unaffected -- its objects are compiled in
+        -- the imgui static lib at default visibility and pulled in whole, so
+        -- GImGui and the full API still export (the /WHOLEARCHIVE contract).
+        visibility "Hidden"
+        inlinesvisibility "Hidden"
+        if SDL3_LIB_DIR then libdirs { SDL3_LIB_DIR } end
+        -- dxcapi.h + its WinAdapter.h COM shim for the runtime ShaderCompiler
+        -- (the Windows SDK supplies dxcapi.h there). From the Linux DXC
+        -- release that scripts/fetch-dxc-linux.sh drops in place; on macOS
+        -- the Vulkan SDK's copy (scripts/fetch-vulkan-sdk-macos.sh links it
+        -- into ThirdParty/tools/dxc-macos/).
+    filter "system:linux"
+        includedirs { "%{wks.location}/ThirdParty/tools/dxc-linux/include/dxc" }
+    filter "system:macosx"
+        includedirs { "%{wks.location}/ThirdParty/tools/dxc-macos/include/dxc" }
     filter {}
 
     defines {
@@ -734,7 +970,7 @@ project "ArcaneClient"
         -- This DLL's own TUs include imgui.h; they must export the same
         -- IMGUI_API as the imgui static lib's object files (set via the
         -- THIRDPARTY_IMGUI_API workspace global). IMGUI_IMPL_API follows.
-        "IMGUI_API=__declspec(dllexport)",
+        "IMGUI_API=" .. ARCANE_IMGUI_EXPORT,
     }
 
     filter "system:windows"
@@ -755,9 +991,9 @@ project "ArcaneClient"
         }
 
     filter { "system:windows", "configurations:Debug" }
-        libdirs { VCPKG_INSTALLED_MD .. "/debug/lib" }
+        libdirs { (VCPKG_INSTALLED_MD or "") .. "/debug/lib" }   -- nil off-Windows; the filter never matches there
     filter { "system:windows", "configurations:Release or configurations:Dist" }
-        libdirs { VCPKG_INSTALLED_MD .. "/lib" }
+        libdirs { (VCPKG_INSTALLED_MD or "") .. "/lib" }
 
     filter "configurations:Debug"
         defines { "ARC_BUILD_DEBUG" }
@@ -837,10 +1073,10 @@ project "ArcaneServer"
         dependson { "ArcaneCrashReporter" }   -- staged by the postbuild below; emitted for a Windows target only
     end
     defines { "_CRT_SECURE_NO_WARNINGS", "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING" }
-    postbuildcommands {
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
+    postbuildcommands(arcane_cmds {
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
         -- Crash window plan 2 (spec §12 item 2): the reporter this host hands off to lives beside it.
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"',
+        arcane_win('{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"'),
         -- P10: the game module (ReferenceGame.dll et al) links BOTH ArcaneCore's
         -- and ArcaneClient's import libs -- it is built as an engine-as-SDK
         -- consumer against the FULL surface, the same DLL a windowed host loads
@@ -849,8 +1085,8 @@ project "ArcaneServer"
         -- references it. The census (clientDllLoadedAtBoot/clientDllLoadedAfterModule)
         -- reports whether it was ever actually loaded, rather than this postbuild
         -- silently hiding the module's own dependency.
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/ArcaneClient.dll" "%{cfg.buildtarget.directory}/ArcaneClient.dll"',
-        '{COPYDIR} "%{wks.location}/data/EngineConfig" "%{cfg.buildtarget.directory}/data/EngineConfig"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/' .. arcane_shlib("ArcaneClient") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneClient") .. '"',
+        arcane_copydir("%{wks.location}/data/EngineConfig", "%{cfg.buildtarget.directory}/data/EngineConfig"),
         -- Same staging pair ArcaneRuntime's/ArcaneEditor's postbuild carries (see
         -- ArcaneRuntime's matching comment for the full "mirror deletions" reasoning):
         -- wipe Content/Source/Verify before the whole-tree copy re-populates them, so
@@ -861,8 +1097,8 @@ project "ArcaneServer"
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Source"',
         '{MKDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject" "%{cfg.buildtarget.directory}/ReferenceProject"',
-    }
+        arcane_copydir("%{wks.location}/ReferenceProject", "%{cfg.buildtarget.directory}/ReferenceProject"),
+    })
     filter "system:windows"
         systemversion "latest"
         -- /bigobj: ServerApp.cpp pulls in Arcane/Scene/PhysicsSystem.hpp
@@ -928,26 +1164,26 @@ project "ArcaneRuntime"
     if os.target() == "windows" then
         dependson { "ArcaneCrashReporter" }   -- staged by the postbuild below; emitted for a Windows target only
     end
-    defines { "_CRT_SECURE_NO_WARNINGS", "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING", "IMGUI_API=__declspec(dllimport)" }
-    postbuildcommands {
+    defines { "_CRT_SECURE_NO_WARNINGS", "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING", "IMGUI_API=" .. ARCANE_IMGUI_IMPORT }
+    postbuildcommands(arcane_cmds {
         -- F2b Task 5: cook FIRST, then stage the cooked artifacts -- cook-then-copy per
         -- stager, because under /m no postbuild orders against another project's
         -- postbuild (ArcaneEditor/ArcaneTests run this exact same pair independently).
         -- Safe by construction: the cook is idempotent by hash (a second run is free)
         -- and concurrent same-key writes are atomic-rename + deterministic (identical
         -- bytes, last rename wins -- see ArtifactStore.hpp's concurrency contract).
-        '"%{wks.location}/bin/' .. outputdir .. '/arccook/arccook.exe" --project "%{wks.location}/ReferenceProject"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject/Intermediate/Artifacts" "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/ArcaneClient.dll" "%{cfg.buildtarget.directory}/ArcaneClient.dll"',
+        '"%{wks.location}/bin/' .. outputdir .. '/arccook/' .. arcane_exe("arccook") .. '" --project "%{wks.location}/ReferenceProject"',
+        arcane_copydir("%{wks.location}/ReferenceProject/Intermediate/Artifacts", "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"),
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/' .. arcane_shlib("ArcaneClient") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneClient") .. '"',
         -- Crash window plan 2 (spec §12 item 2): the reporter this host hands off to lives beside it.
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"',
-        '{COPYDIR} "%{wks.location}/data/shaders/generated" "%{cfg.buildtarget.directory}/data/shaders"',
+        arcane_win('{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"'),
+        arcane_copydir("%{wks.location}/data/shaders/generated", "%{cfg.buildtarget.directory}/data/shaders"),
         -- Material TEMPLATE SOURCES (not compiled artifacts): the material
         -- pipeline stitches + runtime-compiles these via ShaderSourceProvider.
         '{MKDIR} "%{cfg.buildtarget.directory}/data/shaders/materials"',
-        '{COPYDIR} "%{wks.location}/data/shaders/materials" "%{cfg.buildtarget.directory}/data/shaders/materials"',
-        '{COPYDIR} "%{wks.location}/data/EngineConfig" "%{cfg.buildtarget.directory}/data/EngineConfig"',
+        arcane_copydir("%{wks.location}/data/shaders/materials", "%{cfg.buildtarget.directory}/data/shaders/materials"),
+        arcane_copydir("%{wks.location}/data/EngineConfig", "%{cfg.buildtarget.directory}/data/EngineConfig"),
         -- Task C (F2c debts): mirror DELETIONS for the subtrees whose SOURCE state can shrink
         -- across a rebuild -- Content/, Source/ (project assets + generated components) and
         -- Verify/ (golden traces) -- by wiping the staged copies immediately before the
@@ -988,19 +1224,24 @@ project "ArcaneRuntime"
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Source"',
         '{MKDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject" "%{cfg.buildtarget.directory}/ReferenceProject"',
+        arcane_copydir("%{wks.location}/ReferenceProject", "%{cfg.buildtarget.directory}/ReferenceProject"),
         -- Vendored dxc trio (minus dxc.exe): the runtime compile service
         -- (ShaderCompiler) LoadLibrary's these from the exe directory.
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"',
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"'),
+        -- Linux: the same runtime compile service dlopen()s libdxcompiler.so
+        -- (+ libdxil.so) from the exe directory. Not vendored (scripts/
+        -- fetch-dxc-linux.sh drops the release into ThirdParty/tools/dxc-linux/,
+        -- gitignored); staged when present, so a box without it still builds.
+        arcane_stage_dxc(),
         -- Agility SDK redistributable (NRI Phase 1 Task 3): the D3D12 loader
         -- reads this exe's exported D3D12SDKPath (".\D3D12\", see main.cpp)
         -- and looks there for D3D12Core.dll to unlock enhanced barriers /
         -- ID3D12Device10+ in NRI's D3D12 backend.
-        '{MKDIR} "%{cfg.buildtarget.directory}/D3D12"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"',
-    }
+        arcane_win('{MKDIR} "%{cfg.buildtarget.directory}/D3D12"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"'),
+    })
     filter "system:windows"
         systemversion "latest"
         -- /bigobj (2026-09-16): RuntimeApp.cpp's own VerifySharedTypeContext call
@@ -1080,26 +1321,26 @@ project "ArcaneEditor"
     if os.target() == "windows" then
         dependson { "ArcaneCrashReporter" }   -- staged by the postbuild below; emitted for a Windows target only
     end
-    defines { "_CRT_SECURE_NO_WARNINGS", "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING", "IMGUI_API=__declspec(dllimport)" }
-    postbuildcommands {
+    defines { "_CRT_SECURE_NO_WARNINGS", "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING", "IMGUI_API=" .. ARCANE_IMGUI_IMPORT }
+    postbuildcommands(arcane_cmds {
         -- F2b Task 5: cook FIRST, then stage the cooked artifacts -- same cook-then-copy
         -- shape as ArcaneRuntime's matching comment above (safe under /m: idempotent by
         -- hash, concurrent same-key writes atomic-rename + deterministic).
-        '"%{wks.location}/bin/' .. outputdir .. '/arccook/arccook.exe" --project "%{wks.location}/ReferenceProject"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject/Intermediate/Artifacts" "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/ArcaneClient.dll" "%{cfg.buildtarget.directory}/ArcaneClient.dll"',
+        '"%{wks.location}/bin/' .. outputdir .. '/arccook/' .. arcane_exe("arccook") .. '" --project "%{wks.location}/ReferenceProject"',
+        arcane_copydir("%{wks.location}/ReferenceProject/Intermediate/Artifacts", "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"),
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/' .. arcane_shlib("ArcaneClient") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneClient") .. '"',
         -- Crash window plan 2 (spec §12 item 2): the reporter this host hands off to lives beside it.
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"',
-        '{COPYDIR} "%{wks.location}/data/shaders/generated" "%{cfg.buildtarget.directory}/data/shaders"',
+        arcane_win('{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCrashReporter/ArcaneCrashReporter.exe" "%{cfg.buildtarget.directory}/ArcaneCrashReporter.exe"'),
+        arcane_copydir("%{wks.location}/data/shaders/generated", "%{cfg.buildtarget.directory}/data/shaders"),
         -- Material TEMPLATE SOURCES (not compiled artifacts): the material
         -- pipeline stitches + runtime-compiles these via ShaderSourceProvider.
         '{MKDIR} "%{cfg.buildtarget.directory}/data/shaders/materials"',
-        '{COPYDIR} "%{wks.location}/data/shaders/materials" "%{cfg.buildtarget.directory}/data/shaders/materials"',
+        arcane_copydir("%{wks.location}/data/shaders/materials", "%{cfg.buildtarget.directory}/data/shaders/materials"),
         '{MKDIR} "%{cfg.buildtarget.directory}/data"',
-        '{COPYDIR} "%{wks.location}/data/EngineConfig" "%{cfg.buildtarget.directory}/data/EngineConfig"',
+        arcane_copydir("%{wks.location}/data/EngineConfig", "%{cfg.buildtarget.directory}/data/EngineConfig"),
         '{MKDIR} "%{cfg.buildtarget.directory}/data/EditorThemes"',
-        '{COPYDIR} "%{wks.location}/data/EditorThemes" "%{cfg.buildtarget.directory}/data/EditorThemes"',
+        arcane_copydir("%{wks.location}/data/EditorThemes", "%{cfg.buildtarget.directory}/data/EditorThemes"),
         -- Task C (F2c debts): wipe the staged Content/Source/Verify subtrees before the
         -- whole-tree {COPYDIR} below re-populates them, same reasoning (and NOT-mirrored
         -- list -- Intermediate/, Saved/, Binaries/, the .arcproj, and any other non-source-of-
@@ -1114,7 +1355,7 @@ project "ArcaneEditor"
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Source"',
         '{MKDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
         '{RMDIR} "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject" "%{cfg.buildtarget.directory}/ReferenceProject"',
+        arcane_copydir("%{wks.location}/ReferenceProject", "%{cfg.buildtarget.directory}/ReferenceProject"),
         -- Editor fonts: Inter (default) + Roboto + JetBrains Mono faces + lucide icon
         -- font, merged into the ImGui atlas by EditorFonts.cpp (exe-relative paths --
         -- must align w/ dests).
@@ -1134,16 +1375,21 @@ project "ArcaneEditor"
         '{COPYFILE} "%{wks.location}/data/images/arcane_logo.png" "%{cfg.buildtarget.directory}/data/images/arcane_logo.png"',
         -- Vendored dxc trio (minus dxc.exe): the runtime compile service
         -- (ShaderCompiler) LoadLibrary's these from the exe directory.
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"',
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"'),
+        -- Linux: the same runtime compile service dlopen()s libdxcompiler.so
+        -- (+ libdxil.so) from the exe directory. Not vendored (scripts/
+        -- fetch-dxc-linux.sh drops the release into ThirdParty/tools/dxc-linux/,
+        -- gitignored); staged when present, so a box without it still builds.
+        arcane_stage_dxc(),
         -- Agility SDK redistributable (NRI Phase 1 Task 3): the D3D12 loader
         -- reads this exe's exported D3D12SDKPath (".\D3D12\", see main.cpp)
         -- and looks there for D3D12Core.dll to unlock enhanced barriers /
         -- ID3D12Device10+ in NRI's D3D12 backend.
-        '{MKDIR} "%{cfg.buildtarget.directory}/D3D12"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"',
-    }
+        arcane_win('{MKDIR} "%{cfg.buildtarget.directory}/D3D12"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"'),
+    })
     filter "system:windows"
         systemversion "latest"
         -- /bigobj (Task 3, F2a): EditorApp.cpp aggregates a wide include surface
@@ -1779,40 +2025,42 @@ project "ArcaneTests"
     -- name a target that was never emitted. The POSIX process cases in
     -- BuildDriverTest.cpp spawn /bin/sh instead and need no build dependency.
     --
-    -- death-fixture (crash window plan 1, task 6): same reasoning -- it is
-    -- also Windows-only (its own gate above), and CrashPathTest.cpp's
-    -- "death fixture: ..." cases locate it the same "../<project>/
-    -- <project>.exe" way BuildDriverTest.cpp locates arcbuild-process-
-    -- fixture.exe, so it must exist before this project's tests can run.
+    -- death-fixture (crash window plan 1, task 6): CrashPathTest.cpp's
+    -- "death fixture: ..." cases locate it as "../death-fixture/<exe>" the
+    -- way BuildDriverTest.cpp locates arcbuild-process-fixture.exe, so it
+    -- must exist before this project's tests can run -- on every target
+    -- since the Diagnostics POSIX port, unlike the two below.
     --
     -- ArcaneCrashReporter (crash window plan 2, task 4): same reasoning again --
     -- Windows-only by its own gate. CrashPathTest.cpp's `--reporter` case
     -- requires the exe STAGED beside the death fixture (death-fixture's own
     -- dependson + postbuild do that), and the later `reporter:` cases run
     -- "../ArcaneCrashReporter/ArcaneCrashReporter.exe" directly (Task 5).
+    -- death-fixture builds for every target since the Diagnostics POSIX port.
+    dependson { "death-fixture" }
     if os.target() == "windows" then
-        dependson { "arcbuild-process-fixture", "death-fixture", "ArcaneCrashReporter" }
+        dependson { "arcbuild-process-fixture", "ArcaneCrashReporter" }
     end
 
     -- The test exe loads ArcaneClient.dll from its own directory.
-    postbuildcommands {
+    postbuildcommands(arcane_cmds {
         -- F2b Task 5: cook FIRST, then stage the cooked artifacts -- same cook-then-copy
         -- shape as ArcaneRuntime's/ArcaneEditor's matching comments above (safe under /m:
         -- idempotent by hash, concurrent same-key writes atomic-rename + deterministic).
         -- Unlike those two hosts, this project does NOT blanket-copy the whole
         -- ReferenceProject tree (see the targeted Verify/-only COPYDIR below), so this
         -- line is this exe's ONLY source of a staged Intermediate/Artifacts.
-        '"%{wks.location}/bin/' .. outputdir .. '/arccook/arccook.exe" --project "%{wks.location}/ReferenceProject"',
-        '{COPYDIR} "%{wks.location}/ReferenceProject/Intermediate/Artifacts" "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/ArcaneCore.dll" "%{cfg.buildtarget.directory}/ArcaneCore.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/ArcaneClient.dll" "%{cfg.buildtarget.directory}/ArcaneClient.dll"',
-        '{COPYDIR} "%{wks.location}/data/shaders/generated" "%{cfg.buildtarget.directory}/data/shaders"',
+        '"%{wks.location}/bin/' .. outputdir .. '/arccook/' .. arcane_exe("arccook") .. '" --project "%{wks.location}/ReferenceProject"',
+        arcane_copydir("%{wks.location}/ReferenceProject/Intermediate/Artifacts", "%{cfg.buildtarget.directory}/ReferenceProject/Intermediate/Artifacts"),
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneCore/' .. arcane_shlib("ArcaneCore") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneCore") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ArcaneClient/' .. arcane_shlib("ArcaneClient") .. '" "%{cfg.buildtarget.directory}/' .. arcane_shlib("ArcaneClient") .. '"',
+        arcane_copydir("%{wks.location}/data/shaders/generated", "%{cfg.buildtarget.directory}/data/shaders"),
         -- Material TEMPLATE SOURCES (not compiled artifacts): the material
         -- pipeline stitches + runtime-compiles these via ShaderSourceProvider.
         '{MKDIR} "%{cfg.buildtarget.directory}/data/shaders/materials"',
-        '{COPYDIR} "%{wks.location}/data/shaders/materials" "%{cfg.buildtarget.directory}/data/shaders/materials"',
+        arcane_copydir("%{wks.location}/data/shaders/materials", "%{cfg.buildtarget.directory}/data/shaders/materials"),
         '{MKDIR} "%{cfg.buildtarget.directory}/data/EditorThemes"',
-        '{COPYDIR} "%{wks.location}/data/EditorThemes" "%{cfg.buildtarget.directory}/data/EditorThemes"',
+        arcane_copydir("%{wks.location}/data/EditorThemes", "%{cfg.buildtarget.directory}/data/EditorThemes"),
         '{MKDIR} "%{cfg.buildtarget.directory}/data/fonts"',
         '{COPYFILE} "%{wks.location}/data/font/roboto/static/Roboto-Regular.ttf" "%{cfg.buildtarget.directory}/data/fonts/Roboto-Regular.ttf"',
         -- The editor's bundled fonts at the editor's exe-relative paths, so
@@ -1828,22 +2076,22 @@ project "ArcaneTests"
         '{COPYFILE} "%{wks.location}/data/font/lucide/lucide.ttf" "%{cfg.buildtarget.directory}/data/font/lucide/lucide.ttf"',
         '{COPYFILE} "%{wks.location}/data/font/aldotheapache/AldotheApache.ttf" "%{cfg.buildtarget.directory}/data/font/aldotheapache/AldotheApache.ttf"',
         '{COPYFILE} "%{wks.location}/data/font/jetbrainsmono/JetBrainsMono-Regular.ttf" "%{cfg.buildtarget.directory}/data/font/jetbrainsmono/JetBrainsMono-Regular.ttf"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginV1/HotReloadPluginV1.dll" "%{cfg.buildtarget.directory}/HotReloadPluginV1.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginV2/HotReloadPluginV2.dll" "%{cfg.buildtarget.directory}/HotReloadPluginV2.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginBad/HotReloadPluginBad.dll" "%{cfg.buildtarget.directory}/HotReloadPluginBad.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginInitFail/HotReloadPluginInitFail.dll" "%{cfg.buildtarget.directory}/HotReloadPluginInitFail.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ReferenceGameUnderTest/ReferenceGameUnderTest.dll" "%{cfg.buildtarget.directory}/ReferenceGameUnderTest.dll"',
-        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/TemplateSmokePlugin/TemplateSmokePlugin.dll" "%{cfg.buildtarget.directory}/TemplateSmokePlugin.dll"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginV1/' .. arcane_module("HotReloadPluginV1") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("HotReloadPluginV1") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginV2/' .. arcane_module("HotReloadPluginV2") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("HotReloadPluginV2") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginBad/' .. arcane_module("HotReloadPluginBad") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("HotReloadPluginBad") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/HotReloadPluginInitFail/' .. arcane_module("HotReloadPluginInitFail") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("HotReloadPluginInitFail") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/ReferenceGameUnderTest/' .. arcane_module("ReferenceGameUnderTest") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("ReferenceGameUnderTest") .. '"',
+        '{COPYFILE} "%{wks.location}/bin/' .. outputdir .. '/TemplateSmokePlugin/' .. arcane_module("TemplateSmokePlugin") .. '" "%{cfg.buildtarget.directory}/' .. arcane_module("TemplateSmokePlugin") .. '"',
         -- Test data fixtures: copy ArcaneTests/data's CONTENTS into the test output
         -- dir's data/ so tests find their fixtures by relative path. {COPYDIR}
         -- copies the directory's contents, merging with the data/fonts dir the
         -- lines above create. (The M6 physics_oracle fixtures were retired in
         -- v2 T8; physics_feel_reference/ now holds the Phase-B Lua feel traces.)
-        '{COPYDIR} "%{wks.location}/ArcaneTests/data" "%{cfg.buildtarget.directory}/data"',
+        arcane_copydir("%{wks.location}/ArcaneTests/data", "%{cfg.buildtarget.directory}/data"),
         -- Playwright's own image-comparison fixture corpus (Task 6): the
         -- CONFORMANCE ORACLE for ImageCompare. ImageCompareConformanceTest.cpp
         -- walks this tree by a RELATIVE path from the exe's own directory.
-        '{COPYDIR} "%{wks.location}/ThirdParty/playwright-fixtures" "%{cfg.buildtarget.directory}/playwright-fixtures"',
+        arcane_copydir("%{wks.location}/ThirdParty/playwright-fixtures", "%{cfg.buildtarget.directory}/playwright-fixtures"),
         -- Task 10 (plan-b comparator): ONLY the committed layout seed, not
         -- the whole ReferenceProject tree the two HOST exes stage (this
         -- project's own COPYDIR two screens up, and ArcaneEditor's/
@@ -1870,31 +2118,36 @@ project "ArcaneTests"
         -- read from this exe today. When Task 12 lands its own References/
         -- images under this same Verify/ tree, this one line already covers
         -- them -- no further widening needed.
-        '{COPYDIR} "%{wks.location}/ReferenceProject/Verify" "%{cfg.buildtarget.directory}/ReferenceProject/Verify"',
+        arcane_copydir("%{wks.location}/ReferenceProject/Verify", "%{cfg.buildtarget.directory}/ReferenceProject/Verify"),
         -- Vendored dxc trio (minus dxc.exe): the runtime compile service
         -- (ShaderCompiler) LoadLibrary's these from the exe directory.
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"',
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxcompiler.dll" "%{cfg.buildtarget.directory}/dxcompiler.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/tools/dxc/dxil.dll" "%{cfg.buildtarget.directory}/dxil.dll"'),
+        -- Linux: the same runtime compile service dlopen()s libdxcompiler.so
+        -- (+ libdxil.so) from the exe directory. Not vendored (scripts/
+        -- fetch-dxc-linux.sh drops the release into ThirdParty/tools/dxc-linux/,
+        -- gitignored); staged when present, so a box without it still builds.
+        arcane_stage_dxc(),
         -- Agility SDK redistributable (NRI Phase 1 Task 3): the D3D12 loader
         -- reads this exe's exported D3D12SDKPath (".\D3D12\", see test_main.cpp)
         -- and looks there for D3D12Core.dll to unlock enhanced barriers /
         -- ID3D12Device10+ in NRI's D3D12 backend.
-        '{MKDIR} "%{cfg.buildtarget.directory}/D3D12"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"',
-        '{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"',
+        arcane_win('{MKDIR} "%{cfg.buildtarget.directory}/D3D12"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/D3D12Core.dll" "%{cfg.buildtarget.directory}/D3D12/D3D12Core.dll"'),
+        arcane_win('{COPYFILE} "%{wks.location}/ThirdParty/AgilitySDK/x64/d3d12SDKLayers.dll" "%{cfg.buildtarget.directory}/D3D12/d3d12SDKLayers.dll"'),
         -- The exclusion list is repo-level config that BOTH consumers read: this
         -- suite (ExclusionExpiryTest) and golden-gate.ps1. Staged beside the exe
         -- because tests run FROM the exe dir. An edit therefore needs a rebuild
         -- to take effect here, same as data/ and playwright-fixtures/ above.
         '{COPYFILE} "%{wks.location}/scripts/automation-exclusions.json" "%{cfg.buildtarget.directory}/automation-exclusions.json"',
-    }
+    })
 
     defines {
         "_CRT_SECURE_NO_WARNINGS",
         "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
         -- imgui is exported from ArcaneClient.dll; this exe imports it (matches the
         -- DLL's dllexport so <imgui.h> here resolves to the DLL's symbols).
-        "IMGUI_API=__declspec(dllimport)",
+        "IMGUI_API=" .. ARCANE_IMGUI_IMPORT,
     }
 
     filter "system:windows"
@@ -1909,6 +2162,9 @@ project "ArcaneTests"
         -- WKPDID_D3DDebugObjectName etc. even though the test never exercises
         -- the D3D12 backend -- mirrors ArcaneClient's own system-lib set.
         links { "ws2_32", "d3d12", "dxgi", "dxguid" }
+
+    filter "system:not windows"
+        links { "dl", "pthread" }
 
     filter "configurations:Debug"
         defines { "ARC_BUILD_DEBUG" }
@@ -1953,6 +2209,26 @@ local function test_plugin(name, defs)
         cppdialect "C++23"
         staticruntime "off"
         targetname(name)
+        -- A LOADED module is Name.so, never libName.so: the host and the tests
+        -- name it Name + the platform extension (see arcane_module above).
+        filter "system:not windows"
+            targetprefix ""
+            -- ELF: a LOADED module keeps its own copy of every header-defined
+            -- static, exactly as a PE DLL does. With default visibility GCC emits
+            -- those (Astra's per-type meta factories, the pending-meta queue,
+            -- fmt/spdlog statics) as STB_GNU_UNIQUE: bound process-wide AND
+            -- marking the .so non-unloadable, so a hot-reloaded image's entries
+            -- outlived it and were later run from unmapped code. Only the
+            -- extern "C" GamePlugin_* entry points (ARCANE_GAME_MODULE_EXPORT,
+            -- visibility("default")) leave the module.
+            visibility "Hidden"
+            inlinesvisibility "Hidden"
+        filter { "system:not windows", "toolset:gcc" }
+            -- GCC still emits STB_GNU_UNIQUE for a few std:: objects, and ONE such
+            -- symbol makes glibc refuse to unmap the module on dlclose; a PE module
+            -- is gone after FreeLibrary, and hot reload is built on that.
+            buildoptions { "-fno-gnu-unique" }
+        filter {}
         targetdir ("bin/" .. outputdir .. "/" .. name)
         objdir ("bin-int/" .. outputdir .. "/" .. name)
         files { "%{prj.location}/HotReloadPlugin.cpp", "%{prj.location}/HotReloadShared.hpp" }
@@ -1973,7 +2249,7 @@ local function test_plugin(name, defs)
         -- IMGUI_API=dllimport: adopt ArcaneClient.dll's single GImGui, exactly as
         -- arcane.lua does for a real module.
         defines (defs)
-        defines { "IMGUI_API=__declspec(dllimport)" }
+        defines { "IMGUI_API=" .. ARCANE_IMGUI_IMPORT }
         filter "system:windows"
             systemversion "latest"
             buildoptions { "/utf-8", "/Zc:__cplusplus", "/bigobj" }   -- /utf-8: spdlog/fmt via Log.hpp, as arcane.lua sets
@@ -2005,6 +2281,16 @@ project "ReferenceGameUnderTest"
     cppdialect "C++23"
     staticruntime "off"
     targetname "ReferenceGameUnderTest"
+    filter "system:not windows"
+        targetprefix ""   -- a loaded module: Name.so (see arcane_module)
+        visibility "Hidden"           -- a loaded module's statics stay its own (see test_plugin above)
+        inlinesvisibility "Hidden"
+    filter { "system:not windows", "toolset:gcc" }
+        -- GCC still emits STB_GNU_UNIQUE for a few std:: objects, and ONE such
+        -- symbol makes glibc refuse to unmap the module on dlclose; a PE module
+        -- is gone after FreeLibrary, and hot reload is built on that.
+        buildoptions { "-fno-gnu-unique" }
+    filter {}
     targetdir ("bin/" .. outputdir .. "/ReferenceGameUnderTest")
     objdir ("bin-int/" .. outputdir .. "/ReferenceGameUnderTest")
     files {
@@ -2026,7 +2312,7 @@ project "ReferenceGameUnderTest"
     }
     links { "ArcaneCore", "ArcaneClient" }
     defines {
-        "IMGUI_API=__declspec(dllimport)",
+        "IMGUI_API=" .. ARCANE_IMGUI_IMPORT,
         "_CRT_SECURE_NO_WARNINGS",
         "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
     }
@@ -2058,6 +2344,16 @@ project "TemplateSmokePlugin"
     cppdialect "C++23"
     staticruntime "off"
     targetname "TemplateSmokePlugin"
+    filter "system:not windows"
+        targetprefix ""   -- a loaded module: Name.so (see arcane_module)
+        visibility "Hidden"           -- a loaded module's statics stay its own (see test_plugin above)
+        inlinesvisibility "Hidden"
+    filter { "system:not windows", "toolset:gcc" }
+        -- GCC still emits STB_GNU_UNIQUE for a few std:: objects, and ONE such
+        -- symbol makes glibc refuse to unmap the module on dlclose; a PE module
+        -- is gone after FreeLibrary, and hot reload is built on that.
+        buildoptions { "-fno-gnu-unique" }
+    filter {}
     targetdir ("bin/" .. outputdir .. "/TemplateSmokePlugin")
     objdir ("bin-int/" .. outputdir .. "/TemplateSmokePlugin")
     files {
@@ -2079,7 +2375,7 @@ project "TemplateSmokePlugin"
     }
     links { "ArcaneCore", "ArcaneClient" }
     defines {
-        "IMGUI_API=__declspec(dllimport)",
+        "IMGUI_API=" .. ARCANE_IMGUI_IMPORT,
         "_CRT_SECURE_NO_WARNINGS",
         "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
     }

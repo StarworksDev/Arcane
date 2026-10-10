@@ -45,7 +45,30 @@ namespace Arcane
         None,      // nothing on disk for this name
         Shared,    // Verify/References/<name>.png
         Backend,   // Verify/References/<backend>/<name>.png
+        Adapter,   // Verify/References/<adapter set>/<name>.png (see ReferenceAdapterSet)
     };
+
+    // The ADAPTER level above the backend one: the name of a reference set for
+    // an adapter whose rasterisation legitimately differs from the hardware the
+    // backend-level images were blessed on, or "" when the adapter needs none.
+    //
+    // Only SOFTWARE adapters get a set. A hardware GPU renders the same images
+    // the backend level already holds (the shared/backend split was measured on
+    // discrete Windows GPUs of two vendors), while a CPU rasteriser such as
+    // Mesa's lavapipe differs in its own consistent way -- its AA coverage, its
+    // texture filtering, its transcendental precision -- and it is what a
+    // GPU-less CI runner has. Keying every hardware adapter would fragment the
+    // references for no gain.
+    //
+    //   Vulkan on llvmpipe (Mesa lavapipe)            -> "<backend>-lavapipe"
+    //   D3D12 on the Microsoft Basic Render Driver    -> "<backend>-warp"
+    //   any other software adapter                    -> "<backend>-software"
+    //
+    // `backend` is the CLI spelling ("dx12"/"vulkan"), the same string the
+    // backend level's directory is named with.
+    [[nodiscard]] ARC_API std::string ReferenceAdapterSet(const std::string& backend,
+                                                             const std::string& adapterName,
+                                                             bool softwareAdapter);
 
     struct ReferenceResolution
     {
@@ -71,6 +94,27 @@ namespace Arcane
     [[nodiscard]] ARC_API ReferenceResolution ResolveReference(
         const std::filesystem::path& projectRoot,
         const std::string& name, const std::string& backend);
+
+    // As above, with the adapter level probed FIRST when `adapterSet` is not
+    // empty: <adapterSet>/<name>.png, then <backend>/, then shared.
+    //
+    // An adapter set NEVER blesses into a level below it: blessTarget is the
+    // adapter-level path whether or not that image exists yet, so a bless on a
+    // software adapter creates (or rewrites) its own image and cannot touch the
+    // backend or shared images the hardware lanes own. Resolution still falls
+    // through for COMPARING, so a set that has no image for a name yet is
+    // judged against the hardware reference rather than reported missing.
+    // `adapterSet` is guarded like `name` and `backend`.
+    [[nodiscard]] ARC_API ReferenceResolution ResolveReference(
+        const std::filesystem::path& projectRoot,
+        const std::string& name, const std::string& backend, const std::string& adapterSet);
+
+    // The same resolution under an explicit references directory rather than
+    // <projectRoot>/Verify/References -- for reference families kept in a
+    // subdirectory (the mesh-thumbnail goldens under References/thumbs/).
+    [[nodiscard]] ARC_API ReferenceResolution ResolveReferenceIn(
+        const std::filesystem::path& referencesDir,
+        const std::string& name, const std::string& backend, const std::string& adapterSet);
 
     // Write `rgba` (tight RGBA8) to resolution.blessTarget, creating parents.
     // False on a refused name (blessTarget empty) or any IO failure.

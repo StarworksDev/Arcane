@@ -78,7 +78,24 @@ namespace Arcane::Reporter
     // [Relaunch if !relaunchLine.empty()], Close (always last).
     [[nodiscard]] std::vector<ReporterButton> VisibleButtons(const ReportView& v);
 
+    // The IANA time-zone database is a C++20 library feature Apple's libc++
+    // (Xcode 16) does not ship: there `TimeZone` is an incomplete stand-in,
+    // the only zone a caller can pass is nullptr, and FormatLocalStamp
+    // returns "" -- the documented "no zone" result (macOS port, 2026-10-07).
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    #define ARC_HAS_TZDB 1
+    using TimeZone = std::chrono::time_zone;
+#else
+    struct TimeZone;   // never defined: no tzdb in this standard library
+#endif
+
     // "2026-09-29T16:57:12Z" -> "2026-09-29 11:57" in `zone`; "" when the
     // stamp does not parse or `zone` is null.
-    [[nodiscard]] std::string FormatLocalStamp(std::string_view isoUtc, const std::chrono::time_zone* zone);
+    [[nodiscard]] std::string FormatLocalStamp(std::string_view isoUtc, const TimeZone* zone);
+
+    // The same stamp in the PROCESS's local zone (the C library's TZ rules,
+    // localtime_r/localtime_s), for a standard library with no tzdb, so a
+    // title keeps its "<headline> -- <local stamp>" shape there. "" when the
+    // stamp does not parse.
+    [[nodiscard]] std::string FormatSystemLocalStamp(std::string_view isoUtc);
 }

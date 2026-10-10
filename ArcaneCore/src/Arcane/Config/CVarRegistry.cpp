@@ -245,9 +245,14 @@ namespace Arcane
         std::string lastError;
 
         // The published snapshot (settings spec s4.6, O5). Readers load it
-        // wait-free from any thread; only the main thread stores, and never
-        // mutates one it has stored.
+        // atomically from any thread; only the main thread stores, and never
+        // mutates one it has stored. Xcode 16 libc++ needs the shared_ptr
+        // atomic free functions; other toolchains have atomic<shared_ptr>.
+#if defined(__APPLE__)
+        std::shared_ptr<const CVarSnapshot> snapshot;
+#else
         std::atomic<std::shared_ptr<const CVarSnapshot>> snapshot;
+#endif
         std::uint64_t                                    serial = 0;
         std::uint64_t                                    revision = 0;
         std::thread::id                                  mainThread = std::this_thread::get_id();
@@ -1153,7 +1158,11 @@ namespace Arcane
 
     std::shared_ptr<const CVarSnapshot> CVarRegistry::Snapshot() const
     {
+#if defined(__APPLE__)
+        return std::atomic_load_explicit(&m->snapshot, std::memory_order_acquire);
+#else
         return m->snapshot.load(std::memory_order_acquire);
+#endif
     }
 
     void CVarRegistry::PublishImmediate()
@@ -1465,7 +1474,11 @@ namespace Arcane
 
     void CVarRegistry::StoreSnapshot(std::shared_ptr<const CVarSnapshot> next)
     {
+#if defined(__APPLE__)
+        std::shared_ptr<const CVarSnapshot> outgoing = std::atomic_exchange_explicit(&m->snapshot, std::move(next), std::memory_order_acq_rel);
+#else
         std::shared_ptr<const CVarSnapshot> outgoing = m->snapshot.exchange(std::move(next), std::memory_order_acq_rel);
+#endif
         m->retired[1] = std::move(m->retired[0]);
         m->retired[0] = std::move(outgoing);
     }

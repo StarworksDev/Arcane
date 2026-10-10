@@ -47,6 +47,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "ImGuiTestKeys.hpp"   // TestKeys::AddKeyEvent: Ctrl as this platform's user presses it
 
 using namespace Arcane;
 using namespace Arcane::Editor;
@@ -750,7 +751,7 @@ namespace
                  const char* capture = nullptr)
     {
         ImGuiIO& io = ImGui::GetIO();
-        if (mod != ImGuiKey_None) io.AddKeyEvent(mod, true);
+        if (mod != ImGuiKey_None) Arcane::TestKeys::AddKeyEvent(io, mod, true);
         io.AddMousePosEvent(from.x, from.y); h.Frame();
         io.AddMouseButtonEvent(0, true); h.Frame();
         // The press is the canvas's: a point off the canvas (the toolbar, the
@@ -760,15 +761,15 @@ namespace
         io.AddMousePosEvent(to.x, to.y); h.Frame(2);
         if (capture) Arcane::Test::CaptureFrameIfRequested((std::string(capture) + "-drag").c_str());
         io.AddMouseButtonEvent(0, false); h.Frame(2);
-        if (mod != ImGuiKey_None) { io.AddKeyEvent(mod, false); h.Frame(); }
+        if (mod != ImGuiKey_None) { Arcane::TestKeys::AddKeyEvent(io, mod, false); h.Frame(); }
         if (capture) Arcane::Test::CaptureFrameIfRequested((std::string(capture) + "-released").c_str());
     }
     void ClickWith(CanvasHarness& h, ImVec2 at, ImGuiKey mod)
     {
         ImGuiIO& io = ImGui::GetIO();
-        io.AddKeyEvent(mod, true);
+        Arcane::TestKeys::AddKeyEvent(io, mod, true);
         h.Click(at);
-        io.AddKeyEvent(mod, false); h.Frame();
+        Arcane::TestKeys::AddKeyEvent(io, mod, false); h.Frame();
     }
     bool Selected(CanvasHarness& h, std::uint32_t id)
     {

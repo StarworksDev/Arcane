@@ -8,6 +8,7 @@
 // (mirrors AssetBrowserTest.cpp's kind cases).
 
 #include <catch2/catch_test_macros.hpp>
+#include <Arcane/Platform/Platform.hpp>
 
 #include "Documents/CrashReportDocument.hpp"
 #include "Documents/DocumentHost.hpp"
@@ -268,6 +269,15 @@ TEST_CASE("DocumentHost routes .arcdiag to CrashReportDocument and focuses inste
     // .arcmat routing test) -> the peek resolves the same guid and the open
     // document is focused instead of a second one being constructed.
     const auto upperExtPath = dir / (path.stem().string() + ".ARCDIAG");
+#if !ARC_PLATFORM_WINDOWS
+    // A case-SENSITIVE filesystem: on Windows the uppercase spelling names the
+    // SAME file; here it is another name, so give it the same bytes (the same
+    // guid) -- the routing + focus behaviour under test is unchanged. macOS's
+    // default APFS is case-INSENSITIVE like Windows: the name already exists
+    // (it is the same file) and copying a file onto itself is an error.
+    if (!std::filesystem::exists(upperExtPath))
+        std::filesystem::copy_file(path, upperExtPath, std::filesystem::copy_options::overwrite_existing);
+#endif
     EditorDocument* again = host.OpenPath(upperExtPath);
     CHECK(again == first);
     CHECK(host.Count() == 1);

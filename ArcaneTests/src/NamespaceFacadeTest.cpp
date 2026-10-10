@@ -140,10 +140,11 @@ TEST_CASE("Physics2D game-facing types", "[namespaces]")
 // FA2: the names that must not exist (Arcane::ECS, Arcane::Physics2D,
 // Arcane::Phys, the unsuffixed physics types, and a game-side read of
 // PhysicsWorld2D::world) are one translation unit each.
-// scripts/namespace-compile-fail.ps1 compiles the control and expects each
-// forbidden TU to fail.
+// The platform's namespace-compile-fail script compiles the control and
+// expects each forbidden TU to fail.
 TEST_CASE("forbidden namespace spellings fail to compile", "[namespaces]")
 {
+#if defined(_WIN32)
     const auto script = Arcane::Test::FindReferenceProjectDir().parent_path()
         / "scripts" / "namespace-compile-fail.ps1";
     REQUIRE(std::filesystem::exists(script));
@@ -151,13 +152,25 @@ TEST_CASE("forbidden namespace spellings fail to compile", "[namespaces]")
     const std::string command =
         "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script.string() + "\"";
     FILE* pipe = _popen(command.c_str(), "r");
+#else
+    const auto script = Arcane::Test::FindReferenceProjectDir().parent_path()
+        / "scripts" / "namespace-compile-fail.sh";
+    REQUIRE(std::filesystem::exists(script));
+
+    const std::string command = "bash \"" + script.string() + "\" 2>&1";
+    FILE* pipe = popen(command.c_str(), "r");
+#endif
     REQUIRE(pipe != nullptr);
 
     std::string output;
     char buf[4096];
     while (std::fgets(buf, static_cast<int>(sizeof(buf)), pipe) != nullptr)
         output += buf;
+#if defined(_WIN32)
     const int code = _pclose(pipe);
+#else
+    const int code = pclose(pipe);
+#endif
     INFO(output);
     CHECK(code == 0);
 }

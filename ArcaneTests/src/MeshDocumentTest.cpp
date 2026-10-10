@@ -650,10 +650,10 @@ TEST_CASE("MeshDocument status: no seam reads no-device and never latches; impor
 
 TEST_CASE("MeshDocument: the first non-null chromeGraph makes Tick build the preview vehicle exactly once", "[editor][mesh][preview][gpu]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     using Arcane::Editor::PreviewAvailability;
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(chrome != nullptr);

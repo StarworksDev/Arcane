@@ -6,6 +6,7 @@
 // and tolerant reads of a malformed or future-versioned document.
 
 #include <string>
+#include <Arcane/Platform/Platform.hpp>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -44,7 +45,13 @@ TEST_CASE("SceneRecents push normalises the path", "[editor]")
     // Backslashes and a redundant "./" segment must collapse to the same
     // generic-string key a second push of the "clean" spelling would produce
     // -- otherwise the same scene shows up as two menu rows.
+#if ARC_PLATFORM_WINDOWS
     SceneRecents::Push(list, "D:\\proj\\.\\Scenes\\Level1.arcscene");
+#else
+    // POSIX: '\\' is a file-name byte, not a separator; the redundant
+    // segments are what normalise ("./" and a doubled slash).
+    SceneRecents::Push(list, "D:/proj/./Scenes//Level1.arcscene");
+#endif
     REQUIRE(list.paths.size() == 1);
     CHECK(list.paths.front() == "D:/proj/Scenes/Level1.arcscene");
 

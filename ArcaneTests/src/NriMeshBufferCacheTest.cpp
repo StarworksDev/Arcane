@@ -156,8 +156,8 @@ namespace
 TEST_CASE("pixel: a mesh uploads once and stays resident across frames",
           "[gpu][meshcache]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
-    auto v = MakeGpuVehicle(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
 
@@ -282,8 +282,8 @@ TEST_CASE("mesh buffer cache: a zero-size mesh is refused ONCE and never retried
 TEST_CASE("pixel: EvictToBudget drops the least-recently-drawn mesh and re-uploads it"
           " on the next ask", "[gpu][meshcache]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
-    auto v = MakeGpuVehicle(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
 
@@ -327,8 +327,8 @@ TEST_CASE("pixel: EvictToBudget drops the least-recently-drawn mesh and re-uploa
 
 TEST_CASE("pixel: Release buries everything and is idempotent", "[gpu][meshcache]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
-    auto v = MakeGpuVehicle(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
 
@@ -349,8 +349,8 @@ TEST_CASE("pixel: Release buries everything and is idempotent", "[gpu][meshcache
 TEST_CASE("pixel: a mesh with no indices or no vertices is refused, not uploaded",
           "[gpu][meshcache]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
-    auto v = MakeGpuVehicle(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
 
@@ -380,8 +380,8 @@ TEST_CASE("pixel: DebugFailNextUpload forces Upload's abandon() arm for real, "
     // instead. Two SECTIONs so BOTH create-call sites inside Upload run their own
     // abandon(): Index (vb real, ib injected -- abandon() has something to destroy)
     // and Vertex (nothing was ever created yet -- abandon() destroys nothing).
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
-    auto v = MakeGpuVehicle(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
 
@@ -438,9 +438,9 @@ TEST_CASE("pixel: DebugFailNextUpload forces Upload's abandon() arm for real, "
 TEST_CASE("pixel: the vehicle owns one mesh buffer cache, released on teardown",
           "[gpu][meshcache]")
 {
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto v = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(v != nullptr);
@@ -465,9 +465,9 @@ TEST_CASE("pixel: ResizeOffscreen does NOT release resident mesh buffers",
     // m_textures is "deliberately NOT released on Resize" (its own declaration
     // comment). Re-uploading every mesh on a viewport drag would be the ring cliff
     // reintroduced through a different door.
-    ARC_REQUIRE_BACKEND(Arcane::GraphicsBackend::D3D12);
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::GraphicsBackend::D3D12;
+    cfg.backend  = Arcane::Test::kNativeBackend;
     cfg.headless = true;
     auto v = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(v != nullptr);

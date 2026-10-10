@@ -7,6 +7,7 @@
 #include <Arcane/Base/Diagnostics.hpp>
 #include <Arcane/Base/DiagnosticsSettings.hpp>
 #include <Arcane/Base/Log.hpp>
+#include <Arcane/Platform/Platform.hpp>
 #include <Arcane/Config/CVarConfig.hpp>
 #include <Arcane/Host/BootSplashWindow.hpp>
 #include <Arcane/Host/EarlyConfig.hpp>
@@ -22,6 +23,7 @@
 #include <vector>
 
 // Agility SDK handshake: the exported version/path pair (Arcane/Render/AgilitySdk.hpp).
+// The macro is empty off Windows.
 ARC_AGILITY_SDK_EXPORTS();
 
 namespace

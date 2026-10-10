@@ -6,6 +6,7 @@
 // swap starts without them and only the republish brings them back.
 
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 
 #include <Arcane/Client/ClientRuntime.hpp>
 #include <Arcane/Input/GameInput.hpp>
@@ -66,7 +67,7 @@ TEST_CASE("Time and GameInput are back one frame after Play, Stop and a scene op
 TEST_CASE("Time and GameInput are back one frame after a module hot reload", "[client][time][gameinput][hotreload]")
 {
     std::error_code ec;
-    std::filesystem::copy_file("HotReloadPluginV1.dll", "ResourceSwapPlugin.dll",
+    std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginV1"), "ResourceSwapPlugin.dll",
                                std::filesystem::copy_options::overwrite_existing, ec);
     REQUIRE_FALSE(ec);
 

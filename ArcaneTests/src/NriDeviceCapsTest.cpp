@@ -50,3 +50,21 @@ TEST_CASE("nri device caps: texture update-after-set is gated by its granular li
     caps.maxPerStageUpdateAfterSetTextures = 255;
     CHECK_FALSE(caps.SupportsTextureUpdateAfterSet(256));
 }
+
+TEST_CASE("nri device caps: an update-after-set table is gated by the update-after-bind limits", "[nri]")
+{
+    // MoltenVK's shape (macos-15 runner, Apple Paravirtual device): low plain
+    // limits, high update-after-bind ones. The table is built update-after-
+    // set there, so it fits.
+    Arcane::NriDeviceCaps caps{};
+    caps.maxDescriptorSetTextures = 640;
+    caps.maxPerStageTextures = 128;
+    caps.maxDescriptorSetUpdateAfterSetTextures = 1000000;
+    caps.maxPerStageUpdateAfterSetTextures = 1000000;
+    CHECK_FALSE(caps.SupportsBindlessTextures(256));   // tier 0: never, whatever the limits
+    caps.bindlessTier = 1;
+    CHECK(caps.SupportsBindlessTextures(256));
+    caps.maxPerStageUpdateAfterSetTextures = 255;      // neither path covers 256 per stage
+    CHECK_FALSE(caps.SupportsBindlessTextures(256));
+    CHECK(caps.SupportsBindlessTextures(128));         // a smaller table still fits
+}

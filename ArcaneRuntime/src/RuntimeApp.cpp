@@ -645,8 +645,14 @@ void RuntimeApp::MainLoop()
             (m_runtime && m_runtime->CurrentProject()) ? m_runtime->CurrentProject()->Root()
                                                         : std::filesystem::path{};
         const char* const backendName = CompareBackendName(m_config.backend);
+        const Arcane::NriDeviceCaps& caps = graph.Device().Caps();
+        m_compareAdapterSet = Arcane::ReferenceAdapterSet(backendName, caps.adapterName,
+                                                          caps.softwareAdapter);
+        if (!m_compareAdapterSet.empty())
+            ARC_INFO("--compare: software adapter '{}' -> reference set '{}'",
+                     caps.adapterName, m_compareAdapterSet);
         m_compareResolution = Arcane::ResolveReference(projectRoot, m_config.compareReference,
-                                                        backendName);
+                                                        backendName, m_compareAdapterSet);
 
         if (m_compareResolution.level == Arcane::ReferenceLevel::None)
         {
@@ -1426,6 +1432,7 @@ void RuntimeApp::ShutdownGraphPath()
                 {
                     case Arcane::ReferenceLevel::Shared:  return "shared";
                     case Arcane::ReferenceLevel::Backend: return "backend";
+                    case Arcane::ReferenceLevel::Adapter: return "adapter";
                     default:                               return "none";
                 }
             };
@@ -1473,7 +1480,8 @@ void RuntimeApp::ShutdownGraphPath()
                 // where it started. Cheap: an fs::exists check, nothing
                 // more.
                 const Arcane::ReferenceResolution after =
-                    Arcane::ResolveReference(projectRoot, m_config.compareReference, backendName);
+                    Arcane::ResolveReference(projectRoot, m_config.compareReference, backendName,
+                                             m_compareAdapterSet);
                 resolvedLevel = levelName(after.level);
                 referencePath = after.path.string();
                 triedPaths    = stringifyTriedPaths(after.triedPaths);

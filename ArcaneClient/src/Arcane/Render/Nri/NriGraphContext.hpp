@@ -670,7 +670,20 @@ namespace Arcane
                                                                 NriDevice& shared,
                                                                 std::uint32_t width,
                                                                 std::uint32_t height,
-                                                                const NodeSet& nodes = {});
+                                                                const NodeSet& nodes);
+        // The "defaulted to none" overload. NOT `const NodeSet& nodes = {}`:
+        // NodeSet is a nested class with default member initializers, and a
+        // default argument naming it is evaluated before NriGraphContext is
+        // complete -- GCC rejects that ("could not convert '{}'", the
+        // long-standing NSDMI-in-nested-class rule); MSVC accepts it. The
+        // inline body is a complete-class context, so this spelling is portable.
+        static std::unique_ptr<NriGraphContext> CreateOffscreen(const HostConfig& config,
+                                                                NriDevice& shared,
+                                                                std::uint32_t width,
+                                                                std::uint32_t height)
+        {
+            return CreateOffscreen(config, shared, width, height, NodeSet{});
+        }
 
         ~NriGraphContext();
 

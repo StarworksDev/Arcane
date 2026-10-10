@@ -1491,9 +1491,11 @@ namespace Arcane
         // writing a barrier for it. The stages are the same three
         // RgUsage::ShaderRead derives, so the exit matches what a sampler in
         // any of them expects.
-        constexpr nri::AccessLayoutStage kOffscreenEntry{
+        // static: the tonemap lambda below binds these to const& (an odr-use),
+        // which a non-static local would need captured -- Clang enforces it.
+        static constexpr nri::AccessLayoutStage kOffscreenEntry{
             nri::AccessBits::NONE, nri::Layout::UNDEFINED, nri::StageBits::ALL };
-        constexpr nri::AccessLayoutStage kOffscreenExit{
+        static constexpr nri::AccessLayoutStage kOffscreenExit{
             nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE,
             nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER
                 | nri::StageBits::COMPUTE_SHADER };

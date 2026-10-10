@@ -1,117 +1,373 @@
 name: CI
 
-# Manifold2D-style hosted windows lane: generate, build Debug+Release+Dist, run
-# the suite with `~[gpu]`. The Jenkins multibranch pipeline on windows-1 is the
-# full gate (3 configs, an actual GPU, the unfiltered suite, the --frames
-# scripted verify).
+# The ONE hosted CI workflow for Arcane: a single matrix over
+# {windows-msvc, linux-gcc-14, linux-clang-19, macos-appleclang} x
+# {Debug, Release, Dist}, every leg doing the same five things in the same
+# order -- fetch pinned tools, generate with premake5, build the engine, build
+# ReferenceProject's game module through arcbuild (the SDK path an external
+# game takes), build the hosts + tests, run the suite with two seeds through
+# the platform's run-tests script. docs/ci.md is the standard this file
+# implements (shared with Astra and Manifold2D) and records its deviations.
 #
-# WHY ~[gpu] HERE, when the [gpu] cases now SKIP-with-reason on a machine that
-# cannot run them. An earlier revision of this file dropped the filter on the
-# strength of "hosted runners have no capable GPU, so [gpu] reports SKIPPED".
-# THAT PREMISE IS UNVERIFIED, AND THIS BRANCH HAS NEVER BEEN PUSHED, SO THIS
-# LANE HAS NEVER RUN. Read at source, it is likely FALSE:
-# DeviceCreationD3D12.cpp:284-333 calls EnumAdapterByGpuPreference(0,
-# HIGH_PERFORMANCE) with NO software-adapter filter and then
-# D3D12CreateDevice(..., D3D_FEATURE_LEVEL_12_0). On a hosted Windows runner
-# the Microsoft Basic Render Driver (WARP) enumerates and supports 12_1, so
-# ARC_REQUIRE_BACKEND's probe would return TRUE and the D3D12 [gpu] cases would
-# RUN -- including GoldenImageTest.cpp:164, a ZERO-TOLERANCE pixel compare
-# against a reference blessed on a discrete GPU. A software rasterizer will not
-# match it, and a false red on a lane nobody has watched run is the worst
-# possible first impression of it.
-#
-# THE PRINCIPLED FIX, deliberately not taken here: filter software adapters in
-# the probe itself (DXGI_ADAPTER_FLAG_SOFTWARE, and VK_PHYSICAL_DEVICE_TYPE_CPU
-# on the Vulkan side), so [gpu] reports SKIPPED-with-reason instead of being
-# filtered away unseen. It needs real design work -- the probe delegates to
-# NativeDeviceOwner::Create and NriDevice.hpp exposes no adapter query, so it
-# wants either new surface on RenderDeviceDesc or DXGI enumeration inside a test
-# helper. REVISIT CONDITION: once this hosted lane has been OBSERVED GREEN once,
-# do that, then drop `~[gpu]` from the three invocations below.
-#
-# Jenkins keeps its unfiltered run -- it has a real GPU and is the full gate.
+# Tests run "~[gpu]" minus the per-OS exclusion list on every leg. Extra lanes
+# ride ONE leg each, never a separate workflow:
+#   * linux-gcc-14 Debug: [gpu] on Mesa lavapipe with a pinned validation
+#     layer, and the X11 + Wayland windowed smoke (scripts/linux-windowed-smoke.sh);
+#   * macos-appleclang Debug: [gpu] on MoltenVK over the runner's Apple GPU
+#     (see docs/ci.md "GPU lanes" for what that proves and what it cannot).
+# The Jenkins full gate on the GPU desk (Jenkinsfile) stays the unfiltered,
+# real-GPU, golden-gate run.
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: arcane-ci-${{ github.ref_name }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Linux [gpu] lane: VK_LAYER_KHRONOS_validation built from this tag, which
+  # must resolve to this commit (scripts/build-vvl-linux.sh refuses any other).
+  VVL_TAG: vulkan-sdk-1.4.328.0
+  VVL_COMMIT: a1ff2dbc7e50828def8098c5ebf0fee10b714f85
+  # Xcode is pinned, never "whatever the image defaults to" (docs/ci.md).
+  XCODE_APP: /Applications/Xcode_16.4.app
+
 jobs:
-  windows-msvc:
-    runs-on: windows-latest
+  build-test:
+    name: ${{ matrix.leg }} ${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [windows-msvc, linux-gcc-14, linux-clang-19, macos-appleclang]
+        config: [Debug, Release, Dist]
+        include:
+          - leg: windows-msvc
+            os: windows-2025
+            compiler: msvc
+          - leg: linux-gcc-14
+            os: ubuntu-24.04
+            compiler: gcc-14
+            cc: gcc-14
+            cxx: g++-14
+            premake_cc: gcc
+          - leg: linux-clang-19
+            os: ubuntu-24.04
+            compiler: clang-19
+            cc: clang-19
+            cxx: clang++-19
+            premake_cc: clang
+          - leg: macos-appleclang
+            os: macos-15
+            compiler: appleclang
+            cc: clang
+            cxx: clang++
+            premake_cc: clang
+    env:
+      ARCANE_CI_LEG: ${{ matrix.leg }}
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      # Two seeds per leg (ArcaneTests runs in RANDOM order). Both are printed
+      # in the suite banner and in each JUnit file name.
+      SEED_A: ${{ github.run_number }}
+      SEED_B: ${{ github.run_number }}50021
+      LINUX_GPU_LANE: ${{ matrix.leg == 'linux-gcc-14' && matrix.config == 'Debug' }}
+      MACOS_GPU_LANE: ${{ matrix.leg == 'macos-appleclang' && matrix.config == 'Debug' }}
+      # Hosted Linux runners are 4 vCPU / 16 GB and the Debug ArcaneTests link
+      # alone is ~500 MB: -j3 bounds peak memory. macos-15 arm64 runners are
+      # 3 vCPU / 7 GB.
+      MAKE_JOBS: 3
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+      # ------------------------------------------------------------------
+      # Toolchains
+      # ------------------------------------------------------------------
+      - name: Toolchain (Windows MSVC)
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0
 
-      # SDL3 builds from source under the repo's v143 static-md overlay triplet
-      # (~10 min) -- cache the installed tree keyed on the triplet.
-      - name: Cache vcpkg installed tree
-        uses: actions/cache@v4
+      # Toolchains + SDL3's X11/Wayland build deps + the Vulkan loader and
+      # Mesa's lavapipe (headless Vulkan).
+      - name: Toolchain (Linux GCC 14 / Clang 19)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 clang-19 make cmake ninja-build pkg-config \
+            libvulkan-dev mesa-vulkan-drivers \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxss-dev libxfixes-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev \
+            libdrm-dev libgbm-dev libegl-dev libgl-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev \
+            xvfb xauth
+          if [ "$LINUX_GPU_LANE" = true ]; then
+            sudo apt-get install -y --no-install-recommends weston xdotool imagemagick x11-utils python3
+          fi
+          "$CXX" --version
+
+      - name: Toolchain (macOS Apple Clang, pinned Xcode)
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+          "$CXX" --version
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+
+      # ------------------------------------------------------------------
+      # Third-party dependencies (every download version-pinned + SHA-256)
+      # ------------------------------------------------------------------
+      # SDL3 builds from source under the repo's v143 static-md overlay
+      # triplet (~10 min) -- cache the installed tree.
+      - name: Cache SDL3 (Windows, vcpkg)
+        if: runner.os == 'Windows'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-sdl3-static-md-${{ hashFiles('vcpkg-triplets/x64-windows-static-md.cmake') }}
+          key: ${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.config }}-${{ hashFiles('vcpkg-triplets/**', 'scripts/setup-vcpkg-deps.bat') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.compiler }}-
 
-      - name: Install SDL3 (vcpkg, overlay triplet)
+      - name: SDL3 (Windows, vcpkg overlay triplet)
+        if: runner.os == 'Windows'
         shell: cmd
         run: |
           set _APH_NOPAUSE=1
           call scripts\setup-vcpkg-deps.bat
 
-      - name: Generate
+      # Neither Ubuntu 24.04 nor macOS packages SDL3: scripts/build-sdl3.sh
+      # builds the pinned release once into a cached prefix, which is then
+      # copied into /usr/local (the default loader path on Linux; on macOS
+      # premake5.lua gives libArcaneClient.dylib an rpath to it).
+      - name: Cache SDL3 (Linux/macOS)
+        if: runner.os != 'Windows'
+        id: sdl3-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/sdl3-prefix
+          key: ${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.config }}-sdl3-${{ hashFiles('scripts/build-sdl3.sh') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.compiler }}-
+
+      - name: SDL3 (Linux/macOS, from source)
+        if: runner.os != 'Windows'
+        run: |
+          if [ ! -f "$HOME/sdl3-prefix/include/SDL3/SDL.h" ]; then
+            scripts/build-sdl3.sh "$HOME/sdl3-prefix"
+          fi
+          sudo mkdir -p /usr/local
+          sudo cp -R "$HOME/sdl3-prefix/." /usr/local/
+          if [ "$RUNNER_OS" = Linux ]; then sudo ldconfig; fi
+          echo "SDL3_ROOT=/usr/local" >> "$GITHUB_ENV"
+          ls /usr/local/lib | grep -i sdl3
+
+      # premake lands where Arcane::Toolchain looks for a bundled copy on
+      # POSIX (ThirdParty/premake5/premake5, beside the vendored .exe).
+      - name: Cache premake + DXC + Vulkan SDK (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ThirdParty/premake5/premake5
+            ThirdParty/tools/dxc-linux
+            ThirdParty/tools/vulkan-sdk-macos/download
+          key: ${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.config }}-tools-${{ hashFiles('scripts/fetch-premake.sh', 'scripts/fetch-dxc-linux.sh', 'scripts/fetch-vulkan-sdk-macos.sh') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.compiler }}-
+
+      - name: premake + DXC (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/fetch-premake.sh
+          scripts/fetch-dxc-linux.sh
+
+      # MoltenVK + the Vulkan loader + validation layer + DXC, one pinned SDK
+      # (the script header says why this is the macOS DXC source).
+      - name: premake + Vulkan SDK (MoltenVK, DXC) (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          scripts/fetch-premake.sh
+          scripts/fetch-vulkan-sdk-macos.sh --system
+          # MoltenVK is the ONLY ICD the leg may see.
+          echo "VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
+
+      # The [gpu] lane's validation layer (scripts/build-vvl-linux.sh says why
+      # the distro 1.3.275 cannot be used).
+      - name: Cache Vulkan validation layer (Linux [gpu] lane)
+        if: env.LINUX_GPU_LANE == 'true'
+        id: vvl-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/vvl-prefix
+          key: ${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.config }}-vvl-${{ env.VVL_COMMIT }}-${{ hashFiles('scripts/build-vvl-linux.sh') }}
+
+      - name: Vulkan validation layer (Linux [gpu] lane)
+        if: env.LINUX_GPU_LANE == 'true'
+        run: |
+          if [ "${{ steps.vvl-cache.outputs.cache-hit }}" != true ]; then
+            VVL_TAG="$VVL_TAG" VVL_COMMIT="$VVL_COMMIT" scripts/build-vvl-linux.sh "$HOME/vvl-prefix"
+          fi
+          sudo cp -a "$HOME/vvl-prefix/." /usr/local/
+          sudo ldconfig
+          grep '"api_version"' /usr/local/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json
+
+      # ------------------------------------------------------------------
+      # Generate + build
+      # ------------------------------------------------------------------
+      - name: Generate (Windows, vs2026)
+        if: runner.os == 'Windows'
         shell: cmd
         run: |
           set _APH_NOPAUSE=1
           call GenerateProjects.bat
 
-      - name: Build Debug
-        run: msbuild Arcane.slnx /p:Configuration=Debug /m /nologo /v:minimal
+      - name: Generate (Linux/macOS, gmake)
+        if: runner.os != 'Windows'
+        run: ThirdParty/premake5/premake5 --cc=${{ matrix.premake_cc }} gmake
 
-      - name: Build Release
-        run: msbuild Arcane.slnx /p:Configuration=Release /m /nologo /v:minimal
+      # Windows: the solution, then ReferenceGame through arcbuild for THIS
+      # config, then the solution again so every host's postbuild restages
+      # the game module beside itself.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          msbuild Arcane.slnx /p:Configuration=${{ matrix.config }} /m /nologo /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bin/${{ matrix.config }}-windows-x86_64-md/arcbuild/arcbuild.exe build --project ReferenceProject --config ${{ matrix.config }} --sdk "${{ github.workspace }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild Arcane.slnx /p:Configuration=${{ matrix.config }} /m /nologo /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build Dist
-        run: msbuild Arcane.slnx /p:Configuration=Dist /m /nologo /v:minimal
+      # Linux/macOS: the engine libraries + tools first, then ReferenceGame
+      # through arcbuild (premake gmake + make against this checkout as the
+      # SDK), THEN the hosts and the test exe, whose postbuild stages
+      # ReferenceProject -- Binaries/ included -- beside themselves.
+      - name: Build (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          config=$(echo "${{ matrix.config }}" | tr '[:upper:]' '[:lower:]')
+          bindir=$(scripts/arcane-bin-dir.sh ${{ matrix.config }})
+          make -k -j"$MAKE_JOBS" config="$config" \
+            ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient 2>&1 | tee logs/build-engine.log
+          "$bindir/arcbuild/arcbuild" build --project ReferenceProject --config ${{ matrix.config }} --sdk "$GITHUB_WORKSPACE" \
+            2>&1 | tee logs/build-referencegame.log
+          ls -l ReferenceProject/Binaries/
+          make -k -j"$MAKE_JOBS" config="$config" \
+            ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests 2>&1 | tee logs/build-tests.log
 
-      # test-results/ must exist before the first reporter writes into it,
-      # matching the Jenkinsfile's own `if not exist test-results mkdir`.
-      - name: Prepare test-results
-        run: mkdir test-results
+      # ------------------------------------------------------------------
+      # Test: "~[gpu]" minus the per-OS exclusions, two seeds
+      # ------------------------------------------------------------------
+      - name: Test (Windows, two seeds)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($seed in @($env:SEED_A, $env:SEED_B)) {
+            powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run-tests.ps1 ${{ matrix.config }} --rng-seed $seed
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::seed $seed failed ($LASTEXITCODE)"; $failed = 1 }
+          }
+          exit $failed
 
-      # Each suite runs FROM ITS OWN EXE DIRECTORY (working-directory): fixtures,
-      # data/ and the staged automation-exclusions.json are all resolved relative
-      # to it, and the exclusion-expiry case hard-fails if that file is missing.
-      #
-      # -Invocation MUST MATCH the test-spec above, verbatim. The baseline entry
-      # is keyed on it, so a mismatch reports "NO BASELINE -- not checked"
-      # instead of comparing against counts taken a different way. The six
-      # committed baselines are "~[gpu]", which is exactly what this lane runs,
-      # so this lane genuinely checks them.
-      - name: Test Debug
-        working-directory: bin/Debug-windows-x86_64-md/ArcaneTests
-        run: .\ArcaneTests.exe "~[gpu]" -r console -r json::out=${{ github.workspace }}\test-results\arcane-debug.json
+      # Linux: under Xvfb with SDL's x11 driver, so windows are real native
+      # windows; macOS: SDL's cocoa driver in the runner's Aqua session, so
+      # windows are real NSWindows with a CAMetalLayer (offscreen has none).
+      - name: Test (Linux/macOS, two seeds)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p logs
+          wrap=""
+          if [ "$RUNNER_OS" = Linux ]; then
+            export SDL_VIDEODRIVER=x11
+            wrap='xvfb-run -a -s "-screen 0 1920x1080x24"'
+          else
+            export SDL_VIDEODRIVER=cocoa
+          fi
+          failed=0
+          for seed in "$SEED_A" "$SEED_B"; do
+            if ! eval "$wrap scripts/run-tests.sh ${{ matrix.config }} --rng-seed $seed" > "logs/tests-seed$seed.log" 2>&1; then
+              echo "::error::seed $seed failed"
+              failed=1
+              # Every failing case's block, so the job log alone diagnoses
+              # it (the artifacts are not always reachable).
+              echo "::group::failures, seed $seed"
+              grep -B10 -A20 -E "FAILED:|due to unexpected exception|due to a fatal error" "logs/tests-seed$seed.log" | head -n 4000 || true
+              echo "::endgroup::"
+            fi
+            tail -n 60 "logs/tests-seed$seed.log"
+          done
+          exit $failed
 
-      - name: Check Debug baselines
-        run: powershell -ExecutionPolicy Bypass -File scripts\check-baselines.ps1 -ReportPath "${{ github.workspace }}\test-results\arcane-debug.json" -Configuration Debug -Invocation "~[gpu]"
+      - name: Test [gpu] (Linux, lavapipe)
+        if: env.LINUX_GPU_LANE == 'true'
+        env:
+          SDL_VIDEODRIVER: x11
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -o pipefail
+          xvfb-run -a -s "-screen 0 1920x1080x24" scripts/run-tests.sh --gpu ${{ matrix.config }} \
+            --rng-seed "$SEED_A" 2>&1 | tee logs/tests-gpu.log
 
-      - name: Test Release
-        working-directory: bin/Release-windows-x86_64-md/ArcaneTests
-        run: .\ArcaneTests.exe "~[gpu]" -r console -r json::out=${{ github.workspace }}\test-results\arcane-release.json
+      - name: Windowed smoke (Linux, X11 + Wayland)
+        if: env.LINUX_GPU_LANE == 'true'
+        env:
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -o pipefail
+          xvfb-run -a -s "-screen 0 1920x1080x24" scripts/linux-windowed-smoke.sh \
+            ${{ matrix.config }} logs/windowed x11 wayland 2>&1 | tee logs/windowed-smoke.log
 
-      - name: Check Release baselines
-        run: powershell -ExecutionPolicy Bypass -File scripts\check-baselines.ps1 -ReportPath "${{ github.workspace }}\test-results\arcane-release.json" -Configuration Release -Invocation "~[gpu]"
+      - name: Test [gpu] (macOS, MoltenVK)
+        if: env.MACOS_GPU_LANE == 'true'
+        env:
+          SDL_VIDEODRIVER: cocoa
+        run: |
+          set -o pipefail
+          scripts/run-tests.sh --gpu ${{ matrix.config }} --rng-seed "$SEED_A" 2>&1 | tee logs/tests-gpu.log
 
-      - name: Test Dist
-        working-directory: bin/Dist-windows-x86_64-md/ArcaneTests
-        run: .\ArcaneTests.exe "~[gpu]" -r console -r json::out=${{ github.workspace }}\test-results\arcane-dist.json
+      # ------------------------------------------------------------------
+      # Reports
+      # ------------------------------------------------------------------
+      # Every distinct compiler/linker error of the build in one place (the
+      # build runs `make -k`), so a red leg reads at a glance.
+      - name: Summarize build errors (Linux/macOS)
+        if: failure() && runner.os != 'Windows'
+        run: |
+          grep -hE "(error|undefined reference|Undefined symbols|ld: )" logs/build-*.log 2>/dev/null | sort -u | head -150 || true
 
-      - name: Check Dist baselines
-        run: powershell -ExecutionPolicy Bypass -File scripts\check-baselines.ps1 -ReportPath "${{ github.workspace }}\test-results\arcane-dist.json" -Configuration Dist -Invocation "~[gpu]"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-${{ matrix.leg }}-${{ matrix.config }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Crashes/hangs drop symbolized stacks under <exe dir>/diagnostics/.
+      - name: Upload logs
+        if: failure() || env.LINUX_GPU_LANE == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-${{ matrix.leg }}-${{ matrix.config }}
+          path: |
+            logs/
+            bin/*/ArcaneTests/diagnostics/
+            bin/*/ArcaneTests/*.log
+            bin/*/ArcaneTests/ReferenceProject/Saved/Verify/
+            /tmp/arcane-witness/
+          if-no-files-found: ignore
+          retention-days: 14

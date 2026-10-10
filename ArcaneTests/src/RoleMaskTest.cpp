@@ -3,6 +3,7 @@
 // the net-mode/launch-flag INDEPENDENCE the spec names as a bug class (UE's
 // IsRunningDedicatedServer vs NetMode).
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Plugin/GameSystems.hpp>
 #include <Arcane/Plugin/PluginHost.hpp>
@@ -106,7 +107,7 @@ TEST_CASE("two Runtimes, one module: the Server-masked system exists only in the
     server.Components()->RegisterComponent<Pulse>();
     server.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(server));
     REQUIRE(host.AttachRuntime(client));
     REQUIRE(host.Load());
@@ -129,7 +130,7 @@ TEST_CASE("ListenServer instantiates BOTH masks in its one Runtime", "[runtime][
 {
     Arcane::Runtime listen(Arcane::Test::Process(), Arcane::NetMode::ListenServer);
     listen.Components()->RegisterComponent<Pulse>(); listen.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(listen));
     REQUIRE(host.Load());
     CHECK(listen.Schedulers().fixedUpdate.HasSystem<ServerOnlyTick>());
@@ -142,7 +143,7 @@ TEST_CASE("the factory table is the process's, cleared when the module unloads",
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>(); rt.Components()->RegisterComponent<RoleCounters>();
     const std::size_t before = Arcane::Test::Process().SystemFactories().Size();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(rt));
     REQUIRE(host.Load());
     CHECK(Arcane::Test::Process().SystemFactories().Size() == before + 2);
@@ -161,7 +162,7 @@ TEST_CASE("AttachRuntime refuses a secondary world that does not share the prima
     Arcane::Runtime stranger(Arcane::Test::Process(), Arcane::NetMode::Client);   // its OWN registry
     REQUIRE(stranger.Components() != primary.Components());
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     CHECK(host.AttachRuntime(primary));          // the FIRST attach always succeeds
     CHECK_FALSE(host.AttachRuntime(stranger));   // refused, and the host is unchanged
     CHECK(host.Runtimes().size() == 1);
@@ -193,7 +194,7 @@ TEST_CASE("the module's component descriptors are live in the secondary world to
     const auto hostDefaultConstruct = slot->defaultConstruct;
     REQUIRE(hostDefaultConstruct != nullptr);
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(server));
     REQUIRE(host.AttachRuntime(client));
     REQUIRE(host.Load());

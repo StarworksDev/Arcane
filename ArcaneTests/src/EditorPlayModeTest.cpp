@@ -15,6 +15,7 @@
 // instance, exactly like RuntimeTest.cpp's snapshot/restore cases.
 
 #include <catch2/catch_approx.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
@@ -242,7 +243,7 @@ TEST_CASE("PlaySession routes Play/Stop through the hosted module's SaveState/Lo
     Arcane::Runtime runtime(Arcane::Test::Process());
     runtime.Components()->RegisterComponent<Pulse>();
     runtime.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(runtime));
     REQUIRE(host.Load());                       // OnInit creates the module's Pulse entity
 
@@ -624,7 +625,7 @@ TEST_CASE("Play as embedded server with a loaded module: the server world gets t
     using namespace Arcane::HotReloadTest;
     Arcane::Runtime runtime(Arcane::Test::Process());
     runtime.Components()->RegisterComponent<Pulse>(); runtime.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(runtime);
     REQUIRE(host.Load());
     // The BEHAVIOUR probe both worlds stamp into (RoleCounters, HotReloadShared.hpp):
@@ -684,7 +685,7 @@ TEST_CASE("a Play topology flip moves the NETMODE the MODULE sees, not only the 
     Arcane::Runtime runtime(Arcane::Test::Process());
     runtime.Components()->RegisterComponent<Pulse>();
     runtime.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(runtime));
     REQUIRE(host.Load());
 
@@ -735,7 +736,7 @@ TEST_CASE("Play as embedded server is REFUSED when the host will not take the se
     Arcane::Runtime primary(Arcane::Test::Process());
     Arcane::Runtime other(Arcane::Test::Process());            // its OWN ComponentRegistry
     REQUIRE(other.Components() != primary.Components());
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(primary));                      // primary = the first attach
 
     Arcane::Editor::PlaySession play;
@@ -763,7 +764,7 @@ TEST_CASE("an embedded-server session Stopped before its PlaySession dies leaves
     Arcane::Runtime runtime(Arcane::Test::Process());
     runtime.Components()->RegisterComponent<Pulse>();
     runtime.Components()->RegisterComponent<RoleCounters>();
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(runtime));
     REQUIRE(host.Load());
     {

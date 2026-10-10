@@ -13,6 +13,7 @@
 // options ARE built -- see Many()/GetMany().
 // PRESENTATION-FREE + C++23-clean.
 #include <charconv>
+#include <Arcane/Util/CharConv.hpp>   // FromChars: std::from_chars incl. floating point on every standard library
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -102,7 +103,7 @@ namespace Arcane
     {
         const std::string s = Get(name);
         T out{};
-        (void)std::from_chars(s.data(), s.data() + s.size(), out);
+        (void)Arcane::FromChars(s.data(), s.data() + s.size(), out);
         return out;
     }
 }

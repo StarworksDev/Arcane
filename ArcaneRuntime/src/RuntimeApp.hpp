@@ -256,6 +256,10 @@ private:
     // ShutdownGraphPath must never mistake for "the reference was looked
     // for and not found".
     Arcane::ReferenceResolution           m_compareResolution;
+    // The software adapter's own reference set (Arcane::ReferenceAdapterSet),
+    // "" on hardware. Fixed at the first resolve so the post-bless re-resolve
+    // in ShutdownGraphPath walks the same levels.
+    std::string                           m_compareAdapterSet;
     // The reference pixels the settle loop's compare conjunct reads,
     // loaded ONCE from m_compareResolution.path. Left default/invalid
     // whenever --compare was not given, or --bless disables the conjunct

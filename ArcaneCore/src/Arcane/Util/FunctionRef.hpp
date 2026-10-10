@@ -20,6 +20,28 @@ namespace Arcane
         void* m_obj = nullptr;
         R (*m_thunk)(void*, Args...) = nullptr;
 
+        // Function TYPES need reinterpret_cast: static_cast between a function
+        // pointer and void* is an MSVC extension that GCC and Clang reject
+        // ("invalid static_cast"). The round trip through void* is
+        // conditionally-supported and works on every target Arcane builds for.
+        template <class T>
+        static void* Erase(T& f) noexcept
+        {
+            if constexpr (std::is_function_v<T>)
+                return reinterpret_cast<void*>(&f);
+            else
+                return const_cast<void*>(static_cast<const void*>(std::addressof(f)));
+        }
+
+        template <class T>
+        static T& Restore(void* o) noexcept
+        {
+            if constexpr (std::is_function_v<T>)
+                return *reinterpret_cast<T*>(o);
+            else
+                return *static_cast<T*>(o);
+        }
+
     public:
         FunctionRef() = default;
 
@@ -32,9 +54,9 @@ namespace Arcane
             // yields the function's stable address (not a temporary) -- safe. Same for
             // any lvalue callable. Do NOT bind a function-POINTER rvalue (e.g. a cast
             // result): F would deduce as a pointer type and m_obj would dangle.
-            : m_obj(const_cast<void*>(static_cast<const void*>(std::addressof(f)))),
+            : m_obj(Erase<std::remove_reference_t<F>>(f)),
               m_thunk(+[](void* o, Args... a) -> R {
-                  return (*static_cast<std::remove_reference_t<F>*>(o))(static_cast<Args&&>(a)...);
+                  return Restore<std::remove_reference_t<F>>(o)(static_cast<Args&&>(a)...);
               })
         {
         }

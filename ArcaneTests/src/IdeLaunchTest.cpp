@@ -9,6 +9,7 @@
 // Visual Studio is actually running on the desk.
 
 #include <cstdlib>
+#include <Arcane/Platform/Platform.hpp>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -42,12 +43,24 @@ TEST_CASE("IdeLaunch::SameSolutionPath compares case- and separator-insensitivel
 {
     // DTE hands back a backslash, mixed-case Windows path; DiscoverSolution
     // hands back whatever the directory iterator produced. Same file either way.
+#if ARC_PLATFORM_WINDOWS
     CHECK(IdeLaunch::SameSolutionPath(L"D:\\dev\\Game\\Game.slnx", L"d:/dev/game/game.slnx"));
     CHECK(IdeLaunch::SameSolutionPath(L"D:\\dev\\.\\Game\\Game.slnx", L"D:\\dev\\Game\\Game.slnx"));
     CHECK(IdeLaunch::SameSolutionPath(L"D:\\dev\\Other\\..\\Game\\Game.slnx", L"D:\\dev\\Game\\Game.slnx"));
 
     CHECK_FALSE(IdeLaunch::SameSolutionPath(L"D:\\dev\\Game\\Game.slnx", L"D:\\dev\\Game\\Other.slnx"));
     CHECK_FALSE(IdeLaunch::SameSolutionPath(L"D:\\dev\\Game\\Game.slnx", L"D:\\dev\\Game2\\Game.slnx"));
+#else
+    // Native POSIX paths: '\\' is an ordinary file-name byte there, so the
+    // normalising half ("." and ".." segments, the case fold) is what is
+    // exercised. (The Visual Studio half of IdeLaunch is Windows-only.)
+    CHECK(IdeLaunch::SameSolutionPath(L"/dev/Game/Game.slnx", L"/dev/game/game.slnx"));
+    CHECK(IdeLaunch::SameSolutionPath(L"/dev/./Game/Game.slnx", L"/dev/Game/Game.slnx"));
+    CHECK(IdeLaunch::SameSolutionPath(L"/dev/Other/../Game/Game.slnx", L"/dev/Game/Game.slnx"));
+
+    CHECK_FALSE(IdeLaunch::SameSolutionPath(L"/dev/Game/Game.slnx", L"/dev/Game/Other.slnx"));
+    CHECK_FALSE(IdeLaunch::SameSolutionPath(L"/dev/Game/Game.slnx", L"/dev/Game2/Game.slnx"));
+#endif
     // An empty side never matches -- a VS with NO solution open reports an
     // empty FullName, and that must never equal anything we ask about.
     CHECK_FALSE(IdeLaunch::SameSolutionPath(L"", L"D:\\dev\\Game\\Game.slnx"));

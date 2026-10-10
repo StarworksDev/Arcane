@@ -6,5 +6,5 @@ source  : D:\dev\starworks\Mosaic
 commit  : c63a4b26780be6400aa539e402e0268557713f7a
 branch  : main
 subject : docs(license): copyright to Ethan Temprovich (Starworks); contributions sign off under the DCO (MIT unchanged)
-synced  : 2026-10-10 10:48:53
+synced  : 2026-10-10 10:56:52
 scope   : include/ + src/ + LICENSE

@@ -53,6 +53,7 @@
 // purpose is to be broken, which this harness refuses on principle.
 
 #include "Helpers/HostWitness.hpp"
+#include <Arcane/Platform/Platform.hpp>   // ExecutableFileName: .exe on Windows only
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -74,8 +75,26 @@ namespace
     {
         const std::filesystem::path p = std::filesystem::absolute("../ArcaneRuntime");
         INFO("staged ArcaneRuntime not found -- build Arcane.slnx first: " << p.string());
-        REQUIRE(std::filesystem::exists(p / "ArcaneRuntime.exe"));
+        REQUIRE(std::filesystem::exists(p / Arcane::Platform::ExecutableFileName("ArcaneRuntime")));
         return p;
+    }
+
+    // The software-adapter reference sets (ReferenceAdapterSet: "vulkan-lavapipe"
+    // and friends) under `refs` that hold `file` -- the extra level a scenario
+    // that rewrites or removes "every level" of a reference must also touch.
+    std::vector<std::string> AdapterSetsHolding(const std::filesystem::path& refs,
+                                                const std::string& file)
+    {
+        std::vector<std::string> sets;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(refs, ec))
+        {
+            const std::string dir = e.path().filename().string();
+            if (e.is_directory() && dir.rfind("vulkan-", 0) == 0 &&
+                std::filesystem::exists(e.path() / file))
+                sets.push_back(dir);
+        }
+        return sets;
     }
 
     // The invocation shape every scenario shares. --report is passed HERE, by
@@ -84,7 +103,7 @@ namespace
     WitnessInvocation HostInv(const WitnessScratch& scratch, std::vector<std::string> extraArgs)
     {
         WitnessInvocation inv;
-        inv.exePath    = scratch.Dir() / "ArcaneRuntime.exe";
+        inv.exePath    = scratch.Dir() / Arcane::Platform::ExecutableFileName("ArcaneRuntime");
         inv.workingDir = scratch.Dir();
         inv.reportPath = scratch.Dir() / "witness-report.json";
         inv.args = { "--project", "ReferenceProject", "--headless", "--backend", "vulkan",
@@ -115,6 +134,11 @@ TEST_CASE("W1: settle spends BOTH bounds when the compare conjunct cannot pass",
                                std::filesystem::copy_options::overwrite_existing);
     std::filesystem::copy_file(wrong, refs / "vulkan" / "runtime-scene.png",
                                std::filesystem::copy_options::overwrite_existing);
+    // ...and every software-adapter set's own image (ReferenceAdapterSet:
+    // "vulkan-lavapipe" and friends), which resolves FIRST on such an adapter.
+    for (const std::string& set : AdapterSetsHolding(refs, "runtime-scene.png"))
+        std::filesystem::copy_file(wrong, refs / set / "runtime-scene.png",
+                                   std::filesystem::copy_options::overwrite_existing);
 
     // 4000, not the plan's 2000: process wall time INCLUDES boot (~2 s for this
     // host on this tree), so a 2000 ms bound is covered by boot alone and the
@@ -192,6 +216,8 @@ TEST_CASE("W3: a reference missing at EVERY level reports the ordered search spa
     // Every level of the chain has to go (Arc A: one level just falls back).
     REQUIRE(std::filesystem::remove(refs / "vulkan" / "runtime-scene.png"));
     REQUIRE(std::filesystem::remove(refs / "runtime-scene.png"));
+    for (const std::string& set : AdapterSetsHolding(refs, "runtime-scene.png"))
+        REQUIRE(std::filesystem::remove(refs / set / "runtime-scene.png"));
 
     auto run = RunWitness(HostInv(scratch,
         { "--settle", "2", "--settle-timeout", "1000", "--compare", "runtime-scene" }));
@@ -236,15 +262,25 @@ TEST_CASE("W3: a reference missing at EVERY level reports the ordered search spa
     REQUIRE(compare.contains("triedPaths"));
     REQUIRE(compare["triedPaths"].is_array());
     const auto& tried = compare["triedPaths"];
-    REQUIRE(tried.size() == 2);
-    REQUIRE(tried[0].is_string());
-    REQUIRE(tried[1].is_string());
+    // Two levels on a hardware adapter; three on a software one, whose own
+    // reference set (ReferenceAdapterSet, e.g. "vulkan-lavapipe") is probed
+    // before the two below.
+    REQUIRE((tried.size() == 2 || tried.size() == 3));
+    for (const auto& t : tried) REQUIRE(t.is_string());
+    const std::size_t b = tried.size() - 2;
+    if (b == 1)
+    {
+        const std::filesystem::path adapter = tried[0].get<std::string>();
+        INFO("adapter-level candidate: " << adapter.string());
+        REQUIRE(adapter.filename() == "runtime-scene.png");
+        REQUIRE(adapter.parent_path().filename().string().rfind("vulkan-", 0) == 0);
+    }
     // Ordered: backend level first, shared second (as Task 1 pinned).
     // ReferenceImages.cpp's ResolveReference pushes the backend-keyed
     // candidate (`root/vulkan/runtime-scene.png`) before the shared one
     // (`root/runtime-scene.png`) -- both literally, and in triedPaths.
-    REQUIRE(tried[0].get<std::string>().find("vulkan") != std::string::npos);
-    REQUIRE(tried[1].get<std::string>().find("runtime-scene.png") != std::string::npos);
+    REQUIRE(std::filesystem::path(tried[b].get<std::string>()).parent_path().filename() == "vulkan");
+    REQUIRE(tried[b + 1].get<std::string>().find("runtime-scene.png") != std::string::npos);
 }
 
 TEST_CASE("W4: a dynamic body authored in physics.arcscene falls under the runtime host",

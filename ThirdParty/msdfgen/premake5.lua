@@ -38,7 +38,9 @@ project "msdfgen"
     -- shape-description.cpp each #define _CRT_SECURE_NO_WARNINGS unguarded,
     -- colliding with the command-line define above. Upstream vendored code
     -- -- not ours to patch.
-    disablewarnings { "4005" }
+    filter "system:windows"
+        disablewarnings { "4005" }   -- MSVC-numbered: never passed to GCC/Clang as -Wno-4005
+    filter {}
 
     filter "system:windows"
         systemversion "latest"

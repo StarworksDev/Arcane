@@ -18,6 +18,15 @@
 #define PSAPI_VERSION 2
 #include <windows.h>
 #include <psapi.h>
+#elif defined(__APPLE__)
+#include <Arcane/Base/Engine.hpp>        // ExecutablePathUtf8: the exe directory, an owned root
+#include <Arcane/Platform/Process.hpp>   // MachImageExtent
+#include <filesystem>
+#include <mach-o/dyld.h>                 // _dyld_image_count & co: the Mach-O loader's image list
+#else
+#include <Arcane/Base/Engine.hpp>   // ExecutablePathUtf8: the exe directory, an owned root
+#include <filesystem>
+#include <link.h>                   // dl_iterate_phdr: the ELF loader's module list
 #endif
 
 namespace Arcane::ForeignModules
@@ -188,7 +197,7 @@ namespace Arcane::ForeignModules
             WideCharToMultiByte(CP_UTF8, 0, wide, static_cast<int>(len), narrow.data(), bytes, nullptr, nullptr);
             return DirectoryOf(narrow);
 #else
-            return {};
+            return DirectoryOf(ExecutablePathUtf8());
 #endif
         }
 
@@ -265,6 +274,13 @@ namespace Arcane::ForeignModules
         }
         if (IsUnder(canonical, Canonical(systemRoot)))
             return Origin::System;
+#if defined(__APPLE__)
+        // macOS keeps the OS in TWO trees: /usr (SystemRoot) and /System
+        // (every framework -- Metal, AppKit, IOKit -- and their drivers).
+        // Both are SIP-protected and live in the dyld shared cache.
+        if (IsUnder(canonical, "/system"))
+            return Origin::System;
+#endif
         return Origin::Foreign;
     }
 
@@ -342,7 +358,12 @@ namespace Arcane::ForeignModules
         WideCharToMultiByte(CP_UTF8, 0, wide, static_cast<int>(len), narrow.data(), bytes, nullptr, nullptr);
         return narrow;
 #else
-        return {};
+        // Linux port (2026-10-05) and macOS (2026-10-07; OriginOf adds
+        // /System there): the distribution's tree. /lib, /lib64 and
+        // /bin are symlinks into /usr on every merged-/usr distro, and
+        // EnumerateProcessModules reports CANONICAL paths, so the loader,
+        // libc, the Vulkan loader/ICDs and a system SDL3 all resolve under it.
+        return "/usr";
 #endif
     }
 
@@ -400,6 +421,78 @@ namespace Arcane::ForeignModules
             }
             modules.push_back(std::move(m));
         }
+#elif defined(__APPLE__)
+        // Mach-O: dyld's image list (the main executable first, then every
+        // dylib, including the shared-cache system libraries). base/size are
+        // the slid LC_SEGMENT_64 union, the same extent Module::Image reports.
+        const std::uint32_t count = ::_dyld_image_count();
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const char* raw = ::_dyld_get_image_name(i);
+            if (!raw || !*raw)
+                continue;
+            std::string path = raw;
+            std::error_code ec;
+            const std::filesystem::path real = std::filesystem::canonical(path, ec);
+            if (!ec)
+                path = real.generic_string();
+
+            LoadedModule m;
+            m.path = path;
+            const std::size_t slash = m.path.find_last_of('/');
+            m.name = slash == std::string::npos ? m.path : m.path.substr(slash + 1);
+            if (m.name.empty())
+                continue;
+            const Platform::ImageExtent extent =
+                Platform::MachImageExtent(::_dyld_get_image_header(i), ::_dyld_get_image_vmaddr_slide(i));
+            m.base = extent.base;
+            m.size = extent.size;
+            modules.push_back(std::move(m));
+        }
+#else
+        // ELF: dl_iterate_phdr walks the loader's own list (it takes the
+        // loader lock, like EnumProcessModulesEx). The main program reports an
+        // empty name -- its path is the exe's; the vDSO has no file at all and
+        // is skipped. base/size are the PT_LOAD union, the same extent
+        // Module::Image reports.
+        const std::string exePath = ExecutablePathUtf8();
+        std::pair<std::vector<LoadedModule>*, const std::string*> context{ &modules, &exePath };
+        ::dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* user) -> int
+        {
+            auto& out = *static_cast<std::pair<std::vector<LoadedModule>*, const std::string*>*>(user);
+            std::string path = (info->dlpi_name && *info->dlpi_name) ? info->dlpi_name : *out.second;
+            if (path.empty() || path.find('/') == std::string::npos)
+                return 0;   // the vDSO ("linux-vdso.so.1"): no file behind it
+            std::error_code ec;
+            const std::filesystem::path real = std::filesystem::canonical(path, ec);
+            if (!ec)
+                path = real.generic_string();
+
+            LoadedModule m;
+            m.path = path;
+            const std::size_t slash = m.path.find_last_of('/');
+            m.name = slash == std::string::npos ? m.path : m.path.substr(slash + 1);
+            if (m.name.empty())
+                return 0;
+
+            ElfW(Addr) lo = ~ElfW(Addr){ 0 };
+            ElfW(Addr) hi = 0;
+            for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i)
+            {
+                const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+                if (ph.p_type != PT_LOAD)
+                    continue;
+                lo = std::min(lo, ph.p_vaddr);
+                hi = std::max(hi, ph.p_vaddr + ph.p_memsz);
+            }
+            if (hi > lo)
+            {
+                m.base = static_cast<std::uint64_t>(info->dlpi_addr + lo);
+                m.size = static_cast<std::uint64_t>(hi - lo);
+            }
+            out.first->push_back(std::move(m));
+            return 0;
+        }, &context);
 #endif
         return modules;
     }

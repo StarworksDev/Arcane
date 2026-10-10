@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
+#include <Arcane/Platform/Platform.hpp>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -63,6 +65,20 @@ namespace
                               std::vector<Arcane::Diagnostic>(diags.begin(), diags.end()));
     }
 
+    // Detaches the sink however the case exits. A failed REQUIRE throws past
+    // the case's own SetSink(nullptr, nullptr), which left `cap` (a stack
+    // local) installed: the NEXT Publish from any later case then wrote
+    // through a dangling pointer -- the Linux port's ArcaneTests SIGSEGV
+    // (inventory 2026-10-01 L6). The explicit detach lines stay; this is the
+    // backstop.
+    struct ScopedCaptureSink
+    {
+        explicit ScopedCaptureSink(Capture& cap) { Arcane::Diagnostics::SetSink(&CaptureSink, &cap); }
+        ~ScopedCaptureSink() { Arcane::Diagnostics::SetSink(nullptr, nullptr); }
+        ScopedCaptureSink(const ScopedCaptureSink&) = delete;
+        ScopedCaptureSink& operator=(const ScopedCaptureSink&) = delete;
+    };
+
     // The sets published under exactly `key`, in order. A module (re)load also
     // republishes "config.cvars" (settings spec s4.8), so a test that pins
     // PluginHost's own key reads this, not the whole call list.
@@ -89,7 +105,7 @@ TEST_CASE("An ABI-mismatched plugin reports BOTH version numbers", "[plugin][dia
     // (ArcaneTests/plugins/HotReloadPlugin.cpp:4,48), so this is unambiguously the
     // AbiMismatch cause -- not a missing export and not a load failure.
     Arcane::PluginResolveError error;
-    auto plugin = Arcane::Plugin::Load(std::filesystem::path("HotReloadPluginBad.dll"), &error);
+    auto plugin = Arcane::Plugin::Load(std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginBad")), &error);
 
     CHECK_FALSE(plugin.has_value());
     CHECK(error.kind == Arcane::PluginResolveError::Kind::AbiMismatch);
@@ -101,8 +117,9 @@ TEST_CASE("A missing required export is named", "[plugin][diagnostics]")
 {
     // ArcaneClient.dll itself loads fine as a module but exports none of the
     // plugin entry points -- the cheapest real MissingExport case in-tree.
+    // (libArcaneClient.so on ELF: SharedLibraryFileName spells it.)
     Arcane::PluginResolveError error;
-    auto plugin = Arcane::Plugin::Load(std::filesystem::path("ArcaneClient.dll"), &error);
+    auto plugin = Arcane::Plugin::Load(std::filesystem::path(Arcane::Platform::SharedLibraryFileName("ArcaneClient")), &error);
 
     CHECK_FALSE(plugin.has_value());
     CHECK(error.kind == Arcane::PluginResolveError::Kind::MissingExport);
@@ -123,17 +140,21 @@ TEST_CASE("A missing required export is named", "[plugin][diagnostics]")
 TEST_CASE("Module::IsMapped tells an already-mapped image from one this process has not loaded", "[plugin][diagnostics]")
 {
     // The query Plugin::Load guards its refused-image UnregisterModule with:
-    // ArcaneClient.dll is mapped (this exe links it), the two fixtures are
-    // not until someone loads them, and a missing file is never mapped.
-    CHECK(Arcane::Module::IsMapped(std::filesystem::path("ArcaneClient.dll")));
-    CHECK(Arcane::Module::MappedImage(std::filesystem::path("ArcaneClient.dll")).base != nullptr);
-    CHECK(Arcane::Module::MappedImage(std::filesystem::path("ArcaneClient.dll")).size != 0);
-    CHECK_FALSE(Arcane::Module::IsMapped(std::filesystem::path("this-path-does-not-exist-arcane.dll")));
-    CHECK(Arcane::Module::MappedImage(std::filesystem::path("this-path-does-not-exist-arcane.dll")).base == nullptr);
+    // ArcaneClient is mapped (this exe links it), the fixture is not until
+    // someone loads it, and a missing file is never mapped. SharedLibraryFileName
+    // / ModuleFileName spell the running platform's image names.
+    const std::filesystem::path client = Arcane::Platform::SharedLibraryFileName("ArcaneClient");
+    const std::filesystem::path bad = Arcane::Platform::ModuleFileName("HotReloadPluginBad");
+    const std::filesystem::path missing = "this-path-does-not-exist-arcane";
+    CHECK(Arcane::Module::IsMapped(client));
+    CHECK(Arcane::Module::MappedImage(client).base != nullptr);
+    CHECK(Arcane::Module::MappedImage(client).size != 0);
+    CHECK_FALSE(Arcane::Module::IsMapped(missing));
+    CHECK(Arcane::Module::MappedImage(missing).base == nullptr);
 
-    auto plugin = Arcane::Plugin::Load(std::filesystem::path("HotReloadPluginBad.dll"));
+    auto plugin = Arcane::Plugin::Load(bad);
     REQUIRE_FALSE(plugin.has_value());   // ABI-refused, then unmapped by Plugin::Load itself
-    CHECK_FALSE(Arcane::Module::IsMapped(std::filesystem::path("HotReloadPluginBad.dll")));
+    CHECK_FALSE(Arcane::Module::IsMapped(bad));
 }
 
 #if defined(_WIN32)
@@ -183,15 +204,26 @@ TEST_CASE("CRT-flavor scan classifies in-tree binaries without loading them", "[
     // compile-time truth in both configurations. (A genuine cross-flavor DLL
     // cannot exist in-tree; the synthetic-image case below covers the other
     // family's detection path.)
+#if ARC_PLATFORM_WINDOWS
 #if defined(_DEBUG)
     constexpr auto expected = Arcane::CrtFlavor::Debug;
 #else
     constexpr auto expected = Arcane::CrtFlavor::Release;
 #endif
     std::string matched;
-    CHECK(Arcane::Module::ScanFileCrtFlavor("HotReloadPluginBad.dll", &matched) == expected);
+    CHECK(Arcane::Module::ScanFileCrtFlavor(Arcane::Test::ModuleFile("HotReloadPluginBad"), &matched) == expected);
     CHECK_FALSE(matched.empty());
     CHECK(Arcane::Module::ScanFileCrtFlavor("ArcaneClient.dll") == expected);
+#else
+    // The CRT-flavor split is a PE import-table fact (ucrtbased vs ucrtbase);
+    // an ELF image links the one libstdc++/glibc. Module.hpp's contract is
+    // "Windows-only; always Unknown elsewhere" -- the fail-OPEN verdict
+    // Plugin::Load ignores -- so that is what the in-tree binaries must read.
+    std::string matched;
+    CHECK(Arcane::Module::ScanFileCrtFlavor(Arcane::Test::ModuleFile("HotReloadPluginBad"), &matched) == Arcane::CrtFlavor::Unknown);
+    CHECK(matched.empty());
+    CHECK(Arcane::Module::ScanFileCrtFlavor(Arcane::Platform::SharedLibraryFileName("ArcaneClient")) == Arcane::CrtFlavor::Unknown);
+#endif
 }
 
 TEST_CASE("CRT-flavor scan yields Unknown for missing, empty, and non-PE input",
@@ -295,9 +327,9 @@ TEST_CASE("PluginHost::Load publishes the ABI-mismatch diagnostic under plugin:<
     Arcane::Runtime rt(Arcane::Test::Process());
 
     Capture cap;
-    Arcane::Diagnostics::SetSink(&CaptureSink, &cap);
+    const ScopedCaptureSink sinkGuard(cap);
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginBad.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginBad")));
     host.AttachRuntime(rt);
     CHECK_FALSE(host.Load());
 
@@ -310,7 +342,7 @@ TEST_CASE("PluginHost::Load publishes the ABI-mismatch diagnostic under plugin:<
     CHECK(d.scope == Arcane::DiagScope::Plugin);
     CHECK(d.code == "plugin.abi.mismatch");
     CHECK(d.locator.kind == Arcane::DiagLocator::Kind::File);
-    CHECK(d.locator.file == "HotReloadPluginBad.dll");
+    CHECK(d.locator.file == Arcane::Test::ModuleFile("HotReloadPluginBad"));
     // BOTH ABI numbers must be in the message, not just latched in the struct.
     CHECK(d.message.find(std::to_string(Arcane::kGamePluginABIVersion + 999)) != std::string::npos);
     CHECK(d.message.find(std::to_string(Arcane::kGamePluginABIVersion)) != std::string::npos);
@@ -324,24 +356,24 @@ TEST_CASE("A failed reload publishes the cause; the next successful reload retra
 {
     // Guard against ordering contamination: ensure we start with genuine V1 content
     // (same idiom as PluginHostTest.cpp's "ABI mismatch rolls back to last-good").
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>();   // engine sees the type, mirrors PluginHostTest.cpp
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
     REQUIRE(host.Load());   // good load first -- its Diagnostics::Clear happens BEFORE the sink below
 
     Capture cap;
-    Arcane::Diagnostics::SetSink(&CaptureSink, &cap);
+    const ScopedCaptureSink sinkGuard(cap);
 
     // Swap in the ABI-mismatched image and force a reload: fails, rolls back to
     // last-good, and (this task's deliverable) publishes the real cause under
     // plugin:HotReloadPluginV1 even though the session survives on the old image.
-    std::filesystem::copy_file("HotReloadPluginBad.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginBad"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
     CHECK_FALSE(host.ForceReload());
     CHECK(host.IsLoaded());   // still on last-good
@@ -353,7 +385,7 @@ TEST_CASE("A failed reload publishes the cause; the next successful reload retra
 
     // Swap the good image back and reload again: succeeds, and retracts the row
     // via Diagnostics::Clear -- a Publish with an empty set for the SAME key.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
     CHECK(host.ForceReload());
 
@@ -365,6 +397,6 @@ TEST_CASE("A failed reload publishes the cause; the next successful reload retra
     host.Unload();
 
     // restore the fixture for re-runs
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 }

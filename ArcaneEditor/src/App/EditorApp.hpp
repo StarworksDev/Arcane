@@ -785,6 +785,9 @@ namespace Arcane::Editor
         // frames rendered, rather than spending the whole --settle budget
         // reporting "could not compare" on every attempt).
         Arcane::ReferenceResolution           m_compareResolution;
+        // The software adapter's own reference set (Arcane::ReferenceAdapterSet),
+        // "" on hardware; fixed at the first resolve for the post-bless one.
+        std::string                           m_compareAdapterSet;
         // The reference pixels the settle loop's compare conjunct reads.
         // Left default/invalid whenever --compare was not given, or --bless
         // disables the conjunct entirely (see m_compareRequested below).

@@ -35,18 +35,38 @@
 #include <string>
 #include <thread>
 
+namespace DeathFixturePureCall
+{
+    // A pure virtual call, made so no optimizer can remove it:
+    //  - from Base's CONSTRUCTOR, where the vptr is Base's and stays so (the
+    //    old destructor shape loses its vptr reset to GCC's lifetime DSE);
+    //  - through a volatile-laundered `this`, so the call cannot be resolved
+    //    statically;
+    //  - in a NAMED namespace: inside the anonymous one the hierarchy is
+    //    closed, GCC -O2 proves the only concrete type is Derived and
+    //    devirtualizes the call into Derived::Pure -- a no-op, and the
+    //    Release fixture exited 0.
+    struct Base;
+    inline Base* volatile g_pureTarget = nullptr;
+    struct Base { Base() { g_pureTarget = this; g_pureTarget->Pure(); } virtual ~Base() = default; virtual void Pure() = 0; };
+    struct Derived : Base { void Pure() override {} };
+}
+
 namespace
 {
-    struct Base { virtual ~Base() { Call(); } virtual void Pure() = 0; void Call() { Pure(); } };
-    struct Derived : Base { void Pure() override {} };
     volatile int g_sink = 0;
+    // The frame ESCAPES (its address is published), so no compiler may turn
+    // this accumulator recursion into a loop -- Clang's tail-recursion
+    // elimination does exactly that to the non-escaping form at -O2, and the
+    // "overflow" then spins forever instead of faulting.
     // The stack-overflow death is the point: C4717 ("recursive on all control
     // paths") describes exactly that, so it is silenced for this function only.
+    volatile char* volatile g_escape = nullptr;
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4717)
 #endif
-    int Recurse(int depth) { volatile char pad[4096]; pad[0] = static_cast<char>(depth); g_sink += pad[0]; return Recurse(depth + 1) + 1; }
+    int Recurse(int depth) { volatile char pad[4096]; pad[0] = static_cast<char>(depth); g_escape = pad; g_sink += pad[0]; return Recurse(depth + 1) + 1; }
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -97,7 +117,9 @@ int main(int argc, char** argv)
     // unwinding at all. The monitor's log-tail assertion reads it back.
     ARC_WARN("death fixture: mode {}", die);
 
-    if (die == "av")                { int* p = nullptr; *p = 1; }
+    // `volatile`: a store through a CONSTANT null is UB the optimizer may
+    // replace with a trap instruction (SIGILL, not an access violation).
+    if (die == "av")                { int* volatile p = nullptr; *p = 1; }
     else if (die == "assert")       { ARC_ASSERT(false, "fixture assert"); }
     // NOT `return 0` here: an ensure is the one mode that SURVIVES, so it must
     // leave by the ordinary exit below -- which calls Diagnostics::Shutdown().
@@ -112,8 +134,24 @@ int main(int argc, char** argv)
     else if (die == "ensure")       { (void)ARC_ENSURE(false, "fixture ensure"); }
     else if (die == "terminate")    { throw std::runtime_error("fixture terminate"); }
     else if (die == "abort")        { std::abort(); }
+#if defined(_WIN32)
     else if (die == "invalid-parameter") { char buf[4]; strcpy_s(buf, 4, "toolong"); }
-    else if (die == "purecall")     { Derived d; (void)d; }   // the dtor's virtual call is pure
+#else
+    // POSIX has no CRT invalid-parameter handler. Its counterpart is a libc
+    // contract check: exactly what _FORTIFY_SOURCE compiles strcpy into,
+    // spelled out so it fires at -O0 too. glibc reports the overflow and
+    // abort()s -- which the crash path files as `terminate`, the honest kind
+    // on this platform (CrashPathTest.cpp's family table says so). macOS libc
+    // traps instead (SIGTRAP on Apple silicon), filed as `crash`.
+    else if (die == "invalid-parameter")
+    {
+        char buf[4];
+        const char* volatile src = "toolong";
+        __builtin___strcpy_chk(buf, src, sizeof(buf));
+        g_sink += buf[0];
+    }
+#endif
+    else if (die == "purecall")     { DeathFixturePureCall::Derived d; (void)d; }   // Base's ctor makes a pure virtual call
     else if (die == "stack-overflow") { return Recurse(0); }
 #if defined(_WIN32)
     // Task 9, the monitor's row (spec s5.8): __fastfail raises a
@@ -146,6 +184,10 @@ int main(int argc, char** argv)
         // being optimized away.
         std::size_t n = std::numeric_limits<std::size_t>::max() / 2;
         volatile char* p = new char[n];
+        // ...and the pointer ESCAPES: Clang -O2 elides even a runtime-sized
+        // new whose result is only null-tested (it can never be null, so the
+        // whole allocation folds away and the fixture exits 0).
+        g_escape = p;
         g_sink += p ? 1 : 0;
     }
     if (hangSeconds > 0)

@@ -20,7 +20,7 @@ namespace Arcane
         // from --backend / --no-vsync, and HostBoot::ApplyEarlyConfigRungs
         // replaces them with the published render.backend / render.vsync
         // (which those flags feed, on the CommandLine rung).
-        GraphicsBackend backend   = GraphicsBackend::D3D12;
+        GraphicsBackend backend   = kDefaultGraphicsBackend;   // D3D12 on Windows, Vulkan elsewhere
         bool            backendSupplied = false;   // --backend was on the command line
         std::uint64_t   maxFrames = 0;             // 0 = run until quit
         bool            vsync     = true;

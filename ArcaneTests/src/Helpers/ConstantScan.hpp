@@ -11,7 +11,7 @@
 // statement's line. The statement is MARKED when the nearest non-blank line
 // above it starts with ARC_CONSTANT(; that one marker covers all its declarators.
 
-#include "Helpers/ReferenceProjectDir.hpp"
+#include "ReferenceProjectDir.hpp"
 
 #include <cctype>
 #include <filesystem>

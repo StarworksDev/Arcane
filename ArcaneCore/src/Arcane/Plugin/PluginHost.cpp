@@ -413,8 +413,9 @@ namespace Arcane
         // and TeardownImage can drop exactly its entries before the unmap.
         //
         // NO IMAGE RANGE, NO REGISTRATION. Module::Image() reports {} where the
-        // platform has no implementation (Module.cpp: non-Windows, "no host ships
-        // here yet") and when the PE header read fails. `base` is the whole owner
+        // platform has no implementation (Module.cpp: PE headers on Windows, the
+        // ELF link_map + PT_LOAD segments on Linux; nothing elsewhere) and when
+        // that read fails. `base` is the whole owner
         // key, so in that state nothing could ever clear a factory before the image
         // unmaps -- and a second such module would collide on the same null key.
         // Init still runs (a module that registers no systems is unaffected);

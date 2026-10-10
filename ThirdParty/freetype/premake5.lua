@@ -63,7 +63,9 @@ project "freetype"
     -- C4244/C4267 (size_t truncation): upstream size_t-to-smaller-type
     -- narrowing in psaux/smooth/sfnt/type1/type42. Vendored code -- not ours
     -- to patch.
-    disablewarnings { "4244", "4267" }
+    filter "system:windows"
+        disablewarnings { "4244", "4267" }   -- MSVC-numbered: never passed to GCC/Clang as -Wno-4244
+    filter {}
 
     filter "system:windows"
         systemversion "latest"

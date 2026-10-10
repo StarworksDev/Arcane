@@ -24,10 +24,9 @@
 #     ArcaneTests, then ArcaneTests '[build]' (whose POSIX cases spawn /bin/sh
 #     through the real runner: normal exit, 128 + signal, missing executable,
 #     missing working directory, merged stdout/stderr, and argv passed through
-#     unchanged). This stage additionally needs the wider Arcane Linux/macOS
-#     port (ArcaneCore, SDL3/vcpkg, the renderer backends), which is a
-#     separate milestone -- so until that lands, stage 2 is EXPECTED to fail
-#     on something that has nothing to do with arcbuild. It fails loudly
+#     unchanged). This stage needs the Arcane Linux port (2026-10-05): a
+#     system SDL3 (pkg-config sdl3) and the fetched Linux DXC
+#     (scripts/fetch-dxc-linux.sh) for the shader prebuild. It fails loudly
 #     rather than being skipped: a green run of this script means both stages
 #     passed, and nothing weaker.
 #
@@ -45,8 +44,8 @@
 #
 # Environment:
 #   CXX          compiler for stage 1 (default: c++)
-#   PREMAKE5     premake5 binary for stage 2 (default: premake5 on PATH;
-#                ThirdParty/premake5/ holds the Windows .exe only)
+#   PREMAKE5     premake5 binary for stage 2 (default: ThirdParty/premake5/premake5
+#                when scripts/fetch-premake-linux.sh has run, else premake5 on PATH)
 #   MAKE         make binary for stage 2 (default: make)
 #   CONFIG       premake configuration for stage 2 (default: Debug)
 #   PREMAKE_ACTION  premake action for stage 2 (default: gmake)
@@ -79,6 +78,9 @@ case "$#:${1:-}" in
 esac
 
 CXX=${CXX:-c++}
+if [ -z "${PREMAKE5:-}" ] && [ -x "ThirdParty/premake5/premake5" ]; then
+    PREMAKE5=ThirdParty/premake5/premake5
+fi
 PREMAKE5=${PREMAKE5:-premake5}
 MAKE=${MAKE:-make}
 CONFIG=${CONFIG:-Debug}
@@ -129,12 +131,10 @@ if ! command -v "$MAKE" > /dev/null 2>&1; then
     exit 1
 fi
 
-# premake5.lua requires VCPKG_ROOT (SDL3) and the workspace requires ARCANE_SDK
-# nowhere -- but the vcpkg one is a hard error() at the top of the script, so
-# say so here rather than letting premake's own message be the first hint.
-if [ -z "${VCPKG_ROOT:-}" ]; then
-    echo "verify-arcbuild-posix.sh: VCPKG_ROOT is unset -- premake5.lua errors out" \
-         "without it (SDL3 comes from vcpkg)." >&2
+# Off-Windows premake5.lua takes SDL3 from the system (pkg-config sdl3 or
+# SDL3_ROOT), not vcpkg -- VCPKG_ROOT is a Windows-target requirement only.
+if ! pkg-config --exists sdl3 2>/dev/null && [ -z "${SDL3_ROOT:-}" ]; then
+    echo "verify-arcbuild-posix.sh: SDL3 not found (pkg-config sdl3, or set SDL3_ROOT)." >&2
     exit 1
 fi
 

@@ -55,9 +55,10 @@ ReferenceProject/*.vcxproj*
 # `arcbuild generate --action gmake|ninja|xcode4 --project ReferenceProject`
 # drops these beside the .slnx above -- derived output, same as the .slnx/
 # .vcxproj rules, and the same shapes the arcbuild-fixture block below
-# ignores. Deliberately scoped to ReferenceProject/ (and the fixture): the
-# ENGINE tree must never have Make/Ninja output generated in place, so a
-# stray root-level Makefile/build.ninja stays visible to `git status`.
+# ignores. Scoped to ReferenceProject/ (and the fixture). The ENGINE tree's
+# own gmake/ninja output is covered at the bottom of this file: since the
+# Linux port (2026-10-05) a Linux generation of the engine workspace is a
+# supported in-place build, exactly like the .vcxproj files above.
 ReferenceProject/Makefile
 ReferenceProject/*.make
 ReferenceProject/build.ninja
@@ -119,3 +120,35 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 *.stackdump
+
+# -- Linux DXC (scripts/fetch-dxc-linux.sh) -----------------------------------
+# The Linux shader compiler release, fetched rather than vendored.
+ThirdParty/tools/dxc-linux/
+# The Linux/macOS premake5 (scripts/fetch-premake.sh), beside the vendored .exe.
+ThirdParty/premake5/premake5
+
+# -- macOS Vulkan SDK + DXC (scripts/fetch-vulkan-sdk-macos.sh) --------------
+# MoltenVK, the loader, the validation layer and DXC, installed per machine;
+# dxc-macos/ is the wrapper + symlinks into it.
+ThirdParty/tools/vulkan-sdk-macos/
+ThirdParty/tools/dxc-macos/
+
+# -- Test reports (scripts/run-tests.sh / run-tests.ps1) ---------------------
+/test-results/
+/logs/
+
+# -- Engine gmake/ninja outputs (Linux port, 2026-10-05) ----------------------
+# `premake5 gmake` writes the root Makefile plus one <Project>.make beside each
+# project's sources (premake's project location IS the source dir, as with the
+# .vcxproj files) -- derived output, regenerated per machine.
+/Makefile
+/build.ninja
+/Arcane*/Makefile
+/arcbuild/Makefile
+/arccook/Makefile
+/ArcaneTests/death-fixture/Makefile
+/ThirdParty/*/ide-md/Makefile
+*.make
+*.ninja
+.ninja_log
+.ninja_deps

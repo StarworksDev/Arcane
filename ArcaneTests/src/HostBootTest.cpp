@@ -41,6 +41,8 @@
 #include <catch2/catch_approx.hpp>   // the ReferenceProject pose assertion
 #include <catch2/catch_test_macros.hpp>
 
+#include <Arcane/Platform/Platform.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -134,7 +136,9 @@ TEST_CASE("HostBoot::GameModule returns the manifest gameModule when set", "[hos
         R"("gameModule":"Foo.dll","plugins":[],"bootScene":""})";
     auto proj = Arcane::Project::Open(dir);
     REQUIRE(proj.has_value());
-    REQUIRE(Arcane::HostBoot::GameModule(&*proj, "Fallback.dll") == "Foo.dll");
+    // The authored name, in the running platform's spelling (Foo.so on ELF;
+    // exactly "Foo.dll" on Windows -- Platform::NativeModuleFileName).
+    REQUIRE(Arcane::HostBoot::GameModule(&*proj, "Fallback.dll") == Arcane::Platform::ModuleFileName("Foo"));
     fs::remove_all(dir, ec);
 }
 
@@ -149,16 +153,16 @@ TEST_CASE("HostBoot::GameModule resolves the project's Binaries/ copy when built
         R"("gameModule":"Aphelyon.dll","plugins":[],"bootScene":""})";
     // The project has built its own module -> the host must load THIS copy, not a
     // same-named DLL beside the exe.
-    std::ofstream(dir / "Binaries" / "Aphelyon.dll", std::ios::binary) << "MZ";  // presence is what matters
+    std::ofstream(dir / "Binaries" / Arcane::Platform::ModuleFileName("Aphelyon"), std::ios::binary) << "MZ";  // presence is what matters
 
     auto proj = Arcane::Project::Open(dir);
     REQUIRE(proj.has_value());
     REQUIRE(fs::path(Arcane::HostBoot::GameModule(&*proj, "Fallback.dll"))
-            == dir / "Binaries" / "Aphelyon.dll");
+            == dir / "Binaries" / Arcane::Platform::ModuleFileName("Aphelyon"));
 
     // Without the built copy, it stays a bare name (borrowing path, resolved beside exe).
-    fs::remove(dir / "Binaries" / "Aphelyon.dll", ec);
-    REQUIRE(Arcane::HostBoot::GameModule(&*proj, "Fallback.dll") == "Aphelyon.dll");
+    fs::remove(dir / "Binaries" / Arcane::Platform::ModuleFileName("Aphelyon"), ec);
+    REQUIRE(Arcane::HostBoot::GameModule(&*proj, "Fallback.dll") == Arcane::Platform::ModuleFileName("Aphelyon"));
     fs::remove_all(dir, ec);
 }
 
@@ -277,7 +281,7 @@ TEST_CASE("ExecutablePathUtf8 reports this test exe, absolute and forward-slashe
     std::string lower = exe;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    CHECK(lower.find("arcanetests.exe") != std::string::npos);
+    CHECK(lower.find(Arcane::Platform::ExecutableFileName("arcanetests")) != std::string::npos);   // .exe on Windows only
 }
 
 TEST_CASE("EngineInfoJson is a single line", "[host]")

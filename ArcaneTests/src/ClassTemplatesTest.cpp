@@ -5,6 +5,7 @@
 // register, regenerate, open in VS) lives in EditorApp and is desk-verify.
 
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 
 #include <Project/ClassTemplates.hpp>
 
@@ -269,7 +270,7 @@ TEST_CASE("ClassTemplates renders equal the compiled TemplateSmoke sources byte 
 TEST_CASE("the rendered component and parameter-style system load as a module and the system runs", "[editor][templates][hotreload]")
 {
     Arcane::Runtime rt(Arcane::Test::Process());
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("TemplateSmokePlugin.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("TemplateSmokePlugin")));
     REQUIRE(host.AttachRuntime(rt));
     REQUIRE(host.Load());
     // The rendered system registered through ARC_SYSTEM's PARAMETER path...

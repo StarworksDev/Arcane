@@ -25,6 +25,7 @@
 #include <fstream>
 #include <optional>
 #include <system_error>
+#include "ImGuiTestKeys.hpp"   // TestKeys::AddKeyEvent: Ctrl as this platform's user presses it
 
 using namespace Arcane::Editor; namespace fs = std::filesystem;
 namespace
@@ -69,7 +70,7 @@ namespace
             io.AddMouseButtonEvent(ImGuiMouseButton_Left, false); Frame(); Frame();
         }
         void Mods(ImGuiKeyChord m, bool d)
-        { if (m & ImGuiMod_Ctrl) ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, d); if (m & ImGuiMod_Shift) ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, d); }
+        { if (m & ImGuiMod_Ctrl) Arcane::TestKeys::AddKeyEvent(ImGui::GetIO(), ImGuiMod_Ctrl, d); if (m & ImGuiMod_Shift) ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, d); }
         void Click(int row, ImGuiMouseButton b, ImGuiKeyChord m = 0)
         {
             ImGuiIO& io = ImGui::GetIO(); Mods(m, true); if (m) Frame();   // the mods get their own frame: a key change trickles the mouse move to the press frame, too late to hover an AllowOverlap row

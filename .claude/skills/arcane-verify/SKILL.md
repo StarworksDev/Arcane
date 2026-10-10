@@ -46,6 +46,33 @@ A bless writes to the level the reference resolved from: `Verify\References\<bac
 if that override exists, otherwise the shared `Verify\References\<slot>.png`. So a dx12 bless of
 `runtime-scene` or `f3-cull-blend` rewrites the SHARED file and a vulkan bless rewrites `vulkan\`.
 
+### Software adapters (Linux CI: Mesa lavapipe)
+
+On a SOFTWARE adapter the hosts probe one more level FIRST:
+`Verify\References\<backend>-<adapter>\<slot>.png` -- `vulkan-lavapipe`, `dx12-warp`, or
+`<backend>-software` (`Arcane::ReferenceAdapterSet`, keyed off NRI's
+`adapterDesc.architecture == SOFTWARE`). Hardware adapters never see it. Comparison falls through
+to `vulkan\` and shared when the set has no image for a slot, but **a bless on a software adapter
+writes ONLY the set's own image** -- it can never touch the hardware references. The report's
+`resolvedLevel` reads `"adapter"` when the set answered.
+
+Measured 2026-10-05 (Mesa 25 lavapipe, LLVM 20): `runtime-scene`, `f3-cull-blend` and the five
+`thumbs\` goldens match the hardware references at a ZERO budget, and editor text differs by at
+most 2/255 on glyph edges (under the comparator's JND). So keep the set minimal: an image goes in
+`vulkan-lavapipe\` only when lavapipe genuinely needs its own. The five editor slots there now exist
+because the hardware editor references predate 3c4a73f (WindowPadding 8 -> 4) and are stale; once
+they are re-blessed on Windows, re-run the Linux `[gpu]` lane with the five lavapipe editor images
+removed and delete them if it stays green.
+
+Blessing on Linux (from the host exe directory, as below, with `SDL_VIDEODRIVER=offscreen`):
+`./ArcaneEditor --project ReferenceProject --headless --backend vulkan --frames 60 --settle 30
+--report <scratch>.json --compare <slot> --bless`, then copy
+`ReferenceProject/Verify/References/vulkan-lavapipe/` back to source, exactly like step 3 below. The
+validation layer must be the one `scripts/build-vvl-linux.sh` builds (see the README's Linux
+section): Ubuntu's packaged layer reports false sync hazards. An intentional visual change to a
+slot that has a `vulkan-lavapipe\` image needs that image re-blessed on Linux too, or the Linux
+`[gpu]` lane fails.
+
 ## Re-bless after an intentional change
 
 1. Run the gate first; read every failing lane's diff image. (Running it also rebuilds and

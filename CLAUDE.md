@@ -257,9 +257,10 @@ see `arcbuild/src/Stage.hpp`). Make on Windows is the full driver mechanics
 plus a MinGW-w64 GCC compile of the module; the link then fails because a
 GCC object cannot resolve the MSVC-built `ArcaneCore`/`ArcaneClient` import
 libraries (C++ mangling) -- a Make-built module needs the GCC-built engine of
-the Linux port, not an arcbuild fix. Linux has never generated or built
-anything (`scripts/verify-arcbuild-posix.sh` stage 2 waits on that port;
-stage 1, the POSIX runner's compile contract, passes). Xcode's contract is
+the Linux port, not an arcbuild fix. On Linux (the port, 2026-10-05) arcbuild
+generates and builds ReferenceProject with the Make backend against the
+GCC/Clang-built engine (`Binaries/ReferenceGame.so`), and
+`scripts/verify-arcbuild-posix.sh` passes both stages. Xcode's contract is
 unit-tested everywhere but **live `xcodebuild` execution needs macOS** --
 untested on this all-Windows desk, a standing live-validation limit, not a
 gap in the design.

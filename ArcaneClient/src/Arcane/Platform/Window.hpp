@@ -93,7 +93,12 @@ namespace Arcane
         bool IsMinimized() const;
         bool IsFocused() const;                           // holds keyboard input focus (false for a hidden window)
 
-        void* NativeHandle() const;                       // HWND on Windows
+        void* NativeHandle() const;                       // HWND on Windows; wl_surface* or the X11 Window id (as a pointer-sized value) on Linux; CAMetalLayer* on macOS
+        // Linux port: the native DISPLAY a swapchain needs alongside the handle --
+        // X11 Display* or wl_display*; nullptr on Windows and on display-less
+        // video drivers (SDL's "offscreen"). IsWaylandWindow says which pair it is.
+        void* NativeDisplay() const;
+        bool  IsWaylandWindow() const;
         SDL_Window* SdlWindow() const { return m_window; }
 
         // Native folder-picker (editor "Open Project"). Async: SDL surfaces the result
@@ -122,6 +127,9 @@ namespace Arcane
 
     private:
         SDL_Window*    m_window  = nullptr;
+        // macOS: the SDL_MetalView whose CAMetalLayer NativeHandle() returns
+        // (created on first ask; void* is SDL_MetalView's own spelling).
+        mutable void*  m_metalView = nullptr;
         NativeEventTap m_tap     = nullptr;
         void*          m_tapUser = nullptr;
     };

@@ -1,4 +1,5 @@
 #include <Arcane/Assets/Assets.hpp>
+#include <Arcane/Base/Engine.hpp>   // ExecutablePathUtf8: the exe directory off-Windows
 
 #include <Arcane/Assets/ArtifactReader.hpp>
 #include <Arcane/Assets/AssetCache.hpp>
@@ -44,6 +45,9 @@ namespace Arcane
             wchar_t modulePath[MAX_PATH]{};
             if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) != 0)
                 return std::filesystem::path(modulePath).parent_path() / path;
+#else
+            if (const std::string self = ExecutablePathUtf8(); !self.empty())
+                return std::filesystem::path(self).parent_path() / path;
 #endif
             return path;
         }

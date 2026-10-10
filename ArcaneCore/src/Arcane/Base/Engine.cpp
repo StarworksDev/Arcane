@@ -1,6 +1,7 @@
 #include <Arcane/Base/Engine.hpp>
 #include <Arcane/Plugin/PluginABI.hpp>
 #include <Arcane/Version.hpp>
+#include <Arcane/Platform/Process.hpp>   // Platform::ExecutablePath (POSIX)
 
 #include <algorithm>
 #include <string>
@@ -79,11 +80,11 @@ namespace Arcane
                                 out.data(), bytes, nullptr, nullptr) <= 0)
             return {};
 #else
-        // Linux port (future milestone): /proc/self/exe is the equivalent. POSIX
-        // narrow paths are already byte strings, so no re-encoding step.
-        std::error_code ec;
-        const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", ec);
-        if (ec)
+        // POSIX (/proc/self/exe on Linux, _NSGetExecutablePath on macOS --
+        // Arcane/Platform/Process.hpp): narrow paths are already byte
+        // strings, so no re-encoding step.
+        const std::filesystem::path self = Platform::ExecutablePath();
+        if (self.empty())
             return {};
         std::string out = self.generic_string();
 #endif

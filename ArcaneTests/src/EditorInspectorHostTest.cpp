@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "ImGuiTestKeys.hpp"   // TestKeys::AddKeyEvent: Ctrl as this platform's user presses it
 
 using namespace Arcane::Editor;
 
@@ -1355,11 +1356,11 @@ TEST_CASE("DrawInspectorWindows: the page scrolls in ##page under a pinned heade
     {
         ImGui::FocusWindow(page);
         frame(); frame();                                  // the focus route settles
-        io.AddKeyEvent(ImGuiMod_Ctrl, true);
+        Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, true);
         io.AddKeyEvent(ImGuiKey_S, true);
         const InspectorWindowsResult r = frame();
         io.AddKeyEvent(ImGuiKey_S, false);
-        io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, false);
         frame();
         REQUIRE(r.saveRequested.size() == 1);
         CHECK(r.saveRequested[0] == &scene);

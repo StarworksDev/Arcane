@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "ImGuiTestKeys.hpp"   // TestKeys::AddKeyEvent: Ctrl as this platform's user presses it
 
 namespace
 {
@@ -536,11 +537,11 @@ TEST_CASE("PropertyGrid: a ranged VecRow clamps a Ctrl+click typed component and
     const ImVec2 c = h.Centre("Offset");                  // the 3-wide group's centre: component 1 (y)
     ImGuiIO& io = ImGui::GetIO();
     io.AddMousePosEvent(c.x, c.y); h.Frame();
-    io.AddKeyEvent(ImGuiMod_Ctrl, true); h.Frame();
+    Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, true); h.Frame();
     io.AddMouseButtonEvent(0, true); h.Frame();           // Ctrl+click: that component's temp text input
     io.AddMouseButtonEvent(0, false); h.Frame();
     io.AddKeyEvent(ImGuiKey_A, true); h.Frame();
-    io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); h.Frame();
+    io.AddKeyEvent(ImGuiKey_A, false); Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, false); h.Frame();
     h.Type("5");
     h.Key(ImGuiKey_Enter);
     CHECK(commits == 1);
@@ -559,11 +560,11 @@ TEST_CASE("PropertyGrid: a ranged FloatRow clamps a Ctrl+click typed 5 to 1 and 
     const ImVec2 c = h.Centre("Metallic");
     ImGuiIO& io = ImGui::GetIO();
     io.AddMousePosEvent(c.x, c.y); h.Frame();
-    io.AddKeyEvent(ImGuiMod_Ctrl, true); h.Frame();
+    Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, true); h.Frame();
     io.AddMouseButtonEvent(0, true); h.Frame();      // Ctrl+click: DragScalar enters its temp text input
     io.AddMouseButtonEvent(0, false); h.Frame();
     io.AddKeyEvent(ImGuiKey_A, true); h.Frame();     // Ctrl+A on top of TempInputScalar's AutoSelectAll (imgui_widgets.cpp:3828)
-    io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false); h.Frame();
+    io.AddKeyEvent(ImGuiKey_A, false); Arcane::TestKeys::AddKeyEvent(io, ImGuiMod_Ctrl, false); h.Frame();
     h.Type("5");
     h.Key(ImGuiKey_Enter);
     CHECK(commits == 1);

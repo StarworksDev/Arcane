@@ -3,6 +3,7 @@
 // next to ArcaneTests.exe (relative paths; run the exe FROM its output dir).
 
 #include <catch2/catch_test_macros.hpp>
+#include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
 
 #include <Arcane/Base/ProcessContext.hpp>       // SystemFactories() -- the C1 size instrument
 #include <Arcane/Base/Runtime.hpp>
@@ -63,7 +64,7 @@ TEST_CASE("PluginHost loads a plugin and runs it across the ABI", "[hotreload]")
     rt.Components()->RegisterComponent<Pulse>();   // engine sees the type so views resolve
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
     REQUIRE(host.Load());
     REQUIRE(host.IsLoaded());
@@ -88,7 +89,7 @@ TEST_CASE("GameModule: OnShutdown runs while the module's component handle is st
     rt.Components()->RegisterComponent<Pulse>();
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
     REQUIRE(host.Load());
     StepAllK(rt, host, 2);
@@ -111,21 +112,21 @@ TEST_CASE("GameModule: OnShutdown runs while the module's component handle is st
 TEST_CASE("Hot swap V1->V2 preserves state AND runs the new code", "[hotreload]")
 {
     // Guard against ordering contamination: ensure we start with genuine V1 content.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>();
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
     REQUIRE(host.Load());
     StepAllK(rt, host, 5);
     REQUIRE(ReadPulse(rt) == 5);
 
     // Swap the binary under the watched path, then force a state-preserving reload.
-    std::filesystem::copy_file("HotReloadPluginV2.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginV2"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
     REQUIRE(host.ForceReload());                   // SaveState -> unload -> load V2 -> Init -> LoadState
 
@@ -136,27 +137,27 @@ TEST_CASE("Hot swap V1->V2 preserves state AND runs the new code", "[hotreload]"
     host.Unload();
 
     // restore the fixture for re-runs
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 }
 
 TEST_CASE("ABI mismatch rolls back to last-good; session survives", "[hotreload]")
 {
     // Guard against ordering contamination: ensure we start with genuine V1 content.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>();
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
     REQUIRE(host.Load());
     StepAllK(rt, host, 3);
     REQUIRE(ReadPulse(rt) == 3);
 
-    std::filesystem::copy_file("HotReloadPluginBad.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginBad"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
     CHECK_FALSE(host.ForceReload());               // ABI mismatch -> reload fails
     CHECK(host.IsLoaded());                        // still on last-good
@@ -165,7 +166,7 @@ TEST_CASE("ABI mismatch rolls back to last-good; session survives", "[hotreload]
     host.Unload();
 
     // restore the fixture for re-runs
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 }
 
@@ -177,16 +178,16 @@ TEST_CASE("Host drives a secondary plugin alongside the primary", "[hotreload]")
     // +10) target the SAME singleton Pulse entity -- V2's Init finds the one V1 created
     // and caches the same handle -- so ONE FixedUpdateAll step lands +1 AND +10 on it.
     // The value 11 is unique to "both ran": primary-only would be 1, secondary-only 10.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>();
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     host.AttachRuntime(rt);
-    host.AddPlugin(std::filesystem::path("HotReloadPluginV2.dll"));   // secondary, +10 per step
+    host.AddPlugin(std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV2")));   // secondary, +10 per step
     REQUIRE(host.Load());
     REQUIRE(host.IsLoaded());
 
@@ -212,7 +213,7 @@ TEST_CASE("Plugins-only host (no primary module) loads and drives its secondarie
     // built with an EMPTY primary path and brings up only its AddPlugin() secondaries. No
     // primary means IsLoaded()==false / Vtable()==null, but the secondaries still run through
     // the *All drivers.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
@@ -221,7 +222,7 @@ TEST_CASE("Plugins-only host (no primary module) loads and drives its secondarie
 
     Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path{});           // no primary game module
     host.AttachRuntime(rt);
-    host.AddPlugin(std::filesystem::path("HotReloadPluginV1.dll")); // one secondary (+1/step)
+    host.AddPlugin(std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1"))); // one secondary (+1/step)
     REQUIRE(host.Load());
     CHECK_FALSE(host.IsLoaded());            // no PRIMARY is loaded...
     CHECK(host.Vtable() == nullptr);
@@ -254,7 +255,7 @@ TEST_CASE("A secondary whose Init FAILS leaves no system factory pointing into i
     // TABLE SIZE is the instrument -- it is process-wide and shared by every case in
     // this suite, so the claim is "back to where this case found it", measured, not a
     // fixed number.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
@@ -264,9 +265,9 @@ TEST_CASE("A secondary whose Init FAILS leaves no system factory pointing into i
     const std::size_t before = Arcane::Test::Process().SystemFactories().Size();
 
     {
-        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
         REQUIRE(host.AttachRuntime(rt));
-        host.AddPlugin(std::filesystem::path("HotReloadPluginInitFail.dll"));
+        host.AddPlugin(std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginInitFail")));
         // The primary comes up, the secondary refuses, and Load unwinds the WHOLE
         // session (no half-loaded host) -- so every factory either module registered
         // is gone by the time this returns.
@@ -308,7 +309,7 @@ TEST_CASE("Unloading a plugin restores the descriptors it overrode", "[hotreload
     REQUIRE(base != nullptr);
 
     {
-        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
         host.AttachRuntime(rt);
         REQUIRE(host.Load());
         REQUIRE(rt.Components()->GetComponentDescriptor(pulseId) != nullptr);
@@ -352,7 +353,7 @@ TEST_CASE("Unloading secondaries leaves no descriptor aimed at their images", "[
     // host's DisownPluginImages nets a forgetter). After Unload, the descriptor
     // must be the test binary's restored base -- calling through it faults if
     // any dangling entry survived.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
@@ -363,9 +364,9 @@ TEST_CASE("Unloading secondaries leaves no descriptor aimed at their images", "[
     REQUIRE(base != nullptr);
 
     {
-        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+        Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
         host.AttachRuntime(rt);
-        host.AddPlugin(std::filesystem::path("HotReloadPluginV2.dll"));   // secondary
+        host.AddPlugin(std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV2")));   // secondary
         REQUIRE(host.Load());
         StepAllK(rt, host, 1);
         // Primary AND secondary both pushed handles over the base: depth-2 stack.
@@ -396,7 +397,7 @@ TEST_CASE("Reload failure with no last-good yields an honest dead state", "[hotr
     // rolledBack gate -> reset current + honest ARC_ERROR), so this covers it.
 
     // A dedicated bad-image source so we never clobber the shared V1 fixture.
-    std::filesystem::copy_file("HotReloadPluginBad.dll", "HotReloadBadSrc.dll",
+    std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginBad"), "HotReloadBadSrc.dll",
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
@@ -410,7 +411,7 @@ TEST_CASE("Reload failure with no last-good yields an honest dead state", "[hotr
     CHECK(host.Vtable() == nullptr);
 
     // The session recovers cleanly from the dead state: a valid image still loads.
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadBadSrc.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), "HotReloadBadSrc.dll",
                                std::filesystem::copy_options::overwrite_existing);
     REQUIRE(host.Load());
     REQUIRE(host.IsLoaded());
@@ -446,14 +447,14 @@ TEST_CASE("Resolving a type the UNLOADED plugin registered first is safe", "[hot
     // The user's original lex-order repro of the same fault, kept as documentation
     // rather than a second case (it depends on suite ordering; this one does not):
     //   ArcaneTests.exe "PlaySession routes Play/Stop through the hosted module*,CreateEntityInScene refuses*" --order lex
-    std::filesystem::copy_file("../HotReloadPluginV1/HotReloadPluginV1.dll", "HotReloadPluginV1.dll",
+    std::filesystem::copy_file(Arcane::Test::BuiltModule("HotReloadPluginV1"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
 
     Arcane::Runtime rt(Arcane::Test::Process());
     rt.Components()->RegisterComponent<Pulse>();
     rt.Components()->RegisterComponent<RoleCounters>();
 
-    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path("HotReloadPluginV1.dll"));
+    Arcane::PluginHost host(Arcane::Test::Process(), std::filesystem::path(Arcane::Test::ModuleFile("HotReloadPluginV1")));
     REQUIRE(host.AttachRuntime(rt));
     REQUIRE(host.Load());        // OnInit's SetResource<ProbeResource> is the type's first resolve
     REQUIRE(host.IsLoaded());

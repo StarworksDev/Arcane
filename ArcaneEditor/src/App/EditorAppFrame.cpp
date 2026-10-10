@@ -283,8 +283,17 @@ namespace Arcane::Editor
                 (m_runtime && m_runtime->CurrentProject()) ? m_runtime->CurrentProject()->Root()
                                                             : std::filesystem::path{};
             const char* const backendName = CompareBackendName(m_config.backend);
+            if (Arcane::NriGraphContext* chrome = ChromeGraph())
+            {
+                const Arcane::NriDeviceCaps& caps = chrome->Device().Caps();
+                m_compareAdapterSet = Arcane::ReferenceAdapterSet(backendName, caps.adapterName,
+                                                                  caps.softwareAdapter);
+                if (!m_compareAdapterSet.empty())
+                    ARC_INFO("--compare: software adapter '{}' -> reference set '{}'",
+                             caps.adapterName, m_compareAdapterSet);
+            }
             m_compareResolution = Arcane::ResolveReference(projectRoot, m_config.compareReference,
-                                                            backendName);
+                                                            backendName, m_compareAdapterSet);
 
             if (m_compareResolution.level == Arcane::ReferenceLevel::None)
             {

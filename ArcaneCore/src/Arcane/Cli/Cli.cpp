@@ -1,4 +1,5 @@
 #include "Arcane/Cli/Cli.hpp"
+#include <Arcane/Util/CharConv.hpp>   // FromChars: std::from_chars incl. floating point on every standard library
 
 #include <charconv>
 #include <cstdio>
@@ -93,7 +94,7 @@ namespace Arcane
 
             auto fullyParsed = [&](auto& v)
             {
-                auto r = std::from_chars(begin, end, v);
+                auto r = Arcane::FromChars(begin, end, v);
                 return r.ec == std::errc{} && r.ptr == end;
             };
 

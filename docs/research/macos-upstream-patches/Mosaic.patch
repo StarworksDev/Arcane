@@ -1,0 +1,32 @@
+diff --git a/ThirdParty/Mosaic/include/Mosaic/Simd/Bits.hpp b/ThirdParty/Mosaic/include/Mosaic/Simd/Bits.hpp
+index 8564b6c..cfe5672 100644
+--- a/ThirdParty/Mosaic/include/Mosaic/Simd/Bits.hpp
++++ b/ThirdParty/Mosaic/include/Mosaic/Simd/Bits.hpp
+@@ -43,6 +43,9 @@
+     #endif
+ #elif defined(MOSAIC_ARCH_ARM64) || defined(MOSAIC_ARCH_ARM32)
+     #include <arm_neon.h>
++    #if defined(MOSAIC_HAS_ARM_CRC32)
++        #include <arm_acle.h>   // __crc32cd (ACLE): arm_neon.h does not declare it
++    #endif
+ #endif
+ 
+ namespace Mosaic
+@@ -702,8 +705,15 @@ namespace Mosaic
+                 }
+     #endif
+ #elif MOSAIC_HAS_BUILTIN(__builtin_prefetch)
+-                int locality = 3 - static_cast<int>(hint);
+-                __builtin_prefetch(ptr, 0, locality);
++                // The locality argument must be a constant expression (Clang
++                // rejects a variable), hence one call per hint.
++                switch (hint)
++                {
++                case PrefetchHint::T0:  __builtin_prefetch(ptr, 0, 3); break;
++                case PrefetchHint::T1:  __builtin_prefetch(ptr, 0, 2); break;
++                case PrefetchHint::T2:  __builtin_prefetch(ptr, 0, 1); break;
++                case PrefetchHint::NTA: __builtin_prefetch(ptr, 0, 0); break;
++                }
+ #elif defined(MOSAIC_HAS_NEON) && defined(__ARM_FEATURE_UNALIGNED)
+                 __pld(ptr);
+ #else

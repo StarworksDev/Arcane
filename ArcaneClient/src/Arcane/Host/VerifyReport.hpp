@@ -364,7 +364,7 @@ namespace Arcane
         // growing its own reporting path.
         //
         //   reference      -- the bare --compare name, echoed back.
-        //   resolvedLevel  -- "none" | "shared" | "backend", mirroring
+        //   resolvedLevel  -- "none" | "shared" | "backend" | "adapter", mirroring
         //                     Arcane::ReferenceLevel. "none" means no
         //                     reference existed (or, on a first --bless,
         //                     existed only after this run wrote it) -- NEVER

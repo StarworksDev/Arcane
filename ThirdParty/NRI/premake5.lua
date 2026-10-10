@@ -129,13 +129,39 @@ project "NRI"
     -- C4324 "structure was padded due to alignment specifier": upstream
     -- disables this too (CMakeLists.txt:441, "/wd4324") even in their own
     -- /W4 /WX build -- not a suppression this wrapper introduced.
-    disablewarnings { "4324" }
+    filter "system:windows"
+        disablewarnings { "4324" }   -- MSVC-numbered: GCC/Clang would see -Wno-4324
+    filter {}
 
     filter "system:windows"
         systemversion "latest"
         buildoptions { "/bigobj" }
         fatalwarnings { "All" }
         defines { "VK_USE_PLATFORM_WIN32_KHR" }   -- VK backend (CMakeLists.txt:749-751)
+
+    -- Linux port (2026-10-05): D3D12 (+ the Agility SDK path) is a Windows-
+    -- target backend -- its headers pull <rpc.h>/<dxgi1_6.h>, which no Linux
+    -- sysroot has. Vulkan, NONE and Validation stay on every target. Removed
+    -- here rather than moved under the Windows filter so a Windows generation
+    -- stays byte-identical. The VK platform defines below mirror upstream
+    -- CMakeLists.txt's non-Windows branch (X11 + Wayland surfaces).
+    filter "system:not windows"
+        removefiles {
+            "Source/D3D12/**.h",
+            "Source/D3D12/**.hpp",
+            "Source/D3D12/**.cpp",
+        }
+        removedefines { "NRI_ENABLE_D3D12_SUPPORT=1", "NRI_ENABLE_AGILITY_SDK_SUPPORT=1" }
+    -- Upstream scopes these to its NRI_VK target only: Xlib.h's global
+    -- `Window` typedef collides with nri::Window in the Shared TUs.
+    filter { "system:linux", "files:Source/VK/**.cpp" }
+        defines { "VK_USE_PLATFORM_XLIB_KHR", "VK_USE_PLATFORM_WAYLAND_KHR" }
+    -- macOS port (2026-10-07): upstream's APPLE branch -- the Vulkan backend
+    -- runs on MoltenVK and presents to a CAMetalLayer (VK_EXT_metal_surface).
+    -- SharedVK.h pulls vulkan_beta.h on __APPLE__ for VK_KHR_portability_subset.
+    filter { "system:macosx", "files:Source/VK/**.cpp" }
+        defines { "VK_USE_PLATFORM_METAL_EXT", "VK_ENABLE_BETA_EXTENSIONS" }
+    filter {}
 
     filter "configurations:Debug"
         runtime "Debug"

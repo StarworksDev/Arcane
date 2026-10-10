@@ -12,6 +12,7 @@
 // provenance.
 
 #include <Arcane/Base/ForeignModules.hpp>
+#include <Arcane/Platform/Platform.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -301,7 +302,7 @@ TEST_CASE("foreign modules: NoteOwned makes a loaded module's directory one of o
     // binary resolves as ours against the roots as they stand.
     const std::vector<Arcane::ForeignModules::LoadedModule> live = Arcane::ForeignModules::EnumerateProcessModules();
     const auto exe = std::find_if(live.begin(), live.end(), [](const Arcane::ForeignModules::LoadedModule& m) {
-        return Lower(m.name) == "arcanetests.exe";
+        return Lower(m.name) == Arcane::Platform::ExecutableFileName("arcanetests");   // .exe on Windows only
     });
     REQUIRE(exe != live.end());
     REQUIRE_FALSE(exe->path.empty());
@@ -329,8 +330,8 @@ TEST_CASE("foreign modules: the live enumeration sees this process's own modules
     // loaded; the exe is module zero on every Windows process.
     const std::vector<Arcane::ForeignModules::LoadedModule> modules = Arcane::ForeignModules::EnumerateProcessModules();
     REQUIRE_FALSE(modules.empty());
-    CHECK(ContainsInsensitive(modules, "ArcaneCore.dll"));
-    CHECK(ContainsInsensitive(modules, "ArcaneTests.exe"));
+    CHECK(ContainsInsensitive(modules, Arcane::Platform::SharedLibraryFileName("ArcaneCore").c_str()));   // libArcaneCore.so on ELF
+    CHECK(ContainsInsensitive(modules, Arcane::Platform::ExecutableFileName("ArcaneTests").c_str()));
     // ONE assertion however many modules the process holds: how many are
     // loaded depends on which cases the random order ran first, and a
     // per-module CHECK made the committed assertion baseline seed-sensitive.

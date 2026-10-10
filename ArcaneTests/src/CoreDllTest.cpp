@@ -3,7 +3,10 @@
 // it directly -- the address the exe resolves for a Core symbol lies inside
 // ArcaneCore.dll's image, and a Client symbol's inside ArcaneClient.dll's.
 // GetModuleHandleEx(FROM_ADDRESS) is the OS's own answer to "which module owns
-// this address"; no psapi needed.
+// this address"; no psapi needed. ELF twin (Linux port, 2026-10-05):
+// dladdr1(RTLD_DL_LINKMAP) names the owning object's link_map, and
+// dlopen(RTLD_NOLOAD) + dlinfo(RTLD_DI_LINKMAP) names a loaded library's --
+// the same question, the same exact identity comparison.
 #include <catch2/catch_test_macros.hpp>
 
 #include <Arcane/Base/Diagnostics.hpp>
@@ -15,17 +18,32 @@
 #include <Json.hpp>
 #include <spdlog/sinks/callback_sink.h>
 
+#include <Arcane/Platform/Platform.hpp>
+
 #include <algorithm>
 #include <memory>
 #include <string>
 
+#if ARC_PLATFORM_WINDOWS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif ARC_PLATFORM_MACOS
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <cstdint>
+#include <cstring>
+#else
+#include <dlfcn.h>
+#include <link.h>
+#endif
 
 namespace
 {
+#if ARC_PLATFORM_WINDOWS
+    using ModuleId = HMODULE;
+
     HMODULE OwnerOf(const void* addr)
     {
         HMODULE h = nullptr;
@@ -33,12 +51,71 @@ namespace
                              reinterpret_cast<LPCWSTR>(addr), &h);
         return h;
     }
+
+    HMODULE CoreModule()   { return ::GetModuleHandleW(L"ArcaneCore.dll"); }
+    HMODULE ClientModule() { return ::GetModuleHandleW(L"ArcaneClient.dll"); }
+#elif ARC_PLATFORM_MACOS
+    using ModuleId = const void*;   // the owning image's mach_header
+
+    ModuleId OwnerOf(const void* addr)
+    {
+        Dl_info info{};
+        if (::dladdr(addr, &info) == 0)
+            return nullptr;
+        return info.dli_fbase;
+    }
+
+    // Already-loaded only, by file name: dyld's image list, never a load.
+    ModuleId LoadedModule(const std::string& fileName)
+    {
+        for (std::uint32_t i = 0; i < ::_dyld_image_count(); ++i)
+        {
+            const char* path = ::_dyld_get_image_name(i);
+            if (!path)
+                continue;
+            const char* leaf = std::strrchr(path, '/');
+            if (fileName == (leaf ? leaf + 1 : path))
+                return ::_dyld_get_image_header(i);
+        }
+        return nullptr;
+    }
+
+    ModuleId CoreModule()   { return LoadedModule(Arcane::Platform::SharedLibraryFileName("ArcaneCore")); }
+    ModuleId ClientModule() { return LoadedModule(Arcane::Platform::SharedLibraryFileName("ArcaneClient")); }
+#else
+    using ModuleId = const void*;   // the owning object's link_map
+
+    ModuleId OwnerOf(const void* addr)
+    {
+        Dl_info info{};
+        void* map = nullptr;
+        if (::dladdr1(addr, &info, &map, RTLD_DL_LINKMAP) == 0)
+            return nullptr;
+        return map;
+    }
+
+    // Already-loaded only (RTLD_NOLOAD): never maps a second copy, which is
+    // GetModuleHandle's contract too.
+    ModuleId LoadedModule(const std::string& fileName)
+    {
+        void* handle = ::dlopen(fileName.c_str(), RTLD_LAZY | RTLD_NOLOAD);
+        if (!handle)
+            return nullptr;
+        link_map* map = nullptr;
+        ::dlinfo(handle, RTLD_DI_LINKMAP, &map);
+        ::dlclose(handle);   // drops only the reference RTLD_NOLOAD just took
+        return map;
+    }
+
+    ModuleId CoreModule()   { return LoadedModule(Arcane::Platform::SharedLibraryFileName("ArcaneCore")); }
+    ModuleId ClientModule() { return LoadedModule(Arcane::Platform::SharedLibraryFileName("ArcaneClient")); }
+#endif
 }
 
 TEST_CASE("ArcaneCore.dll is a loaded module and defines the Core surface", "[core-dll]")
 {
-    const HMODULE core   = ::GetModuleHandleW(L"ArcaneCore.dll");
-    const HMODULE client = ::GetModuleHandleW(L"ArcaneClient.dll");
+    const ModuleId core   = CoreModule();
+    const ModuleId client = ClientModule();
     REQUIRE(core != nullptr);
     REQUIRE(client != nullptr);
     CHECK(core != client);
@@ -68,8 +145,8 @@ TEST_CASE("one engine logger: the exe and ArcaneClient.dll see the same spdlog i
     // map, one action, one bogus binding is the whole fixture -- no device, no
     // window, no Runtime. Sink capture follows PluginHostTest.cpp's pattern
     // (push, provoke, erase).
-    const HMODULE core   = ::GetModuleHandleW(L"ArcaneCore.dll");
-    const HMODULE client = ::GetModuleHandleW(L"ArcaneClient.dll");
+    const ModuleId core   = CoreModule();
+    const ModuleId client = ClientModule();
     REQUIRE(core != nullptr);
     REQUIRE(client != nullptr);
 

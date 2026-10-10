@@ -1,5 +1,7 @@
 #include "ProjectLayout.hpp"
 
+#include <Arcane/Platform/Platform.hpp>   // NativeModuleFileName: the slot's per-platform spelling
+
 namespace arcbuild
 {
     std::filesystem::path SlotPath(
@@ -8,7 +10,9 @@ namespace arcbuild
         if (project.gameModule.empty())
             return {};
 
-        return project.root / "Binaries" / project.gameModule;
+        // The manifest's authored name in this platform's spelling: the slot a
+        // Linux build fills is Binaries/<Stem>.so (identity on Windows).
+        return project.root / "Binaries" / Arcane::Platform::NativeModuleFileName(project.gameModule);
     }
 
     std::filesystem::path SolutionPath(
@@ -45,6 +49,6 @@ namespace arcbuild
             return {};
 
         return project.root / "Intermediate" / std::string(config) /
-               "Ninja" / "Binaries" / project.gameModule;
+               "Ninja" / "Binaries" / Arcane::Platform::NativeModuleFileName(project.gameModule);
     }
 }

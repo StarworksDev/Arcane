@@ -1,4 +1,5 @@
 #include "Project/AssetFileOps.hpp"
+#include <Arcane/Platform/Platform.hpp>
 
 #include "Panels/AssetReferenceIndex.hpp" // the delete analysis walks inbound/outbound (s7.5)
 #include "Input/EditorActions.hpp"       // the footer names the bound undo chord
@@ -625,6 +626,16 @@ namespace Arcane::Editor
         }
         fs::last_write_time(p.path, p.mtime, ec);   // the watcher sees no change (s7.4)
         if (ec) return Display(p.path) + " could not keep its modified time (" + ec.message() + ").";
+#if !ARC_PLATFORM_WINDOWS
+        // POSIX "set" is not "kept": utimensat CLAMPS a time the filesystem
+        // cannot represent and still reports success (ext4 stored
+        // file_time_type::min() ~20 years off, error-free), which would hand
+        // the watcher exactly the change s7.4 forbids. Read it back. (Windows
+        // refuses an unrepresentable FILETIME outright -- the branch above.)
+        if (const fs::file_time_type kept = fs::last_write_time(p.path, ec); !ec && kept != p.mtime)
+            return Display(p.path) + " could not keep its modified time (the filesystem stored a different time).";
+        if (ec) return Display(p.path) + " could not keep its modified time (" + ec.message() + ").";
+#endif
         return std::nullopt;
     }
 

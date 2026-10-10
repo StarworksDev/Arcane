@@ -2,6 +2,7 @@
 // engine DLL (Arcane/Host/HostConfig.hpp, ARC_API) so this test exe links
 // it via the "Arcane" link, not a source-compile.
 #include <vector>
+#include <Arcane/Platform/Platform.hpp>
 #include <string>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -44,7 +45,13 @@ TEST_CASE("HostConfig: --set repeats", "[host]") {
 TEST_CASE("HostConfig: defaults", "[host]") {
     const auto o = Run({});
     REQUIRE(o.config.has_value());
+    // D3D12 on Windows; Vulkan elsewhere, the only backend a non-Windows
+    // build has (Arcane::kDefaultGraphicsBackend).
+#if ARC_PLATFORM_WINDOWS
     REQUIRE(o.config->backend == Arcane::GraphicsBackend::D3D12);
+#else
+    REQUIRE(o.config->backend == Arcane::GraphicsBackend::Vulkan);
+#endif
     REQUIRE(o.config->maxFrames == 0u);
     REQUIRE(o.config->vsync);
     REQUIRE_FALSE(o.config->perf);

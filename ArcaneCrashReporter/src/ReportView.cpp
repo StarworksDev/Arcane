@@ -2,8 +2,10 @@
 #include <Arcane/Base/ForeignModules.hpp>
 #include <charconv>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <format>
+#include <optional>
 
 namespace Arcane::Reporter
 {
@@ -183,27 +185,65 @@ namespace Arcane::Reporter
         return out;
     }
 
-    std::string FormatLocalStamp(std::string_view s, const std::chrono::time_zone* zone)
+    namespace
     {
-        // Exactly "YYYY-MM-DDTHH:MM:SSZ" (Diagnostics.cpp's stamp shape).
-        if (!zone || s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' ||
-            s[13] != ':' || s[16] != ':' || s[19] != 'Z')
-            return {};
-        // Digits only: from_chars would accept a '-' sign inside a field.
-        const auto num = [&](std::size_t at, std::size_t len, int& out)
+        // Exactly "YYYY-MM-DDTHH:MM:SSZ" (Diagnostics.cpp's stamp shape) ->
+        // the UTC instant, or nothing.
+        std::optional<std::chrono::sys_seconds> ParseIsoUtc(std::string_view s)
         {
-            const char* b = s.data() + at;
-            if (*b < '0' || *b > '9') return false;
-            const auto r = std::from_chars(b, b + len, out);
-            return r.ec == std::errc{} && r.ptr == b + len;
-        };
-        int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
-        if (!num(0, 4, y) || !num(5, 2, mo) || !num(8, 2, d) || !num(11, 2, h) || !num(14, 2, mi) || !num(17, 2, sec))
+            if (s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' ||
+                s[13] != ':' || s[16] != ':' || s[19] != 'Z')
+                return std::nullopt;
+            // Digits only: from_chars would accept a '-' sign inside a field.
+            const auto num = [&](std::size_t at, std::size_t len, int& out)
+            {
+                const char* b = s.data() + at;
+                if (*b < '0' || *b > '9') return false;
+                const auto r = std::from_chars(b, b + len, out);
+                return r.ec == std::errc{} && r.ptr == b + len;
+            };
+            int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+            if (!num(0, 4, y) || !num(5, 2, mo) || !num(8, 2, d) || !num(11, 2, h) || !num(14, 2, mi) || !num(17, 2, sec))
+                return std::nullopt;
+            using namespace std::chrono;
+            const year_month_day ymd{ year{ y }, month{ static_cast<unsigned>(mo) }, day{ static_cast<unsigned>(d) } };
+            if (!ymd.ok() || h > 23 || mi > 59 || sec > 60) return std::nullopt;
+            return sys_days{ ymd } + hours{ h } + minutes{ mi } + seconds{ sec };
+        }
+    }
+
+    std::string FormatLocalStamp(std::string_view s, const TimeZone* zone)
+    {
+#if !defined(ARC_HAS_TZDB)
+        (void)s; (void)zone;
+        return {};
+#else
+        if (!zone)
             return {};
-        using namespace std::chrono;
-        const year_month_day ymd{ year{ y }, month{ static_cast<unsigned>(mo) }, day{ static_cast<unsigned>(d) } };
-        if (!ymd.ok() || h > 23 || mi > 59 || sec > 60) return {};
-        const sys_seconds utc = sys_days{ ymd } + hours{ h } + minutes{ mi } + seconds{ sec };
-        return std::format("{:%Y-%m-%d %H:%M}", zone->to_local(utc));
+        const auto utc = ParseIsoUtc(s);
+        if (!utc)
+            return {};
+        return std::format("{:%Y-%m-%d %H:%M}", zone->to_local(*utc));
+#endif
+    }
+
+    std::string FormatSystemLocalStamp(std::string_view s)
+    {
+        const auto utc = ParseIsoUtc(s);
+        if (!utc)
+            return {};
+        const std::time_t t = static_cast<std::time_t>(utc->time_since_epoch().count());
+        std::tm local{};
+#if defined(_WIN32)
+        if (::localtime_s(&local, &t) != 0)
+            return {};
+#else
+        if (!::localtime_r(&t, &local))
+            return {};
+#endif
+        char buf[32] = {};
+        if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &local) == 0)
+            return {};
+        return buf;
     }
 }

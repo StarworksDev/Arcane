@@ -6,6 +6,7 @@
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Platform/Paths.hpp>   // Arcane::Paths -- Saved/Diagnostics and editor.lock resolve through it (settings spec s11.0)
 #include <Arcane/Plugin/PluginABI.hpp>   // Arcane::kGamePluginABIVersion
+#include <Arcane/Platform/Process.hpp>   // Platform::QueryProcess -- EditorLock liveness off-Windows
 #include <Arcane/Project/ProjectPaths.hpp>   // PathsConfigFor, kDistBuild
 
 #include <Json.hpp>
@@ -23,6 +24,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <cstdlib>    // strtoull (EditorLock's /proc reader)
+#include <sstream>
+#include <unistd.h>   // getpid
 #endif
 
 namespace Arcane
@@ -760,6 +765,21 @@ namespace Arcane
             return info;
         }
 
+#ifndef _WIN32
+        namespace
+        {
+            // The liveness oracle (Linux: /proc/<pid>/stat; macOS:
+            // proc_pidinfo -- Arcane/Platform/Process.hpp): the pid exists,
+            // its creation stamp (a recycled pid has a different one), and
+            // whether it has exited awaiting its parent's reap -- the POSIX
+            // twin of Windows' lingering process OBJECT.
+            Platform::ProcessStat ReadProcStat(uint32_t pid)
+            {
+                return Platform::QueryProcess(pid);
+            }
+        }
+#endif
+
         Info Self()
         {
             Info info;
@@ -769,6 +789,9 @@ namespace Arcane
             if (::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user))
                 info.start = (static_cast<uint64_t>(created.dwHighDateTime) << 32) |
                              created.dwLowDateTime;
+#else
+            info.pid = static_cast<uint32_t>(::getpid());
+            info.start = ReadProcStat(info.pid).start;
 #endif
             return info;
         }
@@ -836,9 +859,16 @@ namespace Arcane
                 return std::nullopt;
             return info->pid;
 #else
-            // Non-Windows: no liveness oracle wired yet; a lock alone is not
-            // proof, so say "not running" rather than inventing certainty.
-            return std::nullopt;
+            // The same three tells via the OS process table (see ReadProcStat): the pid still
+            // has a stat entry, its start time matches, and it is not a zombie.
+            const Platform::ProcessStat st = ReadProcStat(info->pid);
+            if (!st.found)
+                return std::nullopt;
+            if (info->start != 0 && info->start != st.start)
+                return std::nullopt;
+            if (st.exited)
+                return std::nullopt;
+            return info->pid;
 #endif
         }
 
@@ -850,7 +880,9 @@ namespace Arcane
                 return pid;
             return std::nullopt;
 #else
-            (void)projectRoot;   // ReadLive answers nullopt here anyway
+            const auto pid = ReadLive(projectRoot);
+            if (pid && *pid != static_cast<uint32_t>(::getpid()))
+                return pid;
             return std::nullopt;
 #endif
         }
