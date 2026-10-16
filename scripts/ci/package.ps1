@@ -23,6 +23,17 @@ Get-ChildItem -Recurse $pkg -Depth 1 | Select-Object -ExpandProperty FullName
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $dumpbin = @(& $vswhere -latest -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Select-Object -First 1
 if (-not $dumpbin) { throw 'dumpbin.exe not found via vswhere' }
+# Host isolation (modularization s6): the server imports no Client, Developer
+# or Editor module -- the module list is read from Source/, not kept here.
+$server = Join-Path $root "Binaries\$Config-windows-x86_64-md\ArcaneServer\ArcaneServer.exe"
+$serverDeps = @(Get-DumpbinDependents -Lines @(& $dumpbin /nologo /dependents $server))
+$forbidden = Get-ChildItem -Directory (Join-Path $root 'Source\Client'), (Join-Path $root 'Source\Developer'), (Join-Path $root 'Source\Editor') |
+    ForEach-Object { "$($_.Name).dll" }
+$leaks = @($serverDeps | Where-Object { $forbidden -contains $_ })
+if ($serverDeps.Count -eq 0) { Write-Host '::error::no dependency list for ArcaneServer.exe'; exit 1 }
+if ($leaks.Count -gt 0) { Write-Host "::error::ArcaneServer imports $($leaks -join ', ') (Client/Developer/Editor modules)"; exit 1 }
+Write-Host 'host isolation: ArcaneServer imports no Client/Developer/Editor module'
+
 $dump = @(& $dumpbin /nologo /dependents (Join-Path $pkg 'ReferenceProject\Binaries\Win64\ReferenceProject.exe'))
 $dump | Set-Content -Encoding utf8 (Join-Path $logs 'package-imports.txt')
 $dump

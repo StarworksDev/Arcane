@@ -53,6 +53,11 @@ namespace Arcane
         // must stamp into a new .arcproj -- see HostBoot::EngineInfoJson.
         bool            printEngineInfo = false;
 
+        // --print-registry: boot the project, print its registered components and
+        // systems as one JSON line on stdout (HostBoot::RegistryJson), then exit.
+        // ArcaneRuntime and a packaged game implement it; the editor refuses it.
+        bool            printRegistry = false;
+
         // --headless. Render the real frame graph with NO window shown and NO
         // swapchain. Named for what every comparable tool calls this mode
         // (Chrome: "creates, but doesn't display, any platform windows"), so a
