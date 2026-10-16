@@ -46,9 +46,12 @@
   .primary { background: var(--accent); color: var(--accent-ink); }        /* 6.1:1 */
   .primary:hover:not(:disabled) { background: var(--accent-hover); }      /* 5.0:1 */
 
-  .ghost { background: rgba(255, 255, 255, .05); color: var(--text);
+  /* The ghost's RESTING fill is the plain wash and its hover the strong one:
+     it reads as a control at rest, so it starts a step above a bare surface
+     and hovering takes the next step. */
+  .ghost { background: var(--hover-wash); color: var(--text);
            border-color: var(--border); }
-  .ghost:hover:not(:disabled) { background: rgba(255, 255, 255, .09);
+  .ghost:hover:not(:disabled) { background: var(--hover-wash-strong);
                                 border-color: var(--border-hover); }
 
   .danger { background: none; color: var(--text-dim); }

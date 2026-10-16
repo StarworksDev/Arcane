@@ -4,10 +4,13 @@
 // the engine preserves the rule that Core and the runtime carry no host/user
 // vocabulary.
 //
-// Deliberately NOT derived from current_exe(). The Hub is INSTALLED to
-// %LOCALAPPDATA%\Programs\Arcane Hub\, so there is no repo root to find and no
-// sibling engine to assume -- that is Tools/setup-wizard's assumption, and it
-// is wrong here.
+// Deliberately NOT derived from current_exe(). The Hub is INSTALLED per-user
+// to %LOCALAPPDATA%\Arcane Hub\ (the NSIS currentUser default for the product
+// name), so there is no repo root to find and no sibling engine to assume --
+// that is Tools/setup-wizard's assumption, and it is wrong here. Note the
+// install dir and this data dir (%LOCALAPPDATA%\Arcane\hub) are siblings
+// under %LOCALAPPDATA% -- the unquoted-association incident in assoc.rs is
+// what that adjacency once cost.
 
 use std::path::PathBuf;
 

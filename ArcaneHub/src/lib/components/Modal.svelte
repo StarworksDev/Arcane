@@ -142,7 +142,7 @@
            max-height: calc(100vh - 48px); overflow-y: auto;
            background: var(--surface); border: 1px solid var(--border);
            border-radius: var(--r-panel); padding: 18px 20px 16px;
-           box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+           box-shadow: var(--shadow-dialog);
            animation: rise var(--dur) var(--ease); }
   /* The sheet fills the wrap and does NOT scroll as a whole: its header stays
      put and whatever it contains owns the scrollbar. Scrolling the panel would
@@ -159,7 +159,11 @@
   .panel.full .head { flex: none; margin: 0; padding: 13px 16px 13px 20px;
                       border-bottom: 1px solid var(--border-soft); }
 
-  h2 { font-size: 17px; margin: 0; color: var(--text-bright); }
+  /* Titles carry project names ("Engine for <name>"), which are user text with
+     no guaranteed break point: one long unbroken name scrolled the whole
+     dialog sideways. min-width: 0 lets the flex item shrink so it can wrap. */
+  h2 { font-size: 17px; margin: 0; color: var(--text-bright); min-width: 0;
+       overflow-wrap: anywhere; }
   .panel.full h2 { font-size: 23px; }
 
   /* Pushed right by margin-auto on the button, not by a spacer, so `aside`
@@ -168,7 +172,7 @@
        display: grid; place-items: center; background: none; border: 0;
        border-radius: 6px; color: var(--text-dim); cursor: default;
        transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
-  .x:hover { background: rgba(255, 255, 255, .07); color: var(--text); }
+  .x:hover { background: var(--hover-wash-strong); color: var(--text); }
 
   .body { display: flex; flex-direction: column; gap: 13px; }
   /* One stretched cell: the sheet's content is a full-height layout of its own,

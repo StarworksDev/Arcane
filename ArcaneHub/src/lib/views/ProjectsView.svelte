@@ -6,19 +6,22 @@
   import ProjectRow from "$lib/components/ProjectRow.svelte";
   import type { ProjectActions } from "$lib/components/ProjectMenu.svelte";
   import Icon, { type IconName } from "$lib/components/Icon.svelte";
-  import { filterProjects, isCompatible, normalisePath, resolveEngine, sortProjects,
+  import { filterProjects, isCompatible, projectKey, resolveEngine, sortProjects,
+           projectCountLine, sortHeaderLabel,
            type ProjectView, type SortKey } from "$lib/format";
   import type { EngineEntry, RecentProject } from "$lib/api";
 
-  // Both dialogs are owned by +page.svelte, not by this view: they are
+  // Every dialog this view opens (New project, and the per-project ones the
+  // menu opens) is owned by +page.svelte, not by this view: they are
   // app-level overlays that have to sit above the error banner, and +page is
   // the only stateful file by design.
   let { recents, engines, defaultEngine, busy, running, covers, layout, confirmDelete,
-        sort, sortDesc, actions, onOpen, onScan, onNew, onLayout, onSort }:
+        sort, sortDesc, actions, onOpen, onScan, onNew, onLayout, onSort,
+        query = $bindable(""), scrollTop = $bindable(0) }:
     {
       recents: RecentProject[]; engines: EngineEntry[];
       defaultEngine: EngineEntry | null; busy: boolean;
-      /** Keys (format.normalisePath) of projects with a live editor. */
+      /** Keys (format.projectKey, Rust's project_dir_key) of projects with a live editor. */
       running: Set<string>;
       /** Cover data URLs by recorded path; absent = the card's monogram. */
       covers: Record<string, string>;
@@ -34,6 +37,12 @@
       onLayout: (v: ProjectView) => void;
       /** A column was clicked/picked; +page owns the flip-or-switch rule. */
       onSort: (k: SortKey) => void;
+      /**
+       * The search text and the list's scroll offset, owned by +page so they
+       * survive a trip to Engines and back (this view unmounts). Switching
+       * Tiles/List never remounts it, so both carry over there for free.
+       */
+      query?: string; scrollTop?: number;
     } = $props();
 
   // Both layouts take the SAME props, so switching is a component swap rather
@@ -43,16 +52,14 @@
     { id: "list", icon: "list", label: "List" },
   ];
 
-  let query = $state("");
-
   // The Add dropdown (Unity Hub's grammar: "Add v" opens a menu, "+ New
-  // project" acts). Disabled only while busy, because Scan needs no engine;
-  // the engine requirement gates the one ITEM that launches.
+  // project" acts). Disabled only while busy: neither item needs an engine.
+  // "Add project…" used to be gated on one because it LAUNCHED the project;
+  // it now only lists it (add_project), which is what "Add" says.
   const addItems = $derived<DropdownItem[]>([
     {
       label: "Add project…",
-      disabled: !defaultEngine,
-      title: defaultEngine ? "Pick a project's .arcproj file" : "Register an engine first",
+      title: "Pick a project's .arcproj file and add it to the list",
       onselect: onOpen,
     },
     {
@@ -94,16 +101,48 @@
     sortProjects(filterProjects(recents, query), sort, sortDesc, engineLabelOf),
   );
   const incompatible = $derived(
-    recents.filter((p) => {
-      const r = resolveEngine(p.engineId, engines, defaultEngine);
-      // A missing project is counted under `missing`, not here: its recorded
-      // ABI came from a manifest that is no longer there to disagree with.
-      return !p.missing && !isCompatible(p.engineAbi, r.engine?.engineAbi ?? null);
-    }).length,
+    // A missing project is counted under `missing`, not here: its recorded
+    // ABI came from a manifest that is no longer there to disagree with.
+    recents.filter((p) =>
+      !p.missing && !isCompatible(p.engineAbi, resolvedFor(p).engine?.engineAbi ?? null)).length,
   );
   const missing = $derived(recents.filter((p) => p.missing).length);
+
+  // The list keeps its place across a layout switch and a trip to another
+  // view, and goes back to the top only when WHAT is listed changes order or
+  // membership -- a new search or sort -- where the old offset points at
+  // unrelated rows. An action, not an effect on the element: the scroller
+  // only exists while there is something to list, and comes and goes with
+  // the search.
+  let resetKey = "";
+  function keepScroll(el: HTMLElement) {
+    el.scrollTop = scrollTop;
+    const onScroll = () => (scrollTop = el.scrollTop);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return { destroy: () => el.removeEventListener("scroll", onScroll) };
+  }
+  let scroller = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const key = `${query}\u0000${sort}\u0000${sortDesc}`;
+    // The first run only records the key: arriving on the view (or switching
+    // layout) must restore the offset, not reset it.
+    if (resetKey && key !== resetKey) {
+      scrollTop = 0;
+      if (scroller) scroller.scrollTop = 0;
+    }
+    resetKey = key;
+  });
+
+  // "New project" needs an engine to stamp the project with. A disabled button
+  // never shows its own title, so the reason rides on a wrapper (as on the
+  // Engines page's Install button).
+  const newBlocked = $derived(defaultEngine ? "" : "Register an engine on the Engines page first");
 </script>
 
+<!-- The view fills main's height so only the projects scroll: the title,
+     search, actions, meta row and the list's column headers stay put while a
+     long list scrolls under them. -->
+<div class="view">
 <!-- Title, search and actions on ONE row. The count and the layout toggle drop
      to a slim second row: the count line runs long once projects are
      incompatible ("3 projects - 1 needs a different engine"), and at the 800px
@@ -115,7 +154,8 @@
        reaching into the Icon component's scope. -->
   <div class="searchwrap">
     <span class="glass" aria-hidden="true"><Icon name="search" size={14} /></span>
-    <input class="search" bind:value={query} placeholder="Search projects" spellcheck="false" />
+    <input class="field search" bind:value={query} placeholder="Search projects"
+           aria-label="Search projects" spellcheck="false" />
   </div>
   <div class="acts">
     <!-- "Add", not "Open...": both routes put an EXISTING project into the
@@ -128,19 +168,18 @@
         </Button>
       {/snippet}
     </Dropdown>
-    <Button variant="primary" disabled={busy || !defaultEngine} onclick={onNew}>
-      <span class="lbl"><Icon name="plus" size={15} />New project</span>
-    </Button>
+    <span class="why" title={newBlocked || undefined}>
+      <Button variant="primary" disabled={busy || !defaultEngine} onclick={onNew}
+              aria-describedby={newBlocked ? "new-blocked" : undefined}>
+        <span class="lbl"><Icon name="plus" size={15} />New project</span>
+      </Button>
+      {#if newBlocked}<span id="new-blocked" class="sr">{newBlocked}</span>{/if}
+    </span>
   </div>
 </header>
 
 <div class="meta">
-  <p class="view-sub">
-    {recents.length} {recents.length === 1 ? "project" : "projects"}
-    {#if incompatible > 0}&middot; {incompatible}
-      {incompatible === 1 ? "needs" : "need"} a different engine{/if}
-    {#if missing > 0}&middot; {missing} missing{/if}
-  </p>
+  <p class="view-sub">{projectCountLine(recents.length, incompatible, missing)}</p>
   <!-- The grid's sort control: the same four choices the list's headers
        offer, because the grid has no columns to click. The dropdown switches
        column (a new column starts at its natural direction); the button
@@ -186,13 +225,20 @@
        so the old aria-hidden (added when these were decorative text) is gone
        with the decoration. The leading and trailing spans hold the star and
        menu tracks. -->
+  <!-- aria-pressed marks the active column and its label states the direction
+       (sortHeaderLabel): the arrow is aria-hidden, so before this a screen
+       reader heard four identical "Sort by" buttons and no current sort.
+       aria-sort was the alternative, but it is only valid on a columnheader
+       inside a grid or table, and this list is neither. -->
   {#if layout === "list"}
-    <div class="cols">
+    <div class="cols" role="group" aria-label="Sort projects">
       <span></span>
       {#each COLS as c (c.key)}
         <button type="button" class="col" class:on={sort === c.key}
                 onclick={() => onSort(c.key)}
-                title="Sort by {c.label}" aria-label="Sort by {c.label}">
+                aria-pressed={sort === c.key}
+                title={sortHeaderLabel(c.label, sort === c.key, sortDesc)}
+                aria-label={sortHeaderLabel(c.label, sort === c.key, sortDesc)}>
           {c.label}{#if sort === c.key}<span class="dir"
             aria-hidden="true"><Icon name={sortDesc ? "arrow-down" : "arrow-up"}
                                      size={10} /></span>{/if}
@@ -202,6 +248,7 @@
     </div>
   {/if}
 
+  <div class="scroll" use:keepScroll bind:this={scroller}>
   <div class:grid={layout === "grid"} class:list={layout === "list"}>
     {#each shown as p (p.path)}
       {@const r = resolvedFor(p)}
@@ -212,8 +259,15 @@
         engineLabel: r.engine ? r.engine.build : "none registered",
         pinned: r.pinned,
         dangling: r.dangling,
-        running: running.has(normalisePath(p.path)),
-        disabled: busy || !r.engine,
+        // projectKey, not normalisePath: running keys are Rust's
+        // project_dir_key, which folds a manifest path to its folder.
+        running: running.has(projectKey(p.path)),
+        // Two separate gates. `disabled` is "an action is running" and
+        // applies to everything; "no engine" only blocks what launches, so
+        // the menu (Rename, Remove, Delete...) no longer greys out for a user
+        // who has not registered an engine yet.
+        disabled: busy,
+        hasEngine: !!r.engine,
         confirmDelete,
         actions,
       }}
@@ -224,9 +278,26 @@
       {/if}
     {/each}
   </div>
+  </div>
 {/if}
+</div>
 
 <style>
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .view > * { flex: none; }
+
+  /* The one scrolling region. It reaches into main's right and bottom padding
+     so its scrollbar sits at the window edge and the last row scrolls clear
+     of the bottom; scrollbar-gutter keeps that gutter reserved whether or not
+     the list overflows, so the rows never shift sideways and stay exactly as
+     wide as the header and column strip above them. No inset on the top and
+     left: nothing focusable sits at those edges (a card clips its own
+     contents, a row pads its controls), and a negative top margin would let
+     scrolled rows show above the column strip's rule. */
+  .view > .scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable;
+                    margin: 0 calc(-1 * var(--main-pad-x)) calc(-1 * var(--main-pad-b)) 0;
+                    padding: 0 calc(var(--main-pad-x) - var(--scrollbar)) var(--main-pad-b) 0; }
+
   .top { display: flex; align-items: center; gap: 12px; }
   .acts { display: flex; gap: 8px; flex: none; }
 
@@ -244,21 +315,21 @@
   .glass { position: absolute; left: 11px; top: 50%; translate: 0 -50%;
            display: grid; place-items: center; color: var(--text-dim);
            pointer-events: none; }
-  .search { width: 100%; box-sizing: border-box; padding-left: 32px; }
+  /* The shared .field (theme.css) supplies the look and the 7px height that
+     matches the buttons beside it; only the magnifier's inset is local. */
+  .search { padding-left: 32px; }
+
+  /* Shrink-wraps the New project button so its title can explain a disabled
+     state (a disabled button gets no mouse events, so no tooltip). */
+  .why { display: inline-flex; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
+        clip-path: inset(50%); white-space: nowrap; }
 
   .meta { display: flex; align-items: center; gap: 12px; margin: 10px 0 14px; }
   /* Beats the global .view-sub margin: inside this row the spacing is the
      row's job, not the paragraph's. */
   .meta .view-sub { margin: 0; }
   .layouts { margin-left: auto; }
-
-  /* 7px vertical, matching Button's slimmed padding, so the search and the
-     buttons beside it share one control height. */
-  input { background: var(--well); border: 1px solid var(--border);
-          border-radius: var(--r-btn); color: var(--text); font: inherit;
-          font-size: 13px; padding: 7px 12px; user-select: text; cursor: text; }
-  input::placeholder { color: var(--text-dim); }
-  input:focus { border-color: var(--accent-ring); outline: none; }
 
   .layouts { flex: none; display: flex; gap: 2px; padding: 2px;
              background: var(--well); border: 1px solid var(--border);
@@ -268,7 +339,7 @@
                     font: inherit; cursor: default;
                     transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
   .layouts button:hover:not(.on) { color: var(--text-muted);
-                                   background: rgba(255, 255, 255, .05); }
+                                   background: var(--hover-wash); }
   /* Same neutral active treatment as the sidebar's current nav item. */
   .layouts button.on { background: var(--surface-sel); color: var(--text); }
 
@@ -311,12 +382,12 @@
               cursor: default;
               transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
   .sorttrig:hover, .sorttrig[aria-expanded="true"] {
-    color: var(--text); background: rgba(255, 255, 255, .05); }
+    color: var(--text); background: var(--hover-wash); }
   .dirbtn { display: grid; place-items: center; width: 26px; height: 24px;
             background: none; border: 0; border-radius: 5px; font-size: 9px;
             color: var(--text-dim); cursor: default;
             transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
-  .dirbtn:hover { color: var(--text); background: rgba(255, 255, 255, .05); }
+  .dirbtn:hover { color: var(--text); background: var(--hover-wash); }
 
   /* Separating adjacent rows is the list's job, not a row's: a row cannot see
      whether it has a neighbour, and `+` between two neighbours leaves the last
@@ -327,7 +398,11 @@
   /* auto-fill, NOT repeat(3, 1fr): the window minimum is 800px wide. 230px
      tracks -- 190 originally, then 210 for the larger type, now 230 because a
      tile carries the folder path as well. Still three columns at the default
-     window size, so this costs no density. */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+     window size, so this costs no density. The minimum then grows with the
+     window up to 300px, so a maximised window gets wider tiles (five across
+     at 1920px) rather than six tiles still at 230px, each cutting its name
+     short. */
+  .grid { display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(clamp(230px, 18vw, 300px), 1fr));
           gap: 12px; }
 </style>
