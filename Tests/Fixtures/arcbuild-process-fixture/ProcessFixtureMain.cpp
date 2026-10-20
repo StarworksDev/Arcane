@@ -17,11 +17,14 @@
 //                          order it was received; <n> counts only ordinary
 //                          entries, so a control flag never shifts it
 //   CWD:<path>             GetCurrentDirectoryW -- proves lpCurrentDirectory
-//   HANDLE:valid|invalid   only printed for --probe-handle
+//   HANDLE:sentinel|absent only printed for --probe-handle
 //
 // Recognized flags (consumed whole, never themselves an ARG: line):
 //   --stderr <text>        write <text> to stderr (still the one merged pipe)
-//   --probe-handle <n>     interpret <n> (decimal) as a HANDLE and probe it
+//   --probe-handle <n> <path>
+//                          interpret <n> (decimal) as a HANDLE and report
+//                          whether it names the file at <path> in THIS
+//                          process (sentinel) or not (absent)
 //   --exit <n>             exit with code n (default 0 if never given)
 //
 // wmain, not main: argv here is the real UTF-16 split CommandLineToArgvW
@@ -92,21 +95,41 @@ namespace
         std::fflush(stream);
     }
 
-    bool ProbeHandleValid(
-        unsigned long long value)
+    // Whether <value>, read as a HANDLE in THIS process, names the very file
+    // at <path> -- same volume, same file index. Never merely "is it a valid
+    // handle": handle numbers are per process, and this process owns small
+    // file-type handles of its own (cwd, console, stdio) that the parent's
+    // number can coincide with. Only an inherited handle can name the
+    // parent's sentinel file, so the answer is deterministic.
+    bool ProbeHandleNamesFile(
+        unsigned long long value,
+        const wchar_t* path)
     {
         const HANDLE handle =
             reinterpret_cast<HANDLE>(
                 static_cast<UINT_PTR>(value));
 
-        ::SetLastError(0);
-        const DWORD type = ::GetFileType(handle);
+        BY_HANDLE_FILE_INFORMATION probed{};
+        if (!::GetFileInformationByHandle(handle, &probed))
+            return false;
 
-        // The documented MSDN pattern: FILE_TYPE_UNKNOWN is ambiguous on its
-        // own (a real handle CAN legitimately report an unknown type with
-        // GetLastError() == NO_ERROR) -- only FILE_TYPE_UNKNOWN together
-        // with a non-zero last error means the handle itself was invalid.
-        return !(type == FILE_TYPE_UNKNOWN && ::GetLastError() != 0);
+        const HANDLE reference =
+            ::CreateFileW(
+                path, FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+        if (reference == INVALID_HANDLE_VALUE)
+            return false;
+
+        BY_HANDLE_FILE_INFORMATION expected{};
+        const BOOL queried = ::GetFileInformationByHandle(reference, &expected);
+        ::CloseHandle(reference);
+
+        return queried
+            && probed.dwVolumeSerialNumber == expected.dwVolumeSerialNumber
+            && probed.nFileIndexHigh == expected.nFileIndexHigh
+            && probed.nFileIndexLow == expected.nFileIndexLow;
     }
 }
 
@@ -130,15 +153,16 @@ int wmain(
         {
             PrintLine(stderr, ToUtf8(argv[++i]));
         }
-        else if (token == L"--probe-handle" && i + 1 < argc)
+        else if (token == L"--probe-handle" && i + 2 < argc)
         {
             const unsigned long long value =
                 std::wcstoull(argv[++i], nullptr, 10);
+            const wchar_t* path = argv[++i];
 
             PrintLine(
                 stdout,
                 std::string("HANDLE:") +
-                    (ProbeHandleValid(value) ? "valid" : "invalid"));
+                    (ProbeHandleNamesFile(value, path) ? "sentinel" : "absent"));
         }
         else if (token == L"--exit" && i + 1 < argc)
         {
