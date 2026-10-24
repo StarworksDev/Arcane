@@ -992,19 +992,29 @@ TEST_CASE("a refused load leaves nothing registered from a dependency image it u
     // Core and Scene) and unmaps it again. The child then constructs a fresh
     // Runtime (AttachAllModules), steps it and walks the log setters: any
     // registration the dependency left behind calls into freed code.
-#if defined(_WIN32)
+    // Linux (user decision 2026-10-24): the refused load PINS the fresh engine
+    // dependency for the life of the process instead (Module::PinsForProcessLife),
+    // so Physics2D stays mapped with its registrations intact -- exactly one
+    // module-attach callback -- and the same Runtime / log walk runs live code.
+#if !defined(__APPLE__)   // MappedModules lists nothing on macOS
     const DigestChildRun stale = RunDigestChild("AbiDigestStale", "--then-runtime");
     INFO("child output: " << stale.output);
     CHECK(stale.kind == "AbiMismatch");
+    REQUIRE(stale.fields.count("physics2dMappedAfterRefusal") == 1);
+    REQUIRE(stale.fields.count("physics2dAttachAfterRefusal") == 1);
+#if defined(_WIN32)
     REQUIRE(stale.fields.count("fixturePhysics2dMapped") == 1);
     CHECK(stale.fields.at("fixturePhysics2dMapped") == "1");        // the load really mapped it
-    REQUIRE(stale.fields.count("physics2dMappedAfterRefusal") == 1);
     CHECK(stale.fields.at("physics2dMappedAfterRefusal") == "0");   // and the refusal unmapped it
+#else
+    CHECK(stale.fields.at("physics2dMappedAfterRefusal") == "1");   // mapped by the load (the child does not link it), pinned
+    CHECK(stale.fields.at("physics2dAttachAfterRefusal") == "1");   // its registrations intact, not purged
+#endif
     CHECK(stale.fields.count("runtimeAfterRefusal") == 1);
     CHECK(stale.exitCode == 0);
     CHECK_FALSE(fs::exists(stale.sentinel));
 #else
-    SKIP("the dependency witness uses Module::MappedModules, which is Windows-only");
+    SKIP("the dependency witness uses Module::MappedModules, which lists nothing on macOS");
 #endif
 }
 

@@ -327,6 +327,20 @@ namespace Arcane
                     return m.image.base == base;
                 });
 
+                // ELF: a fresh dependency is pinned FOR PROCESS LIFE and never
+                // disowned (Module::PinsForProcessLife) -- engine libraries are
+                // never hot-reloaded, only the game module is, so its
+                // registrations stay valid for every later session. No session
+                // bookkeeping: the image cannot unmap, so EndLoadSession has
+                // nothing to drop for it.
+                if constexpr (Module::PinsForProcessLife())
+                {
+                    if (fresh && Module::PinMapped(mapped))
+                        ARC_TRACE("plugin: pinned dependency image '{}' for the life of the process",
+                                  mapped.path.generic_string());
+                    continue;
+                }
+
                 std::optional<Module> pin;
                 {
                     const std::lock_guard lock(g_dependencyMutex);

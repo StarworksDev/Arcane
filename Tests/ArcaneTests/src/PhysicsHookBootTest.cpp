@@ -629,29 +629,32 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     CHECK(run.fields.at("hooksAfterLoad") == run.fields.at("hooksBefore"));
     CHECK(run.fields.at("hooksAfterUnload") == run.fields.at("hooksBefore"));
     REQUIRE(run.fields.count("physics2dMappedAfterUnload") == 1);
-    REQUIRE(run.fields.count("physics2dLeftoverAfterUnload") == 1);
+    REQUIRE(run.fields.count("physics2dAttachSecondSession") == 1);
+    REQUIRE(run.fields.count("physics2dCVarsSecondSession") == 1);
 #if !defined(__APPLE__)   // the child's witness is Module::MappedModules, empty on macOS (no dependency net there yet)
     CHECK(run.fields.at("physics2dMappedBefore") == "0");   // the child does not link it
     CHECK(run.fields.at("physics2dMappedAtLoad") == "1");   // the module really imports it
-    // After the unload Physics2D has none of its registrations left in Core:
-    // the host's load session pinned the fresh dependency and disowned it
-    // before letting go (PR #20 review I1). The leftover count is 0 when it is
-    // unmapped.
-    CHECK(run.fields.at("physics2dLeftoverAfterUnload") == "0");
-    // ...and the pin was the LAST reference, so the dependency really unmapped
-    // (the fresh Runtime below is not vacuous). On Linux this child's temp-dir
-    // module copy reaches Physics2D through Module::Load's beside-the-exe
-    // retry, whose handle was leaked before re-review I-R1 and kept the image
-    // mapped for the life of the process (run 39929573568); the module now
-    // owns and releases it. The refusal path (AbiDigestTest:975) loads its
-    // module in place, where the $ORIGIN runpath finds Physics2D directly.
+#if defined(_WIN32)
+    // Windows: the host's load session pinned the fresh dependency, disowned it
+    // and let go; FreeLibrary dropped the last reference (the fresh Runtime
+    // below is not vacuous).
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "0");
-    // A second load session maps it afresh and its statics register again: a
-    // dependency kept mapped after the first session disowned it would be
-    // skipped as already mapped and run without its registrations (I-R1).
-    REQUIRE(run.fields.count("physics2dRegisteredSecondSession") == 1);
+#else
+    // Linux: a game load pins its fresh engine dependencies FOR PROCESS LIFE
+    // (Module::PinsForProcessLife, user decision 2026-10-24): engine libraries
+    // are never hot-reloaded, only the game module is. glibc decides on its own
+    // whether a released object unmaps (gcc Debug kept Physics2D mapped with
+    // the reference released, run 40051567104), so it stays mapped by rule and
+    // its registrations are never dropped.
+    CHECK(run.fields.at("physics2dMappedAfterUnload") == "1");
+#endif
+    // A second load session has Physics2D's registrations EXACTLY once: one
+    // module-attach callback (re-registered by a fresh map on Windows, never
+    // dropped on Linux -- a dependency disowned but kept mapped shows 0, a
+    // double registration 2) and its cvars.
     CHECK(run.fields.at("loadedSecondSession") == "1");
-    CHECK(run.fields.at("physics2dRegisteredSecondSession") != "0");
+    CHECK(run.fields.at("physics2dAttachSecondSession") == "1");
+    CHECK(run.fields.at("physics2dCVarsSecondSession") != "0");
 #endif
     CHECK(run.fields.count("advanced") == 1);   // the fresh Runtime stepped after the unload
 }

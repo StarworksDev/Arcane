@@ -251,8 +251,17 @@ namespace Arcane
                 const bool fresh = std::ranges::none_of(mappedBefore, [base](const Module::MappedModule& m) {
                     return m.image.base == base;
                 });
-                if (fresh)
-                    DropImageRegistrations(base, mapped.image.size, mapped.path);
+                if (!fresh)
+                    continue;
+                // ELF: the same rule as PluginHost's -- a fresh dependency is
+                // pinned for the life of the process (Module::PinsForProcessLife),
+                // so it does not unmap with `module` and its registrations stay
+                // valid: dropping them would strip a live engine library. Only
+                // when it cannot be pinned is it treated as unmapping.
+                if constexpr (Module::PinsForProcessLife())
+                    if (Module::PinMapped(mapped))
+                        continue;
+                DropImageRegistrations(base, mapped.image.size, mapped.path);
             }
             return std::nullopt;
         }
