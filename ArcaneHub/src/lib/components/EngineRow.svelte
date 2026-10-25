@@ -19,11 +19,15 @@
   <button class="pick" type="button" onclick={onSelect}
           aria-current={selected ? "true" : undefined}>
     <span class="nm">{engine.build}</span>
-    <code class="path">{engine.path}</code>
+    <!-- title: the path is truncated with an ellipsis, and the part cut off
+         (the configuration folder, the exe) is the part that tells two
+         builds of one engine apart. -->
+    <code class="path" title={engine.path}>{engine.path}</code>
   </button>
   {#if engine.missing}
     <!-- The badge takes the abi slot: a number probed from an exe that is no
-         longer there is not worth repeating. Same treatment as project rows. -->
+         longer there is not worth repeating. Same treatment as project rows.
+         Lowercase "abi 59" is a code-style token (mono); prose says "ABI". -->
     <code class="abi badge">missing</code>
   {:else}
     <code class="abi">abi {engine.engineAbi}</code>

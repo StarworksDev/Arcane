@@ -7,7 +7,31 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::project;
+use crate::{project, store};
+
+/// The manifest a recorded path names, LENIENTLY: the path itself when it is
+/// a .arcproj, else the folder's single .arcproj. None for an ambiguous or
+/// unreadable folder. The one resolution manifest_abi and manifest_guid
+/// share (they each carried a copy). Lenient means "for READING": a
+/// manifest-shaped path is believed without asking whether its folder holds
+/// other projects -- fine for an ABI or a guid, never for a destructive
+/// command (that is resolve_owned_project's job).
+fn lenient_manifest(project_path: &Path) -> Option<PathBuf> {
+    if project_path.extension().is_some_and(|e| e.eq_ignore_ascii_case(project::MANIFEST_EXT)) {
+        return Some(project_path.to_path_buf());
+    }
+    let names = file_names(project_path).ok()?;
+    Some(project_path.join(project::pick_manifest(&names)?))
+}
+
+/// The plain FILE names directly inside `dir`.
+fn file_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect())
+}
 
 /// The ABI a project was BUILT AGAINST, read from its manifest.
 ///
@@ -17,19 +41,7 @@ use crate::project;
 /// ambiguous folder, unreadable JSON), which the UI treats as "cannot prove a
 /// conflict" rather than as a fault.
 pub fn manifest_abi(project_path: &Path) -> Option<u32> {
-    let file = if project_path.extension().is_some_and(|e| {
-        e.eq_ignore_ascii_case(project::MANIFEST_EXT)
-    }) {
-        project_path.to_path_buf()
-    } else {
-        let names: Vec<String> = std::fs::read_dir(project_path)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        project_path.join(project::pick_manifest(&names)?)
-    };
+    let file = lenient_manifest(project_path)?;
     project::parse_manifest_abi(&std::fs::read_to_string(file).ok()?)
 }
 
@@ -41,19 +53,7 @@ pub fn manifest_abi(project_path: &Path) -> Option<u32> {
 /// uses to recognise a MOVED project -- see state::heal_by_guid for the rule
 /// that keeps a hand-copied folder from impersonating the original.
 pub fn manifest_guid(project_path: &Path) -> Option<String> {
-    let file = if project_path.extension().is_some_and(|e| {
-        e.eq_ignore_ascii_case(project::MANIFEST_EXT)
-    }) {
-        project_path.to_path_buf()
-    } else {
-        let names: Vec<String> = std::fs::read_dir(project_path)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        project_path.join(project::pick_manifest(&names)?)
-    };
+    let file = lenient_manifest(project_path)?;
     project::parse_manifest_guid(&std::fs::read_to_string(file).ok()?)
 }
 
@@ -68,11 +68,14 @@ pub fn project_dir(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-/// A recorded path resolved to (project root, manifest file).
+/// A recorded path resolved to (project root, manifest file) -- LENIENTLY.
 ///
-/// Applies the engine's own rule for a folder: exactly one .arcproj, or it is
-/// ambiguous and refused (Project.cpp:142-160). Renaming a project we could not
-/// unambiguously identify would rename the wrong thing.
+/// Applies the engine's own rule for a FOLDER: exactly one .arcproj, or it is
+/// ambiguous and refused (Project.cpp:142-160). A manifest-shaped path is
+/// taken as given, WITHOUT checking whether its folder holds other
+/// manifests: right for the cover, a launch, Locate and add_project, which
+/// only read that one file. NOT safe for anything that acts on the whole
+/// FOLDER -- delete, rename, duplicate use resolve_owned_project.
 pub fn resolve_project(recorded: &Path) -> Result<(PathBuf, PathBuf), String> {
     if recorded.is_file() {
         if !recorded.extension().is_some_and(|e| e.eq_ignore_ascii_case(project::MANIFEST_EXT)) {
@@ -86,12 +89,8 @@ pub fn resolve_project(recorded: &Path) -> Result<(PathBuf, PathBuf), String> {
     if !recorded.is_dir() {
         return Err(format!("{} is no longer on disk", recorded.display()));
     }
-    let names: Vec<String> = std::fs::read_dir(recorded)
-        .map_err(|e| format!("could not read {}: {e}", recorded.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    let names = file_names(recorded)
+        .map_err(|e| format!("could not read {}: {e}", recorded.display()))?;
     let file = project::pick_manifest(&names).ok_or_else(|| {
         format!(
             "{} does not contain exactly one .arcproj, so there is no single \
@@ -102,11 +101,36 @@ pub fn resolve_project(recorded: &Path) -> Result<(PathBuf, PathBuf), String> {
     Ok((recorded.to_path_buf(), recorded.join(file)))
 }
 
+/// A recorded path resolved to (project root, manifest file) for a command
+/// that acts on the WHOLE FOLDER: delete (to the recycle bin), rename,
+/// duplicate. `verb` names the act for the refusal message.
+///
+/// THE INCIDENT THIS CLOSES: resolve_project takes a manifest-shaped path at
+/// its word, so "D:/Games/A.arcproj" resolved to root "D:/Games" -- and
+/// Delete then sent the whole of D:/Games, every other project in it, to
+/// the recycle bin; Rename renamed it; Duplicate copied it. The folder is
+/// only "this project's folder" when it holds exactly one .arcproj and that
+/// one IS this manifest (the engine's own exactly-one rule, applied to the
+/// parent of a file as well as to a folder).
+pub fn resolve_owned_project(recorded: &Path, verb: &str) -> Result<(PathBuf, PathBuf), String> {
+    let (root, manifest) = resolve_project(recorded)?;
+    let names = file_names(&root).map_err(|e| format!("could not read {}: {e}", root.display()))?;
+    let mine = manifest.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let owns = project::pick_manifest(&names).is_some_and(|only| only.eq_ignore_ascii_case(&mine));
+    if !owns {
+        return Err(format!(
+            "{} holds other projects too, so the Hub will not {verb} the folder; do it in Explorer",
+            root.display()
+        ));
+    }
+    Ok((root, manifest))
+}
+
 /// Covers larger than this are ignored rather than shipped to the webview: a
 /// base64 data URL is ~4/3 the file, held in memory per card. The editor's
 /// auto-screenshot is a few hundred KB; this cap only ever meets a giant
 /// hand-placed PNG, whose card falls back to the monogram.
-const COVER_MAX_BYTES: usize = 2 * 1024 * 1024;
+const COVER_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
 /// The cover image for a project card, as a `data:image/png;base64,` URL.
@@ -124,8 +148,15 @@ pub fn project_cover(recorded: &Path) -> Option<String> {
     let candidates =
         [root.join(format!("{stem}.png")), root.join("Saved").join("AutoScreenshot.png")];
     for c in candidates {
+        // Size from the metadata FIRST: reading a giant hand-placed PNG whole
+        // just to throw it away cost its full size in memory and IO on every
+        // card refresh.
+        let Ok(meta) = std::fs::metadata(&c) else { continue };
+        if !meta.is_file() || meta.len() > COVER_MAX_BYTES {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(&c) else { continue };
-        if bytes.len() <= COVER_MAX_BYTES && bytes.starts_with(&PNG_MAGIC) {
+        if bytes.len() as u64 <= COVER_MAX_BYTES && bytes.starts_with(&PNG_MAGIC) {
             return Some(format!(
                 "data:image/png;base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -240,6 +271,7 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// A duplicate freshly made on disk, ready for the caller to list.
+#[derive(Debug)]
 pub struct Duplicated {
     pub name: String,
     pub manifest: PathBuf,
@@ -259,7 +291,9 @@ pub struct Duplicated {
 /// Any failure past the first write removes new_root -- it did not exist
 /// before this call, so the remove can only take the partial copy just made.
 pub fn duplicate_project_files(recorded: &Path) -> Result<Duplicated, String> {
-    let (root, manifest) = resolve_project(recorded)?;
+    // Owned, not lenient: copying the parent of a manifest that shares its
+    // folder with other projects would copy all of them.
+    let (root, manifest) = resolve_owned_project(recorded, "duplicate")?;
     let parent = root
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -306,7 +340,9 @@ pub fn duplicate_project_files(recorded: &Path) -> Result<Duplicated, String> {
             return fail(format!("could not rename {}: {e}", copied.display()));
         }
     }
-    if let Err(e) = std::fs::write(&new_manifest, &edited) {
+    // Atomic (temp + rename): a manifest truncated mid-write is a project
+    // the engine refuses to open.
+    if let Err(e) = store::write_bytes_atomic(&new_manifest, edited.as_bytes()) {
         return fail(format!("could not write {}: {e}", new_manifest.display()));
     }
 
@@ -316,6 +352,110 @@ pub fn duplicate_project_files(recorded: &Path) -> Result<Duplicated, String> {
         abi: project::parse_manifest_abi(&edited).unwrap_or(0),
         guid: fresh_guid,
     })
+}
+
+/// Rename `from` to `to`, including a CASE-ONLY rename ("mygame" ->
+/// "MyGame"), which goes through a temporary sibling in two steps. The old
+/// rename_project skipped a case-only folder rename outright (the two names
+/// normalise to one key), so the folder kept its old spelling forever while
+/// the manifest inside took the new one. Two steps work on every filesystem
+/// the Hub meets, including ones where a direct case-only rename is a
+/// silent no-op. A failed second step puts the first back.
+fn rename_case_safe(from: &Path, to: &Path) -> std::io::Result<()> {
+    let same_ignoring_case = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+    if !same_ignoring_case {
+        return std::fs::rename(from, to);
+    }
+    if from.as_os_str() == to.as_os_str() {
+        return Ok(());
+    }
+    let mut tmp_name = to.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".hub-rename-{}", std::process::id()));
+    let tmp = to.with_file_name(tmp_name);
+    std::fs::rename(from, &tmp)?;
+    std::fs::rename(&tmp, to).inspect_err(|_| {
+        let _ = std::fs::rename(&tmp, from);
+    })
+}
+
+/// The name an existing entry of `dir` actually has on disk, matched
+/// case-insensitively -- a recorded path may spell it differently, and a
+/// case-only rename is decided against the DISK spelling.
+fn disk_name(dir: &Path) -> Option<String> {
+    let want = dir.file_name()?.to_string_lossy().to_lowercase();
+    std::fs::read_dir(dir.parent()?)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .find(|n| n.to_lowercase() == want)
+}
+
+/// The disk half of Rename: the project's folder, its .arcproj file and the
+/// `name` inside that manifest, in that order, so the step most likely to
+/// fail comes first and every later failure rolls back. `new_name` must
+/// already have passed project::name_error (the caller's gate). Returns the
+/// new manifest path. The folder must be OWNED (resolve_owned_project):
+/// renaming the parent of a manifest that shares it would rename the other
+/// projects with it.
+pub fn rename_project_files(recorded: &Path, new_name: &str) -> Result<PathBuf, String> {
+    let (root, manifest) = resolve_owned_project(recorded, "rename")?;
+    let parent = root
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| format!("{} has no parent folder to rename within", root.display()))?;
+    let new_root = parent.join(new_name);
+
+    // Read and edit the manifest in memory first: a malformed .arcproj is
+    // discovered while nothing has moved.
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("could not read {}: {e}", manifest.display()))?;
+    let edited = project::rename_in_manifest(&text, new_name)?;
+
+    // Same folder ignoring case = a case-only rename (or none): the
+    // collision check must not fire on the project's own folder.
+    let same_folder =
+        new_root.to_string_lossy().to_lowercase() == root.to_string_lossy().to_lowercase();
+    if !same_folder && new_root.exists() {
+        return Err(format!("{} already exists", new_root.display()));
+    }
+    let moving_folder = !same_folder || disk_name(&root).is_some_and(|n| n != new_name);
+
+    if moving_folder {
+        rename_case_safe(&root, &new_root).map_err(|e| {
+            format!(
+                "could not rename {} to {}: {e}. Is the project open in the editor?",
+                root.display(),
+                new_root.display()
+            )
+        })?;
+    }
+    let undo_folder = || {
+        if moving_folder {
+            let _ = rename_case_safe(&new_root, &root);
+        }
+    };
+
+    // The manifest, now inside the renamed folder.
+    let old_manifest = new_root.join(manifest.file_name().unwrap_or_default());
+    let new_manifest = new_root.join(format!("{new_name}.{}", project::MANIFEST_EXT));
+    let moving_manifest = old_manifest.as_os_str() != new_manifest.as_os_str();
+    if moving_manifest {
+        if let Err(e) = rename_case_safe(&old_manifest, &new_manifest) {
+            undo_folder();
+            return Err(format!("could not rename {}: {e}", old_manifest.display()));
+        }
+    }
+
+    // Atomic (temp + rename): a manifest truncated mid-write is a project
+    // the engine refuses to open.
+    if let Err(e) = store::write_bytes_atomic(&new_manifest, edited.as_bytes()) {
+        if moving_manifest {
+            let _ = rename_case_safe(&new_manifest, &old_manifest);
+        }
+        undo_folder();
+        return Err(format!("could not write {}: {e}", new_manifest.display()));
+    }
+    Ok(new_manifest)
 }
 
 // These touch the real filesystem (that is this module's whole job), so each
@@ -555,5 +695,116 @@ mod tests {
     fn project_dir_strips_only_a_manifest_leaf() {
         assert_eq!(project_dir(Path::new("C:/g/G.arcproj")), PathBuf::from("C:/g"));
         assert_eq!(project_dir(Path::new("C:/g")), PathBuf::from("C:/g"));
+    }
+
+    // ---- owned resolution (delete / rename / duplicate) -------------------
+
+    #[test]
+    fn owned_resolution_refuses_a_manifest_whose_folder_holds_other_projects() {
+        // THE CRITICAL BUG: a file-shaped path resolved to its PARENT, and
+        // Delete sent the whole parent -- every project in it -- to the bin.
+        let dir = scratch("owned-two");
+        let a = write_manifest(&dir, "A", 7);
+        let b = write_manifest(&dir, "B", 7);
+        for (m, verb) in [(&a, "delete"), (&b, "rename"), (&a, "duplicate")] {
+            let err = resolve_owned_project(m, verb).unwrap_err();
+            assert!(err.contains("holds other projects too"), "unexpected: {err}");
+            assert!(err.contains(&format!("will not {verb} the folder")), "unexpected: {err}");
+        }
+        // Lenient resolution (cover, launch) is unchanged for the same path.
+        assert_eq!(resolve_project(&a).unwrap().0, dir);
+    }
+
+    #[test]
+    fn owned_resolution_accepts_a_folder_whose_only_manifest_is_this_one() {
+        let dir = scratch("owned-one");
+        let m = write_manifest(&dir, "G", 7);
+        assert_eq!(resolve_owned_project(&m, "delete").unwrap(), (dir.clone(), m.clone()));
+        assert_eq!(resolve_owned_project(&dir, "delete").unwrap(), (dir.clone(), m.clone()));
+        // Case-insensitive about the file's own spelling.
+        let shouty = dir.join("g.ARCPROJ");
+        assert!(resolve_owned_project(&shouty, "delete").is_ok());
+    }
+
+    #[test]
+    fn duplicate_refuses_a_folder_shared_with_other_projects() {
+        let root = scratch("dup-shared");
+        let shared = mk(&root, "Games");
+        let a = write_manifest(&shared, "A", 7);
+        write_manifest(&shared, "B", 7);
+        assert!(duplicate_project_files(&a).unwrap_err().contains("holds other projects too"));
+        assert!(!root.join("A Copy").exists(), "nothing was copied");
+    }
+
+    // ---- rename_project_files ---------------------------------------------
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn rename_moves_the_folder_the_manifest_and_the_name_inside() {
+        let root = scratch("rename");
+        let g = mk(&root, "Old");
+        let m = write_manifest(&g, "Old", 7);
+        std::fs::create_dir_all(g.join("Content")).unwrap();
+
+        let new = rename_project_files(&m, "New").unwrap();
+        assert_eq!(new, root.join("New").join("New.arcproj"));
+        assert_eq!(names_in(&root), ["New"], "the old folder is gone");
+        assert!(root.join("New/Content").is_dir(), "content travels with the folder");
+        let text = std::fs::read_to_string(&new).unwrap();
+        assert_eq!(project::parse_manifest_guid(&text).as_deref(), Some(SRC_GUID), "only the name changes");
+        assert!(text.contains("\"New\""), "{text}");
+    }
+
+    #[test]
+    fn a_case_only_rename_renames_the_folder_too() {
+        // The old command compared normalised keys and skipped the folder
+        // rename, leaving "mygame/MyGame.arcproj" forever.
+        let root = scratch("rename-case");
+        let g = mk(&root, "mygame");
+        let m = write_manifest(&g, "mygame", 7);
+
+        let new = rename_project_files(&m, "MyGame").unwrap();
+        assert_eq!(names_in(&root), ["MyGame"], "the folder takes the new case on disk");
+        assert_eq!(names_in(&root.join("MyGame")), ["MyGame.arcproj"]);
+        assert!(std::fs::read_to_string(new).unwrap().contains("\"MyGame\""));
+    }
+
+    #[test]
+    fn rename_refuses_a_name_that_is_already_taken() {
+        let root = scratch("rename-collide");
+        let m = write_manifest(&mk(&root, "A"), "A", 7);
+        mk(&root, "B");
+        let err = rename_project_files(&m, "B").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(m.is_file(), "nothing moved");
+    }
+
+    #[test]
+    fn rename_refuses_a_folder_shared_with_other_projects() {
+        let root = scratch("rename-shared");
+        let shared = mk(&root, "Games");
+        let a = write_manifest(&shared, "A", 7);
+        write_manifest(&shared, "B", 7);
+        assert!(rename_project_files(&a, "Z").unwrap_err().contains("holds other projects too"));
+        assert_eq!(names_in(&root), ["Games"], "the shared folder is untouched");
+    }
+
+    #[test]
+    fn project_cover_skips_an_oversized_file_without_reading_it_whole() {
+        let dir = scratch("cover-big");
+        let m = write_manifest(&dir, "G", 7);
+        let mut big = TINY_PNG.to_vec();
+        big.resize(COVER_MAX_BYTES as usize + 1, 0);
+        std::fs::write(dir.join("G.png"), &big).unwrap();
+        assert_eq!(project_cover(&m), None, "over the cap: the monogram serves");
     }
 }

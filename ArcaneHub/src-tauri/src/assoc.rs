@@ -33,7 +33,18 @@ pub fn icon_value(exe: &Path) -> String {
 }
 
 /// Claim (or repair) the association for THIS exe. Silent on failure.
+///
+/// RELEASE BUILDS ONLY. A `tauri dev` (debug) build ran this too, at every
+/// start, and pointed .arcproj double-clicks at the debug exe under the
+/// cargo target dir -- an exe whose webview loads the dev server URL
+/// (devUrl), which is dead the moment `tauri dev` stops. So one dev session
+/// left every .arcproj in Explorer opening a blank, broken Hub until the
+/// installed Hub was started again to claim it back. The installed (release)
+/// Hub is the only exe that should own the association.
 pub fn claim_arcproj_association() {
+    if cfg!(debug_assertions) {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else { return };
     if write_keys(&exe).is_ok() {
         notify_shell();

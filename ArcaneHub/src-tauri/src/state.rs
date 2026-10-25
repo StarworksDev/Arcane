@@ -1,10 +1,24 @@
 // Hub state: the recent-projects list and the registered-engines list.
 //
-// Everything here is PURE and unit-tested. Loading/saving touches the
-// filesystem but falls back to Default on any error -- a hand-edited or
+// The list operations here are PURE and unit-tested. Loading and saving are
+// not: `load` stats every listed path (to stamp `missing`) and, through
+// store.rs, may QUARANTINE a corrupt file or refuse to overwrite one it could
+// not read -- falling back to defaults either way, because a hand-edited or
 // truncated state file must never brick the Hub.
+//
+// EVERY read-modify-write goes through `mutate`, which holds one process-wide
+// lock around load -> change -> save. Before it, writers on several threads
+// (the startup backfill, the shell-open thread, async Duplicate and Scan,
+// refresh_engines probing for seconds between its load and its save) each
+// loaded, changed and saved on their own, so the last save silently erased
+// whatever the others had written in between -- a star or a freshly listed
+// copy vanishing for no visible reason. Probes and disk work happen OUTSIDE
+// the lock; only the state edit is inside it.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::{paths, store};
 
@@ -133,7 +147,24 @@ pub struct HubState {
     /// `undefined` where it expects an array.
     #[serde(default)]
     pub warnings: Vec<String>,
+
+    /// Which load this snapshot came from: every `load` takes the next value
+    /// of a process-wide counter (starting at 1), so a snapshot read LATER
+    /// always carries a higher number. Snapshots reach the frontend by
+    /// several routes that can arrive out of order -- a command's reply, the
+    /// watcher's `state-changed`, the shell route's -- and the frontend
+    /// ignores any snapshot older than the last one it adopted, instead of
+    /// letting a slow reply roll the list back. Never persisted (save writes
+    /// the two lists individually); like `warnings` it must stay serialised.
+    #[serde(default)]
+    pub revision: u64,
 }
+
+/// The next snapshot revision. Starts at 1 so 0 can mean "never loaded".
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+/// The process-wide state lock `mutate` holds around load-modify-save.
+static STATE_LOCK: Mutex<()> = Mutex::new(());
 
 // Compare-only normalisation. Windows paths are case-insensitive and accept
 // either separator, so the SAME project reached two ways must collapse to one
@@ -166,6 +197,13 @@ pub fn project_dir_key(path: &str) -> String {
 /// is a hand-copied folder, and merging would let the copy impersonate the
 /// original -- the caller lists it as the new project it is. `missing` is
 /// disk truth stamped by `load` on every read, so this stays pure.
+///
+/// And no heal when `new_path` is ALREADY listed (add_scanned's own rule,
+/// now enforced here for every caller). A launch used to heal regardless:
+/// launching a listed clone or worktree that shares its guid with a missing
+/// sibling repointed the SIBLING's entry onto the listed path, and the
+/// collision absorb then dropped the launched project's own row -- its pin,
+/// arguments and star silently replaced by the missing sibling's.
 pub fn heal_by_guid(
     v: &mut Vec<RecentProject>,
     guid: &str,
@@ -173,6 +211,10 @@ pub fn heal_by_guid(
     new_name: &str,
     new_abi: u32,
 ) -> bool {
+    let new_key = project_dir_key(new_path);
+    if v.iter().any(|e| project_dir_key(&e.path) == new_key) {
+        return false;
+    }
     let Some(old_path) = v
         .iter()
         .find(|e| e.missing && e.guid.as_deref() == Some(guid))
@@ -214,8 +256,18 @@ pub fn add_scanned(v: &mut Vec<RecentProject>, found: Vec<RecentProject>) -> (u3
 
 // Insert-or-move-to-front. Re-opening a project must refresh it, not duplicate
 // it, so the list stays newest-first without growing.
+//
+// IDENTITY IS project_dir_key HERE AND IN EVERY EDIT BELOW (set_*, remove,
+// rename, relocate), not normalise_path. Recents holds folder-shaped legacy
+// rows beside manifest-shaped ones, and with the narrower key a legacy row
+// "D:/G/My" and a launch of "D:/G/My/My.arcproj" were two different
+// projects: the launch minted a second row and neither carried the other's
+// pin or star, while add_scanned and the running badges already treated
+// them as one. Consequence, deliberate: two manifests in ONE folder fold to
+// one row -- the engine refuses such a folder, the editor lock is per
+// folder, and the Hub's destructive commands refuse it (resolve.rs).
 pub fn touch_recent(v: &mut Vec<RecentProject>, mut entry: RecentProject) {
-    let key = normalise_path(&entry.path);
+    let key = project_dir_key(&entry.path);
 
     // Carry the per-project engine pin across the re-insert. open_project builds
     // a fresh entry from the launch and has no reason to know about the pin, so
@@ -224,7 +276,7 @@ pub fn touch_recent(v: &mut Vec<RecentProject>, mut entry: RecentProject) {
     // set_project_args, which edits the entry in place, so an empty string
     // arriving HERE always means "the caller had nothing to say", never
     // "the user emptied the field".
-    if let Some(prev) = v.iter().find(|e| normalise_path(&e.path) == key) {
+    if let Some(prev) = v.iter().find(|e| project_dir_key(&e.path) == key) {
         if entry.engine_id.is_none() {
             entry.engine_id.clone_from(&prev.engine_id);
         }
@@ -242,14 +294,14 @@ pub fn touch_recent(v: &mut Vec<RecentProject>, mut entry: RecentProject) {
         }
     }
 
-    v.retain(|e| normalise_path(&e.path) != key);
+    v.retain(|e| project_dir_key(&e.path) != key);
     v.insert(0, entry);
 }
 
 /// Save the extra launch arguments for one project. False if it is not listed.
 pub fn set_project_args(v: &mut [RecentProject], path: &str, args: &str) -> bool {
-    let key = normalise_path(path);
-    match v.iter_mut().find(|e| normalise_path(&e.path) == key) {
+    let key = project_dir_key(path);
+    match v.iter_mut().find(|e| project_dir_key(&e.path) == key) {
         Some(e) => {
             e.args = args.to_string();
             true
@@ -262,8 +314,8 @@ pub fn set_project_args(v: &mut [RecentProject], path: &str, args: &str) -> bool
 /// entry above the rest visually (the frontend partitions), it does not
 /// pretend the project was just opened. False if it is not listed.
 pub fn set_favorite(v: &mut [RecentProject], path: &str, favorite: bool) -> bool {
-    let key = normalise_path(path);
-    match v.iter_mut().find(|e| normalise_path(&e.path) == key) {
+    let key = project_dir_key(path);
+    match v.iter_mut().find(|e| project_dir_key(&e.path) == key) {
         Some(e) => {
             e.favorite = favorite;
             true
@@ -287,10 +339,10 @@ pub fn relocate_recent(
     new_abi: u32,
     new_guid: Option<String>,
 ) -> bool {
-    let old_key = normalise_path(old_path);
-    let new_key = normalise_path(new_path);
+    let old_key = project_dir_key(old_path);
+    let new_key = project_dir_key(new_path);
 
-    let Some(i) = v.iter().position(|e| normalise_path(&e.path) == old_key) else {
+    let Some(i) = v.iter().position(|e| project_dir_key(&e.path) == old_key) else {
         return false;
     };
     v[i].path = new_path.to_string();
@@ -306,7 +358,7 @@ pub fn relocate_recent(
     // Retain by index so the entry just edited survives its own key check.
     let mut n = 0;
     v.retain(|e| {
-        let keep = n == i || normalise_path(&e.path) != new_key;
+        let keep = n == i || project_dir_key(&e.path) != new_key;
         n += 1;
         keep
     });
@@ -321,10 +373,10 @@ pub fn relocate_recent(
 /// the list either. Any other entry that would now collide with the new path is
 /// dropped, so a rename can never mint a duplicate.
 pub fn rename_recent(v: &mut Vec<RecentProject>, old_path: &str, new_path: &str, new_name: &str) -> bool {
-    let old_key = normalise_path(old_path);
-    let new_key = normalise_path(new_path);
+    let old_key = project_dir_key(old_path);
+    let new_key = project_dir_key(new_path);
 
-    let Some(i) = v.iter().position(|e| normalise_path(&e.path) == old_key) else {
+    let Some(i) = v.iter().position(|e| project_dir_key(&e.path) == old_key) else {
         return false;
     };
     v[i].path = new_path.to_string();
@@ -333,7 +385,7 @@ pub fn rename_recent(v: &mut Vec<RecentProject>, old_path: &str, new_path: &str,
     // Retain by index so the entry just edited survives its own key check.
     let mut n = 0;
     v.retain(|e| {
-        let keep = n == i || normalise_path(&e.path) != new_key;
+        let keep = n == i || project_dir_key(&e.path) != new_key;
         n += 1;
         keep
     });
@@ -343,8 +395,8 @@ pub fn rename_recent(v: &mut Vec<RecentProject>, old_path: &str, new_path: &str,
 // Pin a project to a registered engine, or clear the pin with `None` to send it
 // back to following the Hub default. Returns false if the project is not listed.
 pub fn set_project_engine(v: &mut [RecentProject], path: &str, engine_id: Option<String>) -> bool {
-    let key = normalise_path(path);
-    match v.iter_mut().find(|e| normalise_path(&e.path) == key) {
+    let key = project_dir_key(path);
+    match v.iter_mut().find(|e| project_dir_key(&e.path) == key) {
         Some(e) => {
             e.engine_id = engine_id;
             true
@@ -365,9 +417,9 @@ pub fn unpin_engine(v: &mut [RecentProject], engine_id: &str) {
 }
 
 pub fn remove_recent(v: &mut Vec<RecentProject>, path: &str) -> bool {
-    let key = normalise_path(path);
+    let key = project_dir_key(path);
     let before = v.len();
-    v.retain(|e| normalise_path(&e.path) != key);
+    v.retain(|e| project_dir_key(&e.path) != key);
     v.len() != before
 }
 
@@ -409,22 +461,104 @@ pub fn backfill_guids(
     changed
 }
 
+/// Why relocating `old_path` onto `new_path` must be refused, or None.
+///
+/// Locate used to absorb whatever entry already sat at the new path -- fine
+/// for a MISSING duplicate (the user re-added it, then found the stale row),
+/// but a LIVE listed project there was silently merged away: its star, pin
+/// and arguments replaced by the located entry's. Pointing an entry at the
+/// same path it already holds is not a conflict.
+pub fn relocate_conflict(v: &[RecentProject], old_path: &str, new_path: &str) -> Option<String> {
+    let (old_key, new_key) = (project_dir_key(old_path), project_dir_key(new_path));
+    if old_key == new_key {
+        return None;
+    }
+    v.iter()
+        .find(|e| project_dir_key(&e.path) == new_key && !e.missing)
+        .map(|e| format!("{new_path} is already in the list as {}", e.name))
+}
+
+/// List an existing project WITHOUT launching it (the add_project command),
+/// returning the entry as stored. Already listed (by project_dir_key): the
+/// existing entry, unchanged and NOT reordered -- adding what is there is a
+/// no-op, not an interaction. Not listed but a MISSING entry carries its
+/// guid: that entry heals onto the path (a moved project re-added by hand
+/// keeps its star, pin and arguments). Otherwise a fresh row at the top,
+/// stamped "0" -- never opened, which is the truth.
+pub fn add_existing(v: &mut Vec<RecentProject>, entry: RecentProject) -> RecentProject {
+    let key = project_dir_key(&entry.path);
+    if let Some(e) = v.iter().find(|e| project_dir_key(&e.path) == key) {
+        return e.clone();
+    }
+    let healed = entry
+        .guid
+        .as_deref()
+        .is_some_and(|g| heal_by_guid(v, g, &entry.path, &entry.name, entry.engine_abi));
+    if !healed {
+        touch_recent(v, RecentProject { last_opened_utc: "0".to_string(), ..entry });
+    }
+    v.iter()
+        .find(|e| project_dir_key(&e.path) == key)
+        .cloned()
+        .expect("the entry was just listed")
+}
+
+/// A fresh snapshot of the Hub's state from the real per-user files.
 pub fn load() -> HubState {
+    load_at(&paths::recents_file(), &paths::engines_file())
+}
+
+/// `load` against explicit files -- the seam the tests use, so they never
+/// read or write the real %LOCALAPPDATA%\Arcane\hub.
+fn load_at(recents_file: &Path, engines_file: &Path) -> HubState {
     let mut warnings = Vec::new();
-    let mut recents: Vec<RecentProject> =
-        store::read_or_default(&paths::recents_file(), &mut warnings);
+    let mut recents: Vec<RecentProject> = store::read_or_default(recents_file, &mut warnings);
     // Stamped on every load, never trusted from the file: `missing` is a fact
     // about the disk right now, and a stale persisted value in either
     // direction would grey a healthy row or offer Launch on a gone one.
     for e in recents.iter_mut() {
-        e.missing = !std::path::Path::new(&e.path).exists();
+        e.missing = !Path::new(&e.path).exists();
     }
-    let mut engines: Vec<EngineEntry> =
-        store::read_or_default(&paths::engines_file(), &mut warnings);
+    let mut engines: Vec<EngineEntry> = store::read_or_default(engines_file, &mut warnings);
     for e in engines.iter_mut() {
-        e.missing = !std::path::Path::new(&e.path).exists();
+        e.missing = !Path::new(&e.path).exists();
     }
-    HubState { recents, engines, warnings }
+    HubState {
+        recents,
+        engines,
+        warnings,
+        revision: NEXT_REVISION.fetch_add(1, Ordering::SeqCst),
+    }
+}
+
+/// The ONE way to change persisted state: load, apply `f`, save -- all under
+/// the process-wide STATE_LOCK, so no other writer can load between this
+/// load and this save (see the module header for the lost updates that made
+/// this necessary). `f` returning Err saves nothing. A change that leaves
+/// both lists as loaded saves nothing either -- a no-op command must not
+/// rewrite the files.
+///
+/// Keep `f` SHORT: no probes, no disk walks, no copies. Read what you need
+/// first, then mutate. The lock recovers from poison (a panicking closure
+/// must not wedge every later command), which is safe because the state it
+/// guards lives on disk, not behind the lock.
+pub fn mutate<T>(f: impl FnOnce(&mut HubState) -> Result<T, String>) -> Result<T, String> {
+    mutate_at(&paths::recents_file(), &paths::engines_file(), f)
+}
+
+fn mutate_at<T>(
+    recents_file: &Path,
+    engines_file: &Path,
+    f: impl FnOnce(&mut HubState) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = load_at(recents_file, engines_file);
+    let (recents_before, engines_before) = (s.recents.clone(), s.engines.clone());
+    let out = f(&mut s)?;
+    if s.recents != recents_before || s.engines != engines_before {
+        save_at(recents_file, engines_file, &s)?;
+    }
+    Ok(out)
 }
 
 /// The disk-truth fingerprint the background watcher compares between polls:
@@ -441,13 +575,15 @@ pub fn disk_fingerprint(s: &HubState) -> Vec<(String, bool)> {
         .collect()
 }
 
-pub fn save(s: &HubState) -> Result<(), String> {
+/// Private on purpose: the only caller is `mutate_at`, so no command can
+/// save a snapshot it loaded outside the lock.
+fn save_at(recents_file: &Path, engines_file: &Path, s: &HubState) -> Result<(), String> {
     // Engines FIRST. The two files are written separately, so a failure between
     // them leaves a mismatch; ordering it this way means the surviving mismatch
     // is "an engine exists that nothing points at yet" rather than "a project
     // is pinned to an engine that was never recorded".
-    store::write_atomic(&paths::engines_file(), &s.engines)?;
-    store::write_atomic(&paths::recents_file(), &s.recents)
+    store::write_atomic(engines_file, &s.engines)?;
+    store::write_atomic(recents_file, &s.recents)
 }
 
 #[cfg(test)]
@@ -1049,6 +1185,9 @@ mod tests {
              key here is `undefined` in the UI, not an empty list: {text}"
         );
         assert_eq!(doc["warnings"][0], "something went wrong");
+        // The frontend drops snapshots older than the last one it adopted;
+        // without the key every snapshot reads as revision `undefined`.
+        assert!(doc.get("revision").is_some_and(|v| v.is_u64()), "{text}");
     }
 
     #[test]
@@ -1072,5 +1211,203 @@ mod tests {
         // Forward/backward compat: serde(default) on both lists.
         let back: HubState = serde_json::from_str(r#"{"recents":[]}"#).unwrap();
         assert!(back.engines.is_empty());
+    }
+
+    // ---- identity folding (project_dir_key) -------------------------------
+
+    #[test]
+    fn a_folder_shaped_row_and_a_manifest_launch_are_one_project() {
+        // A legacy row recorded the FOLDER; a launch records the MANIFEST.
+        // With the narrower key the launch minted a second row and dropped
+        // the pin and the star on the floor.
+        let mut v = vec![rp("D:/Games/My", "1")];
+        v[0].favorite = true;
+        v[0].engine_id = Some("eng-1".into());
+        touch_recent(&mut v, rp("D:\\Games\\My\\My.arcproj", "2"));
+        assert_eq!(v.len(), 1, "one project, one row");
+        assert_eq!(v[0].path, "D:\\Games\\My\\My.arcproj", "the launch's spelling wins");
+        assert!(v[0].favorite, "the star carries");
+        assert_eq!(v[0].engine_id.as_deref(), Some("eng-1"), "the pin carries");
+    }
+
+    #[test]
+    fn every_in_place_edit_finds_a_project_by_either_shape() {
+        let mut v = vec![rp("D:/Games/My/My.arcproj", "1")];
+        assert!(set_favorite(&mut v, "d:\\games\\my", true));
+        assert!(set_project_args(&mut v, "D:/Games/My", "--x"));
+        assert!(set_project_engine(&mut v, "D:/Games/My/", Some("e".into())));
+        assert!(rename_recent(&mut v, "D:/Games/My", "D:/Games/Ny/Ny.arcproj", "Ny"));
+        assert!(relocate_recent(&mut v, "d:/games/ny", "E:/Ny/Ny.arcproj", "Ny", 7, None));
+        assert!(remove_recent(&mut v, "E:/Ny"));
+        assert!(v.is_empty());
+    }
+
+    // ---- heal guard --------------------------------------------------------
+
+    #[test]
+    fn heal_by_guid_skips_a_path_that_is_already_listed() {
+        // A worktree/clone sharing its guid with a MISSING sibling, launched
+        // while it is itself listed: healing used to repoint the sibling onto
+        // it and the collision absorb dropped the launched project's own row,
+        // swapping in the sibling's pin, arguments and star.
+        let mut v = vec![
+            rp_guided("D:/Work/Tree/G.arcproj", "5", GUID, false),
+            rp_guided("D:/Gone/G/G.arcproj", "4", GUID, true),
+        ];
+        v[0].engine_id = Some("mine".into());
+        v[1].engine_id = Some("sibling".into());
+        v[1].favorite = true;
+
+        assert!(!heal_by_guid(&mut v, GUID, "D:/Work/Tree/G.arcproj", "G", 8));
+        assert_eq!(v.len(), 2, "nothing merged");
+        assert_eq!(v[0].engine_id.as_deref(), Some("mine"), "the launched row keeps its own pin");
+        assert!(!v[0].favorite, "and does not inherit the sibling's star");
+        assert!(v[1].missing, "the sibling stays as it was");
+        // Folder-shaped spelling of the same listed project: still listed.
+        assert!(!heal_by_guid(&mut v, GUID, "d:\\work\\tree", "G", 8));
+    }
+
+    // ---- relocate conflict -------------------------------------------------
+
+    #[test]
+    fn relocate_conflict_refuses_a_live_listed_target_only() {
+        let mut v = vec![rp("C:/gone/G.arcproj", "1"), rp("C:/found/G.arcproj", "2")];
+        v[0].missing = true;
+        v[1].name = "Found".into();
+        let why = relocate_conflict(&v, "C:/gone/G.arcproj", "c:\\found\\G.arcproj").unwrap();
+        assert!(why.contains("already in the list as Found"), "{why}");
+
+        // A MISSING entry at the target is the re-added-then-found case the
+        // absorb exists for; it is not a conflict.
+        v[1].missing = true;
+        assert_eq!(relocate_conflict(&v, "C:/gone/G.arcproj", "C:/found/G.arcproj"), None);
+        // Nor is pointing an entry at its own folder.
+        assert_eq!(relocate_conflict(&v, "C:/gone/G.arcproj", "C:/gone"), None);
+        // Nor an unlisted target.
+        assert_eq!(relocate_conflict(&v, "C:/gone/G.arcproj", "C:/new/G.arcproj"), None);
+    }
+
+    // ---- add_existing (the add_project command) ----------------------------
+
+    #[test]
+    fn add_existing_lists_a_new_project_as_never_opened() {
+        let mut v = vec![rp("C:/a/A.arcproj", "9")];
+        let got = add_existing(&mut v, rp("C:/b/B.arcproj", "123"));
+        assert_eq!(got.last_opened_utc, "0", "adding is not opening");
+        assert_eq!(v.len(), 2);
+        assert_eq!(got, v.iter().find(|e| e.path == "C:/b/B.arcproj").unwrap().clone());
+    }
+
+    #[test]
+    fn add_existing_returns_a_listed_project_unchanged_and_in_place() {
+        let mut v = vec![rp("C:/a/A.arcproj", "9"), rp("C:/b", "8")];
+        v[1].favorite = true;
+        let before = v.clone();
+        let got = add_existing(&mut v, rp("C:/b/B.arcproj", "123"));
+        assert_eq!(v, before, "no reorder, no restamp, no respelling");
+        assert_eq!(got, before[1]);
+    }
+
+    #[test]
+    fn add_existing_heals_a_moved_project_by_guid() {
+        let mut v = vec![rp_guided("C:/old/G/G.arcproj", "5", GUID, true)];
+        v[0].favorite = true;
+        let got = add_existing(&mut v, rp_guided("D:/new/G/G.arcproj", "0", GUID, false));
+        assert_eq!(v.len(), 1, "healed, not duplicated");
+        assert_eq!(got.path, "D:/new/G/G.arcproj");
+        assert!(got.favorite, "the star survives");
+        assert_eq!(got.last_opened_utc, "5", "the history survives");
+    }
+
+    // ---- load / mutate (temp-dir backed; NEVER the real hub dir) -----------
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("arcane-hub-state-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn files(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        (dir.join("recents.archub"), dir.join("engines.archub"))
+    }
+
+    #[test]
+    fn every_load_carries_a_higher_revision() {
+        let dir = scratch("revision");
+        let (r, e) = files(&dir);
+        let a = load_at(&r, &e).revision;
+        let b = load_at(&r, &e).revision;
+        assert!(a >= 1, "0 is reserved for never-loaded");
+        assert!(b > a, "a later snapshot must outrank an earlier one: {a} then {b}");
+    }
+
+    #[test]
+    fn mutate_serialises_concurrent_writers_without_losing_updates() {
+        // THE lost-update bug: two threads each load, bump, save -- and one
+        // bump vanishes. Under mutate every one of them must land.
+        let dir = scratch("mutate-concurrent");
+        let (r, e) = files(&dir);
+        mutate_at(&r, &e, |s| {
+            s.engines.push(EngineEntry::new("C:/eng/ArcaneEditor.exe", 0, "b".into()));
+            Ok(())
+        })
+        .unwrap();
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (r, e) = (r.clone(), e.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        mutate_at(&r, &e, |s| {
+                            s.engines[0].engine_abi += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(load_at(&r, &e).engines[0].engine_abi, 200, "every update landed");
+    }
+
+    #[test]
+    fn mutate_saves_nothing_on_error_or_on_a_no_op() {
+        let dir = scratch("mutate-noop");
+        let (r, e) = files(&dir);
+        let err = mutate_at(&r, &e, |s| -> Result<(), String> {
+            s.recents.push(rp("C:/x", "1"));
+            Err("refused".into())
+        });
+        assert_eq!(err, Err("refused".to_string()));
+        assert!(!r.exists() && !e.exists(), "an Err must not save");
+
+        let n = mutate_at(&r, &e, |s| Ok(s.recents.len())).unwrap();
+        assert_eq!(n, 0);
+        assert!(!r.exists() && !e.exists(), "a no-op must not write the files");
+
+        mutate_at(&r, &e, |s| {
+            s.recents.push(rp("C:/x", "1"));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(load_at(&r, &e).recents.len(), 1, "a real change saves");
+    }
+
+    #[test]
+    fn mutate_recovers_from_a_poisoned_lock() {
+        // A panicking closure poisons STATE_LOCK; every later command must
+        // still run instead of panicking on unwrap.
+        let dir = scratch("mutate-poison");
+        let (r, e) = files(&dir);
+        let (r2, e2) = (r.clone(), e.clone());
+        let _ = std::thread::spawn(move || {
+            let _ = mutate_at(&r2, &e2, |_| -> Result<(), String> { panic!("boom") });
+        })
+        .join();
+        assert!(mutate_at(&r, &e, |_| Ok(())).is_ok());
     }
 }

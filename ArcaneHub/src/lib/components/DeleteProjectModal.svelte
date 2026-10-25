@@ -42,7 +42,7 @@
   </p>
 
   {#if error}
-    <p class="banner" role="alert">{error}</p>
+    <p class="banner error" role="alert">{error}</p>
   {/if}
 
   {#snippet footer()}
@@ -52,7 +52,10 @@
 </Modal>
 
 <style>
-  .lead { font-size: 13px; color: var(--text); margin: 0; line-height: 1.55; }
+  /* overflow-wrap: the project name is user text with no guaranteed break
+     point, and one long unbroken name made the whole dialog scroll sideways. */
+  .lead { font-size: 13px; color: var(--text); margin: 0; line-height: 1.55;
+          overflow-wrap: anywhere; }
   strong { font-weight: 600; color: var(--text-bright); }
 
   .f { display: flex; flex-direction: column; gap: 5px; }
@@ -62,10 +65,4 @@
           overflow-wrap: anywhere; user-select: text; }
 
   .note { font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.55; }
-
-  /* Matches the main-area banner in +page.svelte -- same failure, same look. */
-  .banner { background: color-mix(in srgb, var(--fail-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--fail-accent) 40%, transparent);
-            border-radius: var(--r-btn); color: var(--text); font-size: 13px;
-            padding: 10px 13px; margin: 0; user-select: text; }
 </style>

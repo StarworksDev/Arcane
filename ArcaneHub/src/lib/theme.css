@@ -49,7 +49,13 @@
   --border-hover: #3d3d3d;
   /* Selected/active surface. The monochrome replacement for a gold tint. */
   --surface-sel: #2b2b2b;
-  --text: #f2f2f3; --text-muted: #a1a1a4; --text-dim: #7c7c81;
+  /* --text-dim carries small type (paths, meta, chips, hints), so it has to
+     clear WCAG AA's 4.5:1 for small text wherever it sits. The old #7c7c81
+     did not: 4.15 on --surface, 3.74 on a hovered card. #919196 measures
+     5.49 on --surface, 5.77 on --surface-2, 4.95 on a hovered card (#242424),
+     5.25 on a hovered list row (~#1f1f1f) and 4.51 on --surface-sel (the
+     selected engine row). It stays visibly a step under --text-muted. */
+  --text: #f2f2f3; --text-muted: #a1a1a4; --text-dim: #919196;
   /* Headings. Was the literal #f3f6fc repeated in three views. */
   --text-bright: #ffffff;
   /* Project cover art. Shared by the tile and the list row so a project looks
@@ -91,12 +97,36 @@
      Shared by the header strip in ProjectsView and by every ProjectRow --
      two components drawing one table, so the track list and the gap have to be
      one value each or the labels drift off the data the first time either
-     side changes. minmax(0, 1fr) on the name lets a long path shrink the
-     cell instead of widening the whole grid. */
-  --cols-project: 20px minmax(0, 1fr) 78px 170px 62px 26px;
+     side changes. The ENGINE column flexes between 96px and 230px (enough for
+     "Default: Arcane 0.1 (M5) [Release]"): it gives way first when the window
+     narrows, its full label in its title, while the name keeps at least
+     180px -- at the 800px minimum a fixed 170px engine column used to leave
+     the name about 128px (user report 2026-10-13). The name's 1fr still lets
+     a long path shrink the cell instead of widening the whole grid. */
+  --cols-project: 20px minmax(180px, 1fr) 78px minmax(96px, 230px) 62px 26px;
   --gap-project: 12px;
 
+  /* Hover washes, layered over whatever surface is underneath. Were literal
+     rgba(255,255,255,.04-.09) in a dozen rules, five different strengths for
+     one meaning. Two now: the plain wash for rows, items and nav pills, and a
+     stronger one for small icon buttons, where a faint wash on a 26px target
+     does not read as a hover at all. */
+  --hover-wash: rgba(255, 255, 255, .05);
+  --hover-wash-strong: rgba(255, 255, 255, .08);
+  /* A hovered card: the surface lightened by the same 4% everywhere, as a
+     solid colour because the card's background IS the surface. */
+  --surface-hover: color-mix(in srgb, #ffffff 4%, var(--surface));
+  --surface-2-hover: color-mix(in srgb, #ffffff 4%, var(--surface-2));
+  /* Popover menus, and the larger lift of a dialog. One value each instead of
+     the copies every menu and the modal carried. */
+  --shadow-pop: 0 16px 40px rgba(0, 0, 0, .55);
+  --shadow-dialog: 0 24px 60px rgba(0, 0, 0, .55);
+
   --dur: 200ms; --ease: cubic-bezier(.22, .61, .36, 1);
+
+  /* The scrollbar's thickness, named because ProjectsView reserves exactly
+     this gutter so its rows line up with the header above them. */
+  --scrollbar: 9px;
 }
 
 * { box-sizing: border-box; }
@@ -118,13 +148,42 @@ body {
    copied verbatim into all three views; with the sizes changing they are now
    defined once. Used as `<h2 class="display view-title">` plus `<p class="view-sub">`.
    Settings is not among them: it is a sheet, and its title is the modal's. */
-.view-title { font-size: 26px; margin: 0; color: var(--text-bright); }
+/* The page title scales with the window between two bounds (22px at the
+   800px minimum, 26px at the 1024px default, 30px from about 1250px up):
+   the one type that is large enough to look small on a maximised window.
+   Body type stays fixed -- names that change size with the window read as
+   unstable, and wrapping or a column giving way handles the narrow end. */
+.view-title { font-size: clamp(22px, calc(1.8vw + 7.6px), 30px); margin: 0; color: var(--text-bright); }
 .view-sub { font-size: 12.5px; color: var(--text-muted); margin: 3px 0 0; }
 
 :focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; border-radius: 4px; }
 
+/* ONE text field. Five components each carried a copy, and they had drifted
+   to 7px vs 9px padding. 7px everywhere: it is the header's control height,
+   and every dialog field sits beside (or above) a 7px Button -- "Browse..."
+   on the same row -- so a 9px field next to it was visibly taller for no
+   reason. `.field.mono` is for values that are code (launch arguments). */
+.field { width: 100%; min-width: 0; background: var(--well); border: 1px solid var(--border);
+         border-radius: var(--r-btn); color: var(--text); font: inherit; font-size: 13px;
+         padding: 7px 12px; user-select: text; cursor: text; }
+.field.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.field::placeholder { color: var(--text-dim); }
+.field:focus { border-color: var(--accent-ring); outline: none; }
+
+/* ONE banner. `error` is a failed action (coral); `warn` is a fact the Hub
+   wants seen -- recovery on load, a scan report, a launch that died -- and is
+   neutral on purpose: the accent means "act" and coral means "won't open",
+   and a notice is neither. Margins belong to wherever a banner is placed. */
+.banner { border-radius: var(--r-btn); font-size: 13px; padding: 10px 13px; margin: 0;
+          user-select: text; overflow-wrap: anywhere; }
+.banner.error { background: color-mix(in srgb, var(--fail-accent) 12%, transparent);
+                border: 1px solid color-mix(in srgb, var(--fail-accent) 40%, transparent);
+                color: var(--text); }
+.banner.warn { background: var(--surface-2); border: 1px solid var(--border);
+               color: var(--text-muted); }
+
 /* WebView2 is Chromium, so this applies. */
-::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar { width: var(--scrollbar); height: var(--scrollbar); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #333333; border-radius: 5px;
                             border: 2px solid transparent; background-clip: padding-box; }
