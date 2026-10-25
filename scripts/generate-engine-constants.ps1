@@ -67,7 +67,7 @@ if ($Check) {
             [System.IO.File]::WriteAllText($fresh, $o.Text, $utf8)
             $a = Read-Normalized $fresh
             $b = Read-Normalized (Join-Path $root $o.Rel)
-            if ($a -ne $b) {
+            if ($a -cne $b) {
                 [Console]::Error.WriteLine("generate-engine-constants: DRIFT in $($o.Rel) -- run scripts\generate-engine-constants.ps1 and commit")
                 $drift = $true
             }
@@ -81,7 +81,7 @@ if ($Check) {
 
 foreach ($o in $outputs) {
     $path = Join-Path $root $o.Rel
-    if ((Read-Normalized $path) -eq $o.Text) { continue }
+    if ((Read-Normalized $path) -ceq $o.Text) { continue }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
     [System.IO.File]::WriteAllText($path, $o.Text, $utf8)
     Write-Host "generate-engine-constants: wrote $($o.Rel)"

@@ -205,7 +205,7 @@ namespace Arcane
         // worse than refusing to build the node at all, so this returns
         // false -- Create() turns that into a logged, latched null -- rather
         // than limping on with an unbuilt or half-built table.
-        if (!m_device->Caps().SupportsBindlessTextures(kBindlessCapacity))
+        if (!m_device->Caps().SupportsBindlessTextures(Arcane::kBindlessCapacity))
         {
             ARC_ERROR("[nri-graph] MeshNode: refused -- this device cannot provide the "
                       "required {} bindless sampled-image descriptors "
@@ -214,7 +214,7 @@ namespace Arcane
                       "material table is a descriptor-indexed bindless array; there is no "
                       "correct way to build it on hardware that cannot dynamically index a "
                       "descriptor array, so the node is refused here rather than rendering "
-                      "wrong pixels or silently degrading.", kBindlessCapacity,
+                      "wrong pixels or silently degrading.", Arcane::kBindlessCapacity,
                       static_cast<unsigned>(m_device->Caps().bindlessTier),
                       m_device->Caps().maxDescriptorSetTextures,
                       m_device->Caps().maxPerStageTextures);
@@ -222,12 +222,12 @@ namespace Arcane
         }
 
         m_bindlessUpdateAfterSet =
-            m_device->Caps().SupportsTextureUpdateAfterSet(kBindlessCapacity);
+            m_device->Caps().SupportsTextureUpdateAfterSet(Arcane::kBindlessCapacity);
         if (!m_bindlessUpdateAfterSet)
         {
             ARC_WARN("[nri-graph] MeshNode: sampled-image update-after-set is unavailable "
                      "for the {}-descriptor material table; new material residency will "
-                     "wait for device idle (setLimit={}, stageLimit={})", kBindlessCapacity,
+                     "wait for device idle (setLimit={}, stageLimit={})", Arcane::kBindlessCapacity,
                      m_device->Caps().maxDescriptorSetUpdateAfterSetTextures,
                      m_device->Caps().maxPerStageUpdateAfterSetTextures);
         }
@@ -285,11 +285,11 @@ namespace Arcane
     {
         // Gated already, in Init(), before this ever runs -- a device that
         // reached here has bindless tier > 0.
-        m_bindless = BindlessTable::Create(*m_device, kBindlessCapacity);
+        m_bindless = BindlessTable::Create(*m_device, Arcane::kBindlessCapacity);
         if (!m_bindless)
         {
             ARC_ERROR("[nri-graph] MeshNode: BindlessTable::Create failed -- the material table "
-                      "could not be built (already logged: capacity {})", kBindlessCapacity);
+                      "could not be built (already logged: capacity {})", Arcane::kBindlessCapacity);
             return false;
         }
         return true;
@@ -309,7 +309,7 @@ namespace Arcane
         poolDesc.descriptorSetMaxNum      = frameSets + 1;       // +1: the one bindless set
         poolDesc.constantBufferMaxNum     = frameSets;           // b1, one per frame slot
         poolDesc.structuredBufferMaxNum   = 2 * frameSets;       // t0 instances + t1 visible indices, per frame slot (F3 plan 1 T7)
-        poolDesc.textureMaxNum            = kBindlessCapacity;   // the bindless array's own budget
+        poolDesc.textureMaxNum            = Arcane::kBindlessCapacity;   // the bindless array's own budget
         // The pool-level update-after-set permission is conditional. Only the
         // bindless texture set needs it, and Vulkan may expose descriptor
         // indexing without the granular sampled-image update-after-bind bit.
@@ -424,8 +424,10 @@ namespace Arcane
         frameSetDesc.rangeNum      = 3;
 
         // set (array index 1, space2): the bindless material array at t0 --
-        // a FIXED size (kBindlessCapacity, matched by mesh.hlsl's own
-        // literal), not VARIABLE_SIZED_ARRAY: BindlessTable's capacity is
+        // a FIXED size (Arcane::kBindlessCapacity, whose value comes from
+        // build/engine-constants.lua; the generated header and mesh.hlsl's
+        // hlsli are checked in, and a drift test fails if a rerun would
+        // change them), not VARIABLE_SIZED_ARRAY: BindlessTable's capacity is
         // decided once at MeshNode creation and never resized
         // (BindlessTable.hpp's SLOT POLICY), so there is nothing for
         // AllocateDescriptorSets' variableDescriptorNum argument to do
@@ -439,7 +441,7 @@ namespace Arcane
         // device idle before appending a descriptor.
         nri::DescriptorRangeDesc bindlessRange = {};
         bindlessRange.baseRegisterIndex = 0;                  // t0
-        bindlessRange.descriptorNum     = kBindlessCapacity;
+        bindlessRange.descriptorNum     = Arcane::kBindlessCapacity;
         bindlessRange.descriptorType    = nri::DescriptorType::TEXTURE;
         bindlessRange.shaderStages      = nri::StageBits::FRAGMENT_SHADER;
         bindlessRange.flags             = nri::DescriptorRangeBits::ARRAY
