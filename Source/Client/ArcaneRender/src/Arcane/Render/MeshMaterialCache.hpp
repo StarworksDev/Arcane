@@ -89,6 +89,13 @@ namespace Arcane
         // `resolveMeshAlbedoSlot` field, Host/SceneRenderResolver.hpp).
         using ResolveAlbedoSlotFn = std::function<std::uint32_t(const Guid&)>;
 
+        // The matching release: a resolved material that held a slot for `albedo`
+        // is going away (Invalidate / Clear), so the device drops one material
+        // reference on the (albedo, Srgb) key. The slot itself is released when
+        // the last reference goes (BindlessTable). Called only for a material whose
+        // slot is valid; null in every CPU test.
+        using ReleaseAlbedoSlotFn = std::function<void(const Guid&)>;
+
         struct Services
         {
             ResolveAssetFn resolveAsset;   // Guid -> path (project registry)
@@ -99,6 +106,7 @@ namespace Arcane
             // baseColor path, exactly the same degrade a null `resolveAsset`
             // already gets. See ResolveAlbedoSlotFn's own comment above.
             ResolveAlbedoSlotFn resolveAlbedoSlot;
+            ReleaseAlbedoSlotFn releaseAlbedoSlot;
         };
 
         explicit MeshMaterialCache(Services services);
@@ -118,6 +126,13 @@ namespace Arcane
 
         // Forget everything (project switch).
         void Clear();
+
+        // The device released bindless slot `slot` (a texture was replaced or
+        // evicted, a project switch): every resolved material holding it falls
+        // back to the invalid slot (the flat baseColor path; GpuSceneSync
+        // re-stages the rows), and is re-resolved on a later Request. The device
+        // already dropped the references, so none are released here.
+        void ResetAlbedoSlot(std::uint32_t slot);
 
         // Guid -> resolved record (the MeshMaterialTable payload). Stable
         // storage between mutating calls.

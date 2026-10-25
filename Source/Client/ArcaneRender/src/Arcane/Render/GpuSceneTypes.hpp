@@ -154,6 +154,25 @@ namespace Arcane
         std::uint64_t                                                    syncCounter  = 0;
 
         GpuSceneMirror() : generation(NextGeneration()) {}
+
+        // A bindless slot was released (BindlessTable): every live row that was last
+        // staged with `slot` falls back to the invalid slot and is re-dirtied, so the
+        // next GpuSceneSync rewrites it before the index can mean another descriptor.
+        // Returns how many rows it touched.
+        std::uint32_t ReleaseMaterialSlot(std::uint32_t slot)
+        {
+            std::uint32_t touched = 0;
+            for (std::uint32_t row = 0; row < rows.size(); ++row)
+            {
+                GpuSceneRow& r = rows[row];
+                if (!r.live || r.lastSlot != slot)
+                    continue;
+                r.lastSlot = kGpuInvalidMaterialSlot;
+                dirtyLastFrame.push_back(row);
+                ++touched;
+            }
+            return touched;
+        }
         // Out of line (Nri/GpuScene.cpp) and exported: ONE counter per process.
         // Mirrors are minted in several images (the hosts' GpuSceneHost.hpp,
         // ArcaneClient, tests); per-image counters could hand two mirrors the

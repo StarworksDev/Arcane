@@ -768,6 +768,13 @@ namespace Arcane
         // keyed to.
         [[nodiscard]] std::uint64_t DebugSubmitCount() const noexcept { return m_submitValue; }
 
+        // The highest value this graph's own submission fence has COMPLETED
+        // (0 before the first Execute, and always 0 on the NONE backend). The
+        // device-wide bindless last-use record asks this, per context, whether the
+        // submit that sampled a slot has retired: a value on one graph's timeline
+        // means nothing on another's.
+        [[nodiscard]] std::uint64_t CompletedFence() const noexcept;
+
         // THIS GRAPH'S GRAVEYARD LANE -- RgExecuteDesc::graves, latched at the
         // first Execute(). Null before it, which is exactly the state in which
         // the graph owns nothing to bury.

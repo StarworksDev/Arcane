@@ -71,6 +71,7 @@
 #include <Arcane/Render/RenderErrorLatch.hpp>  // RenderErrorCount (the graph latch fold)
 #include <Arcane/Render/GpuInstrumentation.hpp>   // Arcane::GpuDeviceLostObserved (Run()'s exit-code tail)
 #include <Arcane/Render/Nri/NriCommon.hpp>   // ARC_NRI_CHECK (TeardownGraphForSwitch's idle)
+#include <Arcane/Render/Nri/BindlessTable.hpp>   // the device table the resolver's slot observer registers on
 #include <Arcane/Sprite/SpriteAsset.hpp>  // Save/LoadSpriteAsset (SpriteDocument factory + peek)
 #include <Arcane/Scene/Components.hpp>    // Identity (--select-name boot seed)
 
@@ -1014,7 +1015,22 @@ namespace Arcane::Editor
             rs.resolveMeshAlbedoSlot = [this](const Arcane::Guid& g) -> std::uint32_t
             {
                 Arcane::NriGraphContext* graph = m_viewportTargets.graph.get();
-                return graph ? graph->ResolveMeshAlbedoSlot(g) : 0xFFFFFFFFu;
+                // Acquire: a resolved MATERIAL holds one reference on the device slot
+                // (MeshMaterialCache gives it back through releaseMeshAlbedoRef).
+                return graph ? graph->AcquireMeshAlbedoSlot(g) : 0xFFFFFFFFu;
+            };
+            rs.releaseMeshAlbedoRef = [this](const Arcane::Guid& g)
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->ReleaseMeshAlbedoRef(g);
+            };
+            // The device's bindless table tells the resolver when a slot goes, so
+            // resolved materials and GPU rows holding it fall back and re-stage.
+            rs.ensureAlbedoSlotObserver = [this](const void* key, const std::function<void(std::uint32_t)>& fn)
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    if (Arcane::BindlessTable* table = graph->Device().Bindless())
+                        table->SetObserver(key, fn);
             };
             rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
             {

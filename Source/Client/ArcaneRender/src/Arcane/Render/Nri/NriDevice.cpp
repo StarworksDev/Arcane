@@ -17,6 +17,8 @@
 #include "NriDevice.hpp"
 
 #include "NriCommon.hpp"
+#include "BindlessTable.hpp"
+#include <Arcane/Render/Generated/BindlessCapacity.gen.hpp>
 
 #include <Arcane/Base/ForeignModules.hpp>   // ForeignModules::Report -- the injected-overlay scan, once, after the native device exists
 #include <Arcane/Base/Log.hpp>
@@ -480,6 +482,15 @@ namespace Arcane
         return wrapped;
     }
 
+    NriDevice::NriDevice() = default;
+
+    BindlessTable* NriDevice::Bindless()
+    {
+        if (!m_bindless)
+            m_bindless = BindlessTable::Create(*this, Arcane::kBindlessCapacity, m_life);
+        return m_bindless.get();
+    }
+
     NriDevice::~NriDevice()
     {
         if (!m_device)
@@ -521,6 +532,18 @@ namespace Arcane
         // still do is burn wall-clock inside a crash teardown and feed the
         // error latch, neither of which is worth anything here.
         const bool deviceLost = GpuDeviceLostObserved();
+
+        // The bindless table's descriptors go before the graveyard and before the
+        // device: the contexts are gone, so nothing samples them, and the idle
+        // below (shared with the graveyard drain) is what makes that true.
+        if (m_bindless)
+        {
+            if (m_core.DeviceWaitIdle && !deviceLost)
+                (void)ARC_NRI_CHECK(m_core.DeviceWaitIdle(m_device));
+            m_bindless->DestroyAllNow(!lostD3D12);
+            m_bindless.reset();
+        }
+
         if (m_graveyard.Pending() != 0)
         {
             if (m_core.DeviceWaitIdle && !deviceLost)

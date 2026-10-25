@@ -24,6 +24,7 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Render/RenderDeviceDesc.hpp>
+#include <Arcane/Render/Nri/DeviceResourceLifetime.hpp>
 #include <Arcane/Render/Nri/Graveyard.hpp>
 #include <Arcane/Render/Nri/NriDeviceCaps.hpp>
 
@@ -38,6 +39,7 @@ namespace Arcane
     // headers and no Vulkan-Hpp dispatcher storage of its own).
     struct VulkanDeviceCreation;
     struct D3D12DeviceCreation;
+    class BindlessTable;
 
     // -------------------------------------------------------------------
     // NativeDeviceOwner -- the caller-owns half of the ownership contract.
@@ -185,8 +187,20 @@ namespace Arcane
         // is all it is.
         [[nodiscard]] Graveyard& Graves() { return m_graveyard; }
 
+        // THE DEVICE-WIDE LAST-USE RECORD (3D-readiness arc spec 3.5): which
+        // contexts sampled which bindless slot, and the fence of that context's
+        // own submit. One per device, because the bindless index space is one
+        // per device.
+        [[nodiscard]] DeviceResourceLifetime& ResourceLifetime() noexcept { return m_life; }
+
+        // THE DEVICE'S BINDLESS TABLE: one per NriDevice, created on first use at
+        // Arcane::kBindlessCapacity over ResourceLifetime(). Every
+        // NriGraphContext on this device shares it; null only if creation was
+        // refused (already logged).
+        [[nodiscard]] BindlessTable* Bindless();
+
     private:
-        NriDevice() = default;
+        NriDevice();
 
         // Shared tail of both Wrap* entry points: CoreInterface, the queue
         // assert, and the identity log (contract item 14).
@@ -194,6 +208,8 @@ namespace Arcane
                                                      GraphicsBackend backend);
 
         Graveyard          m_graveyard;
+        DeviceResourceLifetime m_life;
+        std::unique_ptr<BindlessTable> m_bindless;
         nri::CoreInterface m_core{};
         nri::Device*       m_device        = nullptr;
         nri::Queue*        m_graphicsQueue = nullptr;

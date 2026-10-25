@@ -208,7 +208,9 @@ namespace Arcane::Editor
         {
             m_runtime->AssetsFacade().InvalidateArtifact(g);
             m_runtime->AssetsFacade().InvalidateMeshArtifact(g);
-            if (m_viewportTargets.graph) { m_viewportTargets.graph->InvalidateContentTexture(g); m_viewportTargets.graph->InvalidateMeshAlbedoSlot(g); }
+            // Bindless slot FIRST (both colour spaces, device-wide): it is released
+            // before the texture object the cache is about to drop.
+            if (m_viewportTargets.graph) { m_viewportTargets.graph->InvalidateMeshAlbedoSlot(g); m_viewportTargets.graph->InvalidateContentTexture(g); }
             if (Arcane::NriGraphContext* chrome = ChromeGraph()) chrome->InvalidateContentTexture(g);
         }
         // s7.12 "sprites deriving from a removed texture": the replayed steps carry no

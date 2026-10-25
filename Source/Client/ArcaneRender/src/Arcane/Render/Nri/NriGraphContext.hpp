@@ -1498,7 +1498,7 @@ namespace Arcane
         // every other consumer (a sprite, a declared material param) -- one
         // shared view with two destroyers is a double-destroy, not a
         // sharing optimization. Memoized by TEXTURE Guid (not material
-        // Guid) in m_meshAlbedoSlots so N mesh materials sharing one albedo
+        // Guid) in the device table so N mesh materials sharing one albedo
         // still cost one Add, one slot and one extra view -- "the resolver
         // owns the texture->slot map" the plan calls for.
         //
@@ -1514,18 +1514,18 @@ namespace Arcane
         // comments for why each degrades silently (one warn, memoized) rather
         // than asserting.
         //
-        // SLOT LIFETIME: a memoized slot is NEVER released individually --
-        // BindlessTable is Add-only (BindlessTable.hpp's SLOT POLICY: no
-        // per-slot free) and NriTextureCache itself never evicts a single
-        // texture either (only a whole-cache Release()), so "released when
-        // the texture leaves residency" reduces, on THIS shape, to "released
-        // when this whole context is": m_meshAlbedoSlots is a plain member
-        // with no burial of its own, and it goes stale exactly when
-        // m_textures/m_mesh do, at Release()/teardown. A run that streams
-        // through many more than kBindlessCapacity distinct albedos over its
-        // lifetime exhausts the table -- AddMaterial's own one-shot WARN says
-        // so, and the rest simply draw the flat baseColor path (kInvalidSlot)
-        // from then on, never a crash.
+        // SLOT LIFETIME (3D-readiness arc spec 3.5): the memo and the slot index
+        // are the DEVICE's, shared by every context on it (the editor's
+        // viewport, shader preview and thumbnail harvester resolve ONE slot per
+        // (Guid, ColorSpace)). A slot is released through the table's mapping
+        // level -- ReleaseMeshAlbedoRef when the last material holding it goes,
+        // InvalidateMeshAlbedoSlot when the texture itself is replaced or
+        // evicted, ReleaseAllMeshAlbedoSlots on a project switch, and at this
+        // context's teardown for the slots whose view names ITS texture. A
+        // released index is recycled only after every context that sampled it
+        // has completed that submit on its own timeline (DeviceResourceLifetime).
+        // A table with nothing recyclable and no room still degrades to the flat
+        // baseColor path (kInvalidSlot), never a crash.
         //
         // CLOSED by Task 12 (was: "KNOWN GAP, left for Task 12"): a Guid
         // resolved while its artifact was still PendingCook (NriTextureCache's
@@ -1549,33 +1549,29 @@ namespace Arcane
         // any RenderFrame) owes itself the same rule.
         [[nodiscard]] std::uint32_t ResolveMeshAlbedoSlot(const Guid& id);
 
-        // F2b Task 12: closes the "KNOWN GAP, left for Task 12" paragraph
-        // above. Drops the memoized slot for `id` (a plain map erase -- the
-        // slot itself is never freed in BindlessTable, per the SLOT LIFETIME
-        // paragraph above; this just forgets that THIS guid already has
-        // one), so the NEXT ResolveMeshAlbedoSlot(id) re-resolves from
-        // scratch: if the texture is Resident by then (this method is meant
-        // to be called from the SAME cook-completion callback that already
-        // called InvalidateContentTexture(id) for the render cache), that
-        // re-resolve mints a fresh view over the REAL artifact and Adds a
-        // NEW slot -- the old slot, taken while the texture was still
-        // PendingCook and bound to the checkerboard's descriptor, is simply
-        // abandoned (an accepted, documented cost: one extra bindless slot
-        // per guid that was ever resolved before its first successful
-        // cook, bounded by kBindlessCapacity same as every other slot use).
-        // A no-op for a guid that was never memoized here.
-        // FINAL-REVIEW NOTE (2026-09-04): the abandoned slot's descriptor is the
-        // SHARED checkerboard placeholder's own view, which NriTextureCache::Invalidate
-        // deliberately never touches, so the slot stays a valid view over a live texture
-        // for as long as this context does; if this whole context later tears down
-        // (Release()), the placeholder itself gets buried and the abandoned slot ends up
-        // pointing at a descriptor scheduled for destruction while BindlessTable was
-        // never told to release that specific slot -- a real gap against the reap
-        // ordering this class otherwise holds to (every live slot released before its
-        // descriptor dies), but only FORMALLY: the table and every MeshInstance that
-        // could ever reference that slot index die in the SAME teardown, so nothing ever
-        // samples it between the two events.
-        void InvalidateMeshAlbedoSlot(const Guid& id) { m_meshAlbedoSlots.erase(id); }
+        // A MATERIAL's hold on the slot: Acquire resolves like
+        // ResolveMeshAlbedoSlot and counts one live material against the
+        // (id, Srgb) key; ReleaseMeshAlbedoRef drops one, and the slot is
+        // released when the count reaches zero. A material that never resolved
+        // a texture (kInvalidSlot) holds nothing and releases nothing. The
+        // preview graph and the harvester use the plain Resolve (no count).
+        [[nodiscard]] std::uint32_t AcquireMeshAlbedoSlot(const Guid& id);
+        void ReleaseMeshAlbedoRef(const Guid& id);
+
+        // F2b Task 12 / 3D-readiness arc: the texture behind `id` is being
+        // replaced (cook completion, asset delete/restore) or evicted. Releases
+        // the device mapping for BOTH colour spaces (NriTextureCache::Invalidate
+        // sweeps both), regardless of material references: the memo is erased,
+        // every resolved material and GPU row holding the index falls back to
+        // kInvalidSlot and is re-staged, and the index returns to the free list
+        // only after every sampling context's last submit has retired. A no-op
+        // for a guid that was never mapped. Call it BEFORE the texture object is
+        // destroyed.
+        void InvalidateMeshAlbedoSlot(const Guid& id);
+
+        // Project switch: releases every mapping on the device table (same
+        // semantics as InvalidateMeshAlbedoSlot, for all of them).
+        void ReleaseAllMeshAlbedoSlots();
 
     private:
         NriGraphContext();   // latches FramesInFlight() and the upload ring's size before any per-frame resource exists
@@ -1716,13 +1712,9 @@ namespace Arcane
         std::filesystem::path m_shaderDir;
         std::unordered_map<std::string, std::vector<std::uint8_t>> m_shaderBins;
 
-        // F2b Task 11's texture->slot memo -- see ResolveMeshAlbedoSlot's own
-        // doc comment for the full contract (what populates it, and why
-        // there is no per-entry release). Keyed by the ALBEDO TEXTURE Guid,
-        // never by a .arcmat Guid -- deliberately a DIFFERENT key space than
-        // MeshMaterialCache's own table (Render/MeshMaterialCache.hpp), which
-        // is keyed by material Guid and lives one layer up, device-free.
-        std::unordered_map<Guid, std::uint32_t> m_meshAlbedoSlots;
+        // The texture->slot memo is NOT here any more: it is the DEVICE's
+        // (NriDevice::Bindless(), keyed by (Guid, ColorSpace)) -- see
+        // ResolveMeshAlbedoSlot's doc comment.
 
         // The capture staging buffer, owned here (the graph only IMPORTS it --
         // a transient graph buffer is DEVICE-local and could never be mapped).

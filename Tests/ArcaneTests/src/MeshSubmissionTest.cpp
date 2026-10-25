@@ -682,3 +682,55 @@ TEST_CASE("MeshMaterialCache resolves albedo into a bindless slot through the in
 
     std::error_code ec; fs::remove_all(dir, ec);
 }
+
+TEST_CASE("MeshMaterialCache gives its slot reference back and re-resolves a slot the device released",
+          "[mesh][material]")
+{
+    const fs::path dir  = MakeTempDir("matl_albedo_release");
+    const fs::path file = dir / "probe.arcmat";
+    const Arcane::Guid albedoGuid = Arcane::Guid::Generate();
+    const Arcane::Guid id = WriteMeshMaterialWithAlbedo(file, glm::vec4(1.0f), albedoGuid);
+
+    int acquired = 0;
+    int released = 0;
+    Arcane::Guid lastReleased{};
+    std::uint32_t nextSlot = 3u;
+    Arcane::MeshMaterialCache::Services s;
+    s.resolveAsset = [&](const Arcane::Guid&) -> std::optional<fs::path> { return file; };
+    s.resolveAlbedoSlot = [&](const Arcane::Guid&) -> std::uint32_t { ++acquired; return nextSlot; };
+    s.releaseAlbedoSlot = [&](const Arcane::Guid& g) { ++released; lastReleased = g; };
+    Arcane::MeshMaterialCache cache(std::move(s));
+
+    cache.Request(id);
+    REQUIRE(cache.Table().at(id).materialSlot == 3u);
+    CHECK(acquired == 1);
+
+    // The device released slot 3 (a texture was replaced): the material falls back to the
+    // flat path at once, and the next Request re-resolves ONLY its albedo.
+    cache.ResetAlbedoSlot(3u);
+    CHECK(cache.Table().at(id).materialSlot == 0xFFFFFFFFu);
+    nextSlot = 8u;
+    cache.Request(id);
+    CHECK(cache.Table().at(id).materialSlot == 8u);
+    CHECK(acquired == 2);
+    cache.Request(id);   // landed: no further consultation
+    CHECK(acquired == 2);
+
+    // Invalidate drops the material's reference on the slot it holds.
+    cache.Invalidate(id);
+    CHECK(released == 1);
+    CHECK(lastReleased == albedoGuid);
+
+    cache.Request(id);
+    REQUIRE(cache.Table().at(id).materialSlot == 8u);
+    cache.Clear();
+    CHECK(released == 2);
+
+    // A material whose slot the device already released holds no reference to return.
+    cache.Request(id);
+    cache.ResetAlbedoSlot(8u);
+    cache.Clear();
+    CHECK(released == 2);
+
+    std::error_code ec; fs::remove_all(dir, ec);
+}

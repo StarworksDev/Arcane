@@ -1088,6 +1088,13 @@ namespace Arcane
     // Execute
     // ==================================================================
 
+    std::uint64_t RenderGraph::CompletedFence() const noexcept
+    {
+        if (!m_device || !m_fence)
+            return 0;
+        return m_device->Core().GetFenceValue(*m_fence);
+    }
+
     bool RenderGraph::Execute(const RgExecuteDesc& desc, const RgCompiled& compiled)
     {
         if (m_device == nullptr)

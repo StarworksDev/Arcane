@@ -447,16 +447,15 @@ namespace Arcane
 
         // Buries every NRI object this node owns at `fence` and empties it.
         // Idempotent. The caller picks the fence for the same reason
-        // NriPipelineCache::Clear does. Buries the bindless table's own
-        // descriptors too (BindlessTable::Release), so an SRV a caller Added
-        // via AddMaterial is discharged the same way everything else here
-        // is -- the caller still owns the TEXTURE that view names (see
-        // AddMaterial's own comment) and must release that separately.
+        // NriPipelineCache::Clear does. Withdraws this node's bindless
+        // set from the device table; the table and the SRVs a caller Added via
+        // AddMaterial are the DEVICE's (NriGraphContext::Release discharges the
+        // ones this context minted, BindlessTable::ReleaseOwnedBy).
         void Release(Graveyard& graveyard, std::uint64_t fence);
 
-        // Registers `srv` in this node's BindlessTable and writes it into
-        // the bindless descriptor set at the slot BindlessTable::Add
-        // returns -- `kInvalidSlot` on refusal (null `srv`, the table is at
+        // Registers `srv` in the DEVICE's BindlessTable and writes it into
+        // the bindless descriptor set of every context on this device at the
+        // slot BindlessTable::Add returns -- `kInvalidSlot` on refusal (null `srv`, the table is at
         // capacity, or Create() never built one). The returned slot is what
         // a MeshInstance::materialSlot names to select `srv` at draw time.
         //
@@ -717,7 +716,12 @@ namespace Arcane
         // and never again). Null/kInvalidLayout-shaped until CreateBindless/
         // CreateSets succeed; Create() refuses the whole node rather than
         // leave either half-built (Init()'s `&&` chain).
-        std::unique_ptr<BindlessTable> m_bindless;
+        // The DEVICE's table (NriDevice::Bindless()), shared by every context on
+        // the device -- borrowed, never owned. This node owns only its descriptor
+        // SET, which it registers with the table so a slot written by any context
+        // lands in this context's set too.
+        BindlessTable*                 m_bindless = nullptr;
+        NriGraphContext*               m_context  = nullptr;   // the sampling-context identity the last-use record keys on
         nri::DescriptorSet*            m_bindlessSet = nullptr;
         // Descriptor indexing does not imply Vulkan's granular sampled-image
         // update-after-bind feature. False selects AddMaterial's idle fallback.

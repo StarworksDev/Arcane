@@ -190,6 +190,7 @@ namespace Arcane
     bool MeshNode::Init(NriGraphContext& context)
     {
         m_device    = &context.Device();
+        m_context   = &context;
         m_pipelines = &context.Pipelines();
         // The ad-hoc cap is the GPU scene's scratch region, latched by
         // GpuScene::Create (built before this node, in InitCommon).
@@ -285,13 +286,24 @@ namespace Arcane
     {
         // Gated already, in Init(), before this ever runs -- a device that
         // reached here has bindless tier > 0.
-        m_bindless = BindlessTable::Create(*m_device, Arcane::kBindlessCapacity);
+        // ONE TABLE PER DEVICE: the index space is shared by every context on it.
+        // This node borrows it and contributes its own descriptor set (CreateSets).
+        m_bindless = m_device->Bindless();
         if (!m_bindless)
         {
-            ARC_ERROR("[nri-graph] MeshNode: BindlessTable::Create failed -- the material table "
-                      "could not be built (already logged: capacity {})", Arcane::kBindlessCapacity);
+            ARC_ERROR("[nri-graph] MeshNode: the device's bindless table could not be built "
+                      "(already logged: capacity {})", Arcane::kBindlessCapacity);
             return false;
         }
+        m_bindless->SetUpdateAfterSet(m_bindlessUpdateAfterSet);
+        // A context's fence completes on that context's own timeline only.
+        m_bindless->SetCompletionQuery(
+            [](const void* context, std::uint64_t fence, void*) -> bool
+            {
+                const auto* ctx = static_cast<const NriGraphContext*>(context);
+                return const_cast<NriGraphContext*>(ctx)->Graph().CompletedFence() >= fence;
+            },
+            nullptr);
         return true;
     }
 
@@ -614,6 +626,10 @@ namespace Arcane
                       PoolSizes(m_bindlessUpdateAfterSet).descriptorSetMaxNum);
             return false;
         }
+        // Every slot already live on the device (written by another context
+        // before this one existed) lands in this set now.
+        if (m_bindless)
+            m_bindless->RegisterSet(m_context, m_bindlessSet);
         return true;
     }
 
@@ -624,33 +640,11 @@ namespace Arcane
         if (!m_bindless || !m_bindlessSet || !srv)
             return BindlessTable::kInvalidSlot;
 
-        const nri::CoreInterface& core = m_device->Core();
-        if (!m_bindlessUpdateAfterSet
-            && !ARC_NRI_CHECK(core.DeviceWaitIdle(&m_device->Device())))
-        {
-            ARC_ERROR("[nri-graph] MeshNode: could not retire in-flight work before "
-                      "updating a bindless material descriptor");
-            return BindlessTable::kInvalidSlot;
-        }
-
-        const std::uint32_t slot = m_bindless->Add(srv);
-        if (slot == BindlessTable::kInvalidSlot)
-            return BindlessTable::kInvalidSlot;   // null srv, or the table is full -- BindlessTable
-                                                   // already warned (once) or refused silently, per
-                                                   // its own Add() contract
-
-        // `view`'s ADDRESS must outlive UpdateDescriptorRanges -- same rule
-        // CreateSets' `cb` local follows, and for the same reason.
-        const nri::Descriptor* view = srv;
-
-        nri::UpdateDescriptorRangeDesc update = {};
-        update.descriptorSet  = m_bindlessSet;
-        update.rangeIndex     = 0;      // the bindless array is the set's only range
-        update.baseDescriptor = slot;   // WHERE in the array -- not an append
-        update.descriptors    = &view;
-        update.descriptorNum  = 1;
-        core.UpdateDescriptorRanges(&update, 1);
-        return slot;
+        // The device table pops or appends the index and writes the descriptor
+        // into EVERY registered set (this node's and every other context's), and
+        // on the no-update-after-set fallback waits for device idle at most once
+        // per frame that rewrites a descriptor -- not once per slot.
+        return m_bindless->AddAndWrite(srv, m_context);
     }
 
     MeshNode::~MeshNode()
@@ -665,6 +659,8 @@ namespace Arcane
         // resets a null unique_ptr harmlessly.
         if (m_device && (m_pool || m_arena))
         {
+            if (m_bindless)
+                m_bindless->UnregisterSet(m_context);
             ARC_WARN("[nri-graph] MeshNode destroyed with live NRI objects -- either Create() failed "
                      "part way (an ERROR above says which step) or its owner never called Release(). "
                      "Destroying directly behind a DeviceWaitIdle.");
@@ -687,7 +683,7 @@ namespace Arcane
             m_pool = nullptr;
             m_arena = nullptr; m_arenaCpu = nullptr;
         }
-        m_bindless.reset();
+        m_bindless = nullptr;
     }
 
     void MeshNode::Release(Graveyard& graveyard, std::uint64_t fence)
@@ -696,15 +692,13 @@ namespace Arcane
             return;
         const nri::CoreInterface* core = &m_device->Core();
 
-        // THE BINDLESS TABLE FIRST: BindlessTable::Release buries every
-        // occupied slot's descriptor at `fence` (its own comment) --
-        // discharging views this node's table owns per AddMaterial's
-        // OWNERSHIP contract, NOT the textures they view (a caller's own,
-        // per that same contract). The unique_ptr itself is NOT reset here
-        // -- see ~MeshNode's comment for why an idempotent Release() leaving
-        // an empty-but-alive BindlessTable behind is the right shape.
+        // THE BINDLESS SET FIRST: the table is the DEVICE's, shared by every
+        // context, so this node only withdraws its own set from it. The
+        // descriptors this context minted are discharged by
+        // NriGraphContext::Release (BindlessTable::ReleaseOwnedBy), which knows
+        // the texture each one views; the set itself dies with the pool below.
         if (m_bindless)
-            m_bindless->Release(graveyard, fence);
+            m_bindless->UnregisterSet(m_context);
         m_bindlessSet = nullptr;   // owned by the pool buried below
 
         // Descriptors before the resources they view -- the graveyard runs
@@ -832,6 +826,10 @@ namespace Arcane
     void MeshNode::Prepare(nri::Format canvasFormat, const MeshSceneDesc& scene,
                            NriMeshBufferCache* meshBuffers, std::uint64_t frameCounter)
     {
+        // One frame boundary for the table's idle-once-per-frame fallback.
+        if (m_bindless)
+            m_bindless->NoteFrame();
+
         // The PSO, built HERE so a first-frame pipeline compile does not land
         // inside the recording window. Re-resolved every frame because the
         // canvas format is the CALLER's (AddMeshNode takes it as a parameter,
@@ -1051,6 +1049,13 @@ namespace Arcane
             GraphError("MeshNode: no descriptor set for this frame slot -- nothing recorded");
             return;
         }
+
+        // THE LAST-USE RECORD: this context's submit (the value CurrentFence()
+        // names, on THIS context's own timeline) may sample any live slot through
+        // the bindless set bound below. A slot released from here on is not
+        // recycled until that fence has completed.
+        if (m_bindless && m_context)
+            m_bindless->NoteSampledBy(m_context, m_context->CurrentFence());
 
         // ---------------------------------------------------------------
         // THE FRAME SET's t0/t1 VIEWS (F3 plan 1 T7): rewritten for THIS slot

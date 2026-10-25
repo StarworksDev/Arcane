@@ -678,9 +678,15 @@ namespace Arcane
         if (!id.IsValid() || !m_mesh || !m_textures || !m_device)
             return BindlessTable::kInvalidSlot;
 
-        const auto cached = m_meshAlbedoSlots.find(id);
-        if (cached != m_meshAlbedoSlots.end())
-            return cached->second;
+        // THE DEVICE-WIDE MEMO, keyed by (Guid, ColorSpace): a mesh albedo is
+        // scene content, always Srgb. Every context on the device shares it, so
+        // the editor's viewport, preview graph and harvester resolve one slot.
+        BindlessTable* bindless = m_device->Bindless();
+        if (!bindless)
+            return BindlessTable::kInvalidSlot;
+        const std::uint32_t known = bindless->Lookup(id, BindlessTable::ColorSpace::Srgb);
+        if (known != BindlessTable::kInvalidSlot)
+            return known;
 
         // Srgb, the scene default (NriTextureCache::ColorSpace) -- a mesh
         // albedo is scene content like a sprite's own texture, never chrome.
@@ -690,9 +696,8 @@ namespace Arcane
                                                    // warned, once (its own one-shot latch)
 
         // A SEPARATE, INDEPENDENTLY-OWNED view over the SAME texture --
-        // deliberately NOT m_textures->View(id). AddMaterial's own
-        // OWNERSHIP contract (MeshNode.hpp) takes the descriptor it is
-        // handed and destroys it at BindlessTable::Release; NriTextureCache
+        // deliberately NOT m_textures->View(id). The table takes the descriptor
+        // it is handed and destroys it when the slot retires; NriTextureCache
         // ALREADY owns and destroys ITS OWN view of this texture (any
         // sprite/material param naming the same asset reads that one). Two
         // owners destroying the SAME nri::Descriptor* is a double-destroy
@@ -715,30 +720,64 @@ namespace Arcane
         if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, bindlessView)) || !bindlessView)
             return BindlessTable::kInvalidSlot;   // already logged (ARC_NRI_CHECK)
 
-        const std::uint32_t slot = m_mesh->AddMaterial(bindlessView);
+        const std::uint32_t slot = bindless->AddMapped(id, BindlessTable::ColorSpace::Srgb, bindlessView, this);
         if (slot == BindlessTable::kInvalidSlot)
         {
-            // AddMaterial/BindlessTable refused (a null srv cannot happen
-            // here -- CreateTextureView succeeded above -- so this is "the
-            // table is already full", already warned once by BindlessTable
-            // itself). The view just minted is now ownerless: nothing will
-            // ever bury it via a graph teardown, because it was never
-            // handed to anything that tracks it. Safe to destroy directly,
-            // with no fence/graveyard involved: Add() refused BEFORE ever
-            // writing it into the bindless descriptor set (BindlessTable::
-            // Add's own contract -- a refusal consumes no slot), so no
-            // command buffer can ever have read it.
+            // The table refused (a null srv cannot happen here --
+            // CreateTextureView succeeded above -- so this is "the table is
+            // full", already warned once by BindlessTable itself). The view just
+            // minted is now ownerless: nothing will ever bury it via a graph
+            // teardown, because it was never handed to anything that tracks it.
+            // Safe to destroy directly, with no fence/graveyard involved: the
+            // table refused BEFORE ever writing it into a bindless descriptor
+            // set, so no command buffer can ever have read it.
             core.DestroyDescriptor(bindlessView);
             return BindlessTable::kInvalidSlot;
         }
 
-        // ONLY a successful resolve is memoized -- a miss (not yet resident,
-        // refused, or a full table) is NOT cached here, so a later frame's
-        // ask for the same Guid tries again for free (NriTextureCache's own
-        // memoization already makes a repeat Resolve() on a known-failed or
+        // ONLY a successful resolve is memoized (AddMapped did it) -- a miss (not
+        // yet resident, refused, or a full table) is NOT cached, so a later
+        // frame's ask for the same Guid tries again for free (NriTextureCache's
+        // own memoization already makes a repeat Resolve() on a known-failed or
         // still-PendingCook key an O(1) map lookup, not a re-decode).
-        m_meshAlbedoSlots.emplace(id, slot);
         return slot;
+    }
+
+    std::uint32_t NriGraphContext::AcquireMeshAlbedoSlot(const Guid& id)
+    {
+        const std::uint32_t slot = ResolveMeshAlbedoSlot(id);
+        if (slot != BindlessTable::kInvalidSlot && m_device)
+            if (BindlessTable* bindless = m_device->Bindless())
+                bindless->AcquireRef(id, BindlessTable::ColorSpace::Srgb);
+        return slot;
+    }
+
+    void NriGraphContext::ReleaseMeshAlbedoRef(const Guid& id)
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->Bindless())
+            bindless->Release(id, BindlessTable::ColorSpace::Srgb);
+    }
+
+    void NriGraphContext::InvalidateMeshAlbedoSlot(const Guid& id)
+    {
+        if (!m_device)
+            return;
+        BindlessTable* bindless = m_device->Bindless();
+        if (!bindless)
+            return;
+        // Both colour spaces, exactly as NriTextureCache::Invalidate sweeps them.
+        bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
+        bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
+    }
+
+    void NriGraphContext::ReleaseAllMeshAlbedoSlots()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->Bindless())
+            bindless->ReleaseEveryMapping();
     }
 
     NriGraphContext::~NriGraphContext()
@@ -780,8 +819,20 @@ namespace Arcane
         // outcomes cost the crash teardown time and one more entry on the error
         // latch and buy nothing. The healthy path is unchanged -- every
         // ordinary shutdown has GpuDeviceLostObserved() == false.
-        if (core.DeviceWaitIdle && !GpuDeviceLostObserved())
+        const bool deviceLost = GpuDeviceLostObserved();
+        if (core.DeviceWaitIdle && !deviceLost)
             (void)ARC_NRI_CHECK(core.DeviceWaitIdle(&m_device->Device()));
+
+        // The bindless views this context minted name textures in ITS cache, which
+        // are buried below. Release those slots now: the device is idle, so every
+        // context's last use of them has retired and they are destroyed at once
+        // (on a lost device they wait for ~NriDevice). This context's notes in the
+        // last-use record go too -- its timeline is about to disappear.
+        if (BindlessTable* bindless = m_device->Bindless())
+        {
+            bindless->ReleaseOwnedBy(this, !deviceLost);
+            bindless->ForgetContext(this);
+        }
 
         // ONE fence value for every burial below, and it is the graph's own
         // last submitted value -- the same one RenderGraph::
