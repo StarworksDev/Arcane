@@ -3,6 +3,7 @@
   "type": "Developer",
   "dependencies": {
     "public": [
+      "ArcaneAssets",
       "ArcaneCore"
     ],
     "private": []

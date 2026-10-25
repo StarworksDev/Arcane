@@ -322,7 +322,8 @@ jobs:
   build-test:
     name: ${{ matrix.leg }} ${{ matrix.config }}
     runs-on: ${{ matrix.os }}
-    # macOS gets a longer budget: its runner builds with fewer jobs (MAKE_JOBS).
+    # macOS gets a longer budget (its runner builds with fewer jobs, MAKE_JOBS),
+    # and Windows one for its Release package lane.
     timeout-minutes: ${{ matrix.timeout || 150 }}
     strategy:
       fail-fast: false
@@ -333,6 +334,9 @@ jobs:
           - leg: windows-msvc
             os: windows-2025
             compiler: msvc
+            # Release also runs the package lane: ~2h29m on main (run
+            # 39728545742), right at the 150-minute default.
+            timeout: 210
           - leg: macos-appleclang
             os: macos-15
             compiler: appleclang

@@ -1,225 +1,48 @@
 #include "Arcane/AssetPipeline/ArtifactFormat.hpp"
 
 #include <array>
-#include <bit>
-#include <fstream>
 #include <string>
 #include <Arcane/Core/Constant.hpp>
-#include <Arcane/IO/ReadRegularFile.hpp>
 
 namespace Arcane::AssetPipeline
 {
+    // The codec's names, in this namespace's spelling.
+    using Arcane::ArtifactCommonPrefix;
+    using Arcane::ArtifactSectionBody;
+    using Arcane::ArtifactSectionEntry;
+    using Arcane::ByteReader;
+    using Arcane::ByteWriter;
+    using Arcane::kMeshSectionEntrySize;
+    using Arcane::kMipEntrySize;
+
     namespace
     {
-        ARC_CONSTANT("file format: the cooked-artifact container version")
-        constexpr std::uint32_t kArtifactVersion = 1;
-        constexpr std::array<std::uint8_t, 4> kMagic{
-            static_cast<std::uint8_t>('A'), static_cast<std::uint8_t>('R'),
-            static_cast<std::uint8_t>('C'), static_cast<std::uint8_t>('A'),
-        };
-        // On-disk width of one section table entry: tag(u32) + offset(u64) + size(u64). Shared
-        // by both artifact kinds -- this is the CONTAINER's own top-level index, not either
-        // kind's per-content section table.
-        ARC_CONSTANT("file format: on-disk width of a container section table entry")
-        constexpr std::uint64_t kSectionEntrySize = 4 + 8 + 8;
-        // On-disk width of one MipTable entry: offset(u64) + size(u64) + width(u32) + height(u32).
-        ARC_CONSTANT("file format: on-disk width of a MipTable entry")
-        constexpr std::uint64_t kMipEntrySize = 8 + 8 + 4 + 4;
-        // Minimum on-disk width of one MESH SectionTable entry (SectionTag::SectionTable's own
-        // body): nameLen(u16) + indexOffset(u32) + indexCount(u32) + slotIndex(u32), i.e. the
-        // width with a zero-length name -- a real entry is this wide plus its name's bytes.
-        ARC_CONSTANT("file format: minimum on-disk width of a mesh SectionTable entry")
-        constexpr std::uint64_t kMeshSectionEntrySize = 2 + 4 + 4 + 4;
-
-        [[nodiscard]] constexpr std::byte ByteOf(std::uint64_t v, int shift) noexcept
-        {
-            return static_cast<std::byte>(static_cast<unsigned char>((v >> shift) & 0xFFu));
-        }
-
-        // Appends multi-byte integers little-endian, one explicit byte at a time -- never a
-        // struct/scalar memcpy. Struct padding + host endianness would make the artifact
-        // non-deterministic across toolchains, which breaks content-hash-based caching.
-        class ByteWriter
-        {
-        public:
-            std::vector<std::byte> buf;
-
-            void U8(std::uint8_t v) { buf.push_back(static_cast<std::byte>(v)); }
-
-            void U16(std::uint16_t v)
-            {
-                for (int i = 0; i < 2; ++i)
-                    buf.push_back(ByteOf(v, 8 * i));
-            }
-
-            void U32(std::uint32_t v)
-            {
-                for (int i = 0; i < 4; ++i)
-                    buf.push_back(ByteOf(v, 8 * i));
-            }
-
-            void U64(std::uint64_t v)
-            {
-                for (int i = 0; i < 8; ++i)
-                    buf.push_back(ByteOf(v, 8 * i));
-            }
-
-            // Floats go through their EXACT bit pattern, never a numeric conversion:
-            // std::bit_cast preserves every bit including a signed zero or a NaN payload,
-            // which a float -> integer conversion would not. Same byte-explicit,
-            // endianness-explicit discipline as U32 above -- an AABB that round-trips
-            // approximately is an AABB that fails the mesh's own framing math on the second
-            // load.
-            void F32(float v) { U32(std::bit_cast<std::uint32_t>(v)); }
-
-            void Bytes(std::span<const std::byte> s) { buf.insert(buf.end(), s.begin(), s.end()); }
-
-            [[nodiscard]] std::size_t Size() const noexcept { return buf.size(); }
-        };
-
-        // Bounds-checked little-endian reader over an in-memory buffer. Every accessor returns
-        // false (never throws/UB) on a short read so callers can turn ANY truncation, anywhere
-        // in the file, into a single ReadTextureArtifact() nullopt.
-        class ByteReader
-        {
-        public:
-            ByteReader(const std::byte* data, std::size_t size) noexcept : m_data(data), m_size(size) {}
-
-            [[nodiscard]] bool U8(std::uint8_t& out) noexcept
-            {
-                if (m_pos + 1 > m_size) return false;
-                out = static_cast<std::uint8_t>(m_data[m_pos]);
-                m_pos += 1;
-                return true;
-            }
-
-            [[nodiscard]] bool U16(std::uint16_t& out) noexcept
-            {
-                if (m_pos + 2 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 2; ++i)
-                    out |= static_cast<std::uint16_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 2;
-                return true;
-            }
-
-            [[nodiscard]] bool U32(std::uint32_t& out) noexcept
-            {
-                if (m_pos + 4 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 4; ++i)
-                    out |= static_cast<std::uint32_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 4;
-                return true;
-            }
-
-            [[nodiscard]] bool U64(std::uint64_t& out) noexcept
-            {
-                if (m_pos + 8 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 8; ++i)
-                    out |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 8;
-                return true;
-            }
-
-            [[nodiscard]] bool F32(float& out) noexcept
-            {
-                std::uint32_t bits = 0;
-                if (!U32(bits)) return false;
-                out = std::bit_cast<float>(bits);
-                return true;
-            }
-
-            // Copies `count` bytes starting at ABSOLUTE offset `at` against the whole backing
-            // buffer (not the sequential cursor) -- section bodies are addressed by the
-            // section table's own offset/size, not read in sequence.
-            [[nodiscard]] bool Slice(std::uint64_t at, std::uint64_t count, std::vector<std::byte>& out) const
-            {
-                if (at > m_size || count > m_size - at) return false;
-                const auto* begin = m_data + static_cast<std::size_t>(at);
-                out.assign(begin, begin + static_cast<std::size_t>(count));
-                return true;
-            }
-
-        private:
-            const std::byte* m_data;
-            std::size_t m_pos = 0;
-            std::size_t m_size;
-        };
-
-        struct SectionTableEntry
-        {
-            std::uint32_t tag;
-            std::uint64_t offset;
-            std::uint64_t size;
-        };
-
-        // Mirrors ArtifactReader.cpp's own kHeaderProbeBytes reasoning: generous headroom
-        // over the fixed 37-byte common prefix (magic 4 + version 4 + contentKind 1 +
-        // sourceGuid 16 + sourceHash 8 + importerVersion 4) ReadArtifactPrefix actually
-        // parses, so a future prefix field added to either side does not silently start
-        // under-reading -- still minuscule next to a real artifact's payload, which is the
-        // whole point: RebuildIndexFromScan must never pay for anything past the header.
+        // Mip/mesh-section widths, the version, the magic and the section entry width live in
+        // the codec (ArtifactCodec.hpp).
+        // Generous headroom over the fixed 37-byte common prefix ReadArtifactPrefix actually
+        // parses, so a future prefix field does not silently start under-reading -- still
+        // minuscule next to a real artifact's payload: RebuildIndexFromScan must never pay
+        // for anything past the header.
         ARC_CONSTANT("file format: covers every prefix field ReadArtifactPrefix parses, with headroom")
         constexpr std::size_t kPrefixProbeBytes = 256;
-
-        // Reads at most `maxBytes` from the START of `path` -- NEVER the whole file. A file
-        // shorter than `maxBytes` on disk reads however many bytes actually exist; the
-        // bounds-checked ByteReader accessors then correctly refuse anything truncated
-        // inside the prefix, exactly as they would reading the same short buffer out of a
-        // full-file read. `ifs.bad()` (a genuine IO error) is distinguished from merely
-        // hitting EOF before `maxBytes` (failbit/eofbit, not badbit -- the ordinary "short
-        // file" case, not a failure).
-        [[nodiscard]] std::optional<std::vector<std::byte>> ReadFilePrefix(
-            const std::filesystem::path& path, std::size_t maxBytes)
-        {
-            std::ifstream ifs(path, std::ios::binary);
-            if (!ifs) return std::nullopt;
-
-            std::vector<std::byte> raw(maxBytes);
-            ifs.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(maxBytes));
-            if (ifs.bad()) return std::nullopt;
-
-            const std::streamsize got = ifs.gcount();
-            if (got < 0) return std::nullopt;
-            raw.resize(static_cast<std::size_t>(got));
-            return raw;
-        }
     }
 
     std::optional<ArtifactPrefix> ReadArtifactPrefix(const std::filesystem::path& path)
     {
-        const std::optional<std::vector<std::byte>> raw = ReadFilePrefix(path, kPrefixProbeBytes);
+        const std::optional<std::vector<std::byte>> raw = ReadArtifactPrefixBytes(path, kPrefixProbeBytes);
         if (!raw) return std::nullopt;
 
         ByteReader r(raw->data(), raw->size());
+        ArtifactCommonPrefix common;
+        if (!ParseCommonPrefix(r, common)) return std::nullopt;
 
-        std::uint8_t magic[4]{};
-        for (std::uint8_t& b : magic)
-            if (!r.U8(b)) return std::nullopt;
-        if (magic[0] != kMagic[0] || magic[1] != kMagic[1] || magic[2] != kMagic[2] || magic[3] != kMagic[3])
-            return std::nullopt;
-
-        std::uint32_t version = 0;
-        if (!r.U32(version)) return std::nullopt;
-        if (version != kArtifactVersion) return std::nullopt;
-
-        ArtifactPrefix prefix;
-
-        std::uint8_t contentKind = 0;
-        if (!r.U8(contentKind)) return std::nullopt;
         // NO contentKind GATE HERE, deliberately -- see this function's own doc comment
-        // (ArtifactFormat.hpp): the whole point is to answer "whose guid is this" for ANY
-        // kind. Each kind's own full reader (ReadTextureArtifact/ReadMeshArtifact) keeps
-        // its own fail-closed check unchanged.
-        prefix.contentKind = static_cast<ContentKind>(contentKind);
-
-        if (!r.U64(prefix.sourceGuid.hi)) return std::nullopt;
-        if (!r.U64(prefix.sourceGuid.lo)) return std::nullopt;
-        if (!r.U64(prefix.sourceHash)) return std::nullopt;
-        if (!r.U32(prefix.importerVersion)) return std::nullopt;
-
+        // (ArtifactFormat.hpp). Each kind's own full reader keeps its fail-closed check.
+        ArtifactPrefix prefix;
+        prefix.contentKind = static_cast<ContentKind>(common.contentKind);
+        prefix.sourceGuid = common.sourceGuid;
+        prefix.sourceHash = common.sourceHash;
+        prefix.importerVersion = common.importerVersion;
         return prefix;
     }
 
@@ -239,15 +62,10 @@ namespace Arcane::AssetPipeline
             mipTable.U32(mip.height);
         }
 
-        // Fixed header: magic, artifactVersion, then the desc fields in declaration order.
+        // Fixed header: the common prefix, then the desc fields in declaration order.
         ByteWriter header;
-        for (std::uint8_t b : kMagic) header.U8(b);
-        header.U32(kArtifactVersion);
-        header.U8(static_cast<std::uint8_t>(desc.contentKind));
-        header.U64(desc.sourceGuid.hi);
-        header.U64(desc.sourceGuid.lo);
-        header.U64(desc.sourceHash);
-        header.U32(desc.importerVersion);
+        WriteCommonPrefix(header, ArtifactCommonPrefix{ static_cast<std::uint8_t>(desc.contentKind),
+                                                        desc.sourceGuid, desc.sourceHash, desc.importerVersion });
         header.U8(static_cast<std::uint8_t>(desc.format));
         header.U8(static_cast<std::uint8_t>(desc.dimension));
         header.U32(desc.arrayOrDepth);
@@ -258,75 +76,38 @@ namespace Arcane::AssetPipeline
         header.U32(desc.thumbWidth);
         header.U32(desc.thumbHeight);
 
-        struct Section { SectionTag tag; std::span<const std::byte> data; };
-        const std::array<Section, 3> sections{ {
+        const std::array<ArtifactSectionBody, 3> sections{ {
             { SectionTag::MipTable,  std::span<const std::byte>(mipTable.buf) },
             { SectionTag::Payload,   payload },
             { SectionTag::Thumbnail, thumbRgba },
         } };
 
-        const std::uint64_t sectionTableSize = 4 + sections.size() * kSectionEntrySize;   // + sectionCount
-
-        ByteWriter sectionTable;
-        sectionTable.U32(static_cast<std::uint32_t>(sections.size()));
-        std::uint64_t runningOffset = header.Size() + sectionTableSize;
-        for (const Section& s : sections)
-        {
-            sectionTable.U32(static_cast<std::uint32_t>(s.tag));
-            sectionTable.U64(runningOffset);
-            sectionTable.U64(static_cast<std::uint64_t>(s.data.size()));
-            runningOffset += s.data.size();
-        }
-
-        ByteWriter file;
-        file.buf.reserve(static_cast<std::size_t>(runningOffset));
-        file.Bytes(header.buf);
-        file.Bytes(sectionTable.buf);
-        for (const Section& s : sections)
-            file.Bytes(s.data);
-
-        std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(reinterpret_cast<const char*>(file.buf.data()), static_cast<std::streamsize>(file.buf.size()));
-        ofs.flush();
-        return ofs.good();
+        const std::vector<std::byte> file = AssembleArtifact(header, sections);
+        return WriteArtifactFile(path, file);
     }
 
     std::optional<LoadedArtifact> ReadTextureArtifact(const std::filesystem::path& path)
     {
-        auto rawOpt = Arcane::ReadRegularFile(path);
+        auto rawOpt = ReadArtifactBytes(path);
         if (!rawOpt) return std::nullopt;
         std::vector<std::byte> raw = std::move(*rawOpt);
 
         ByteReader r(raw.data(), raw.size());
 
-        std::uint8_t magic[4]{};
-        for (std::uint8_t& b : magic)
-            if (!r.U8(b)) return std::nullopt;
-        if (magic[0] != kMagic[0] || magic[1] != kMagic[1] || magic[2] != kMagic[2] || magic[3] != kMagic[3])
-            return std::nullopt;
-
-        std::uint32_t version = 0;
-        if (!r.U32(version)) return std::nullopt;
-        if (version != kArtifactVersion) return std::nullopt;
+        ArtifactCommonPrefix prefix;
+        if (!ParseCommonPrefix(r, prefix)) return std::nullopt;
 
         LoadedArtifact loaded;
         TextureArtifactDesc& desc = loaded.desc;
 
-        std::uint8_t contentKind = 0;
-        if (!r.U8(contentKind)) return std::nullopt;
-        // Minor fix (final-review wave): fail closed on an unexpected contentKind rather
-        // than silently accepting it as this reader's own Texture-shaped body -- spares
-        // F2c's mesh-artifact author a texture reader that happily "parses" (misreads) a
-        // future artifact kind's bytes just because the fixed header widths still fit.
-        if (contentKind != static_cast<std::uint8_t>(ContentKind::Texture))
+        // Fail closed on anything but Texture rather than "parse" (misread) another
+        // artifact kind's bytes just because the fixed header widths happen to still fit.
+        if (prefix.contentKind != static_cast<std::uint8_t>(ContentKind::Texture))
             return std::nullopt;
-        desc.contentKind = static_cast<ContentKind>(contentKind);
-
-        if (!r.U64(desc.sourceGuid.hi)) return std::nullopt;
-        if (!r.U64(desc.sourceGuid.lo)) return std::nullopt;
-        if (!r.U64(desc.sourceHash)) return std::nullopt;
-        if (!r.U32(desc.importerVersion)) return std::nullopt;
+        desc.contentKind = static_cast<ContentKind>(prefix.contentKind);
+        desc.sourceGuid = prefix.sourceGuid;
+        desc.sourceHash = prefix.sourceHash;
+        desc.importerVersion = prefix.importerVersion;
 
         std::uint8_t format = 0, dimension = 0;
         if (!r.U8(format)) return std::nullopt;
@@ -346,26 +127,12 @@ namespace Arcane::AssetPipeline
         if (!r.U32(desc.thumbWidth)) return std::nullopt;
         if (!r.U32(desc.thumbHeight)) return std::nullopt;
 
-        std::uint32_t sectionCount = 0;
-        if (!r.U32(sectionCount)) return std::nullopt;
+        // The container's top-level {tag, offset, size} index, shared by both kinds; the
+        // codec refuses a count that could not fit in the file before it reserves.
+        std::vector<ArtifactSectionEntry> entries;
+        if (!ReadSectionTable(r, raw.size(), entries)) return std::nullopt;
 
-        // Cheap sanity bound before reserving: each entry costs at least 20 bytes on disk, so
-        // a section count that couldn't possibly fit in the remaining file is corrupt. Without
-        // this a crafted sectionCount (e.g. 0xFFFFFFFF) would ask to reserve tens of GB before
-        // the per-entry bounds checks below ever get a chance to fail closed.
-        if (static_cast<std::uint64_t>(sectionCount) * kSectionEntrySize > raw.size())
-            return std::nullopt;
-
-        std::vector<SectionTableEntry> entries;
-        entries.reserve(sectionCount);
-        for (std::uint32_t i = 0; i < sectionCount; ++i)
-        {
-            SectionTableEntry e{};
-            if (!r.U32(e.tag) || !r.U64(e.offset) || !r.U64(e.size)) return std::nullopt;
-            entries.push_back(e);
-        }
-
-        for (const SectionTableEntry& e : entries)
+        for (const ArtifactSectionEntry& e : entries)
         {
             std::vector<std::byte> body;
             if (!r.Slice(e.offset, e.size, body))
@@ -417,7 +184,8 @@ namespace Arcane::AssetPipeline
     }
 
     // ---- Mesh artifacts (F2c) --------------------------------------------------------------
-    // Independent writer/reader pair -- see ArtifactFormat.hpp's file banner for why the two
+    // Writer/reader pair over the ArcaneAssets byte codec (ArtifactCodec.hpp) -- see
+    // ArtifactFormat.hpp's file banner for why the two
     // kinds share ONE container format and ONE SectionTag space, and ArtifactFormat.hpp's own
     // struct comments for the A1/A5 design comparisons cited below.
 
@@ -459,15 +227,10 @@ namespace Arcane::AssetPipeline
         for (std::uint32_t idx : indices)
             indexData.U32(idx);
 
-        // Fixed header: magic, artifactVersion, then the desc fields in declaration order.
+        // Fixed header: the common prefix, then the desc fields in declaration order.
         ByteWriter header;
-        for (std::uint8_t b : kMagic) header.U8(b);
-        header.U32(kArtifactVersion);
-        header.U8(static_cast<std::uint8_t>(desc.contentKind));
-        header.U64(desc.sourceGuid.hi);
-        header.U64(desc.sourceGuid.lo);
-        header.U64(desc.sourceHash);
-        header.U32(desc.importerVersion);
+        WriteCommonPrefix(header, ArtifactCommonPrefix{ static_cast<std::uint8_t>(desc.contentKind),
+                                                        desc.sourceGuid, desc.sourceHash, desc.importerVersion });
         header.U32(desc.vertexCount);
         header.U32(desc.indexCount);
         header.U32(desc.sectionCount);
@@ -475,74 +238,38 @@ namespace Arcane::AssetPipeline
         header.F32(desc.aabbMin[0]); header.F32(desc.aabbMin[1]); header.F32(desc.aabbMin[2]);
         header.F32(desc.aabbMax[0]); header.F32(desc.aabbMax[1]); header.F32(desc.aabbMax[2]);
 
-        struct Section { SectionTag tag; std::span<const std::byte> data; };
-        const std::array<Section, 3> sections{ {
+        const std::array<ArtifactSectionBody, 3> sections{ {
             { SectionTag::VertexData,   std::span<const std::byte>(vertexData.buf) },
             { SectionTag::IndexData,    std::span<const std::byte>(indexData.buf) },
             { SectionTag::SectionTable, std::span<const std::byte>(sectionRecords.buf) },
         } };
 
-        const std::uint64_t sectionTableSize = 4 + sections.size() * kSectionEntrySize;   // + sectionCount
-
-        ByteWriter sectionTable;
-        sectionTable.U32(static_cast<std::uint32_t>(sections.size()));
-        std::uint64_t runningOffset = header.Size() + sectionTableSize;
-        for (const Section& s : sections)
-        {
-            sectionTable.U32(static_cast<std::uint32_t>(s.tag));
-            sectionTable.U64(runningOffset);
-            sectionTable.U64(static_cast<std::uint64_t>(s.data.size()));
-            runningOffset += s.data.size();
-        }
-
-        ByteWriter file;
-        file.buf.reserve(static_cast<std::size_t>(runningOffset));
-        file.Bytes(header.buf);
-        file.Bytes(sectionTable.buf);
-        for (const Section& s : sections)
-            file.Bytes(s.data);
-
-        std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(reinterpret_cast<const char*>(file.buf.data()), static_cast<std::streamsize>(file.buf.size()));
-        ofs.flush();
-        return ofs.good();
+        const std::vector<std::byte> file = AssembleArtifact(header, sections);
+        return WriteArtifactFile(path, file);
     }
 
     std::optional<LoadedMeshArtifact> ReadMeshArtifact(const std::filesystem::path& path)
     {
-        auto rawOpt = Arcane::ReadRegularFile(path);
+        auto rawOpt = ReadArtifactBytes(path);
         if (!rawOpt) return std::nullopt;
         std::vector<std::byte> raw = std::move(*rawOpt);
 
         ByteReader r(raw.data(), raw.size());
 
-        std::uint8_t magic[4]{};
-        for (std::uint8_t& b : magic)
-            if (!r.U8(b)) return std::nullopt;
-        if (magic[0] != kMagic[0] || magic[1] != kMagic[1] || magic[2] != kMagic[2] || magic[3] != kMagic[3])
-            return std::nullopt;
-
-        std::uint32_t version = 0;
-        if (!r.U32(version)) return std::nullopt;
-        if (version != kArtifactVersion) return std::nullopt;
+        ArtifactCommonPrefix prefix;
+        if (!ParseCommonPrefix(r, prefix)) return std::nullopt;
 
         LoadedMeshArtifact loaded;
         MeshArtifactDesc& desc = loaded.desc;
 
-        std::uint8_t contentKind = 0;
-        if (!r.U8(contentKind)) return std::nullopt;
-        // Fail closed on anything but Mesh -- the same gate ReadTextureArtifact carries for
-        // Texture, so a mesh reader never "parses" (misreads) a texture artifact's bytes just
-        // because the fixed header widths happen to still fit.
-        if (contentKind != static_cast<std::uint8_t>(ContentKind::Mesh))
+        // Fail closed on anything but Mesh rather than "parse" (misread) another
+        // artifact kind's bytes just because the fixed header widths happen to still fit.
+        if (prefix.contentKind != static_cast<std::uint8_t>(ContentKind::Mesh))
             return std::nullopt;
-        desc.contentKind = static_cast<ContentKind>(contentKind);
-
-        if (!r.U64(desc.sourceGuid.hi)) return std::nullopt;
-        if (!r.U64(desc.sourceGuid.lo)) return std::nullopt;
-        if (!r.U64(desc.sourceHash)) return std::nullopt;
-        if (!r.U32(desc.importerVersion)) return std::nullopt;
+        desc.contentKind = static_cast<ContentKind>(prefix.contentKind);
+        desc.sourceGuid = prefix.sourceGuid;
+        desc.sourceHash = prefix.sourceHash;
+        desc.importerVersion = prefix.importerVersion;
 
         if (!r.U32(desc.vertexCount)) return std::nullopt;
         if (!r.U32(desc.indexCount)) return std::nullopt;
@@ -558,25 +285,12 @@ namespace Arcane::AssetPipeline
         for (float& c : desc.aabbMin) { if (!r.F32(c)) return std::nullopt; }
         for (float& c : desc.aabbMax) { if (!r.F32(c)) return std::nullopt; }
 
-        std::uint32_t containerSectionCount = 0;
-        if (!r.U32(containerSectionCount)) return std::nullopt;
+        // The container's top-level {tag, offset, size} index, shared by both kinds; the
+        // codec refuses a count that could not fit in the file before it reserves.
+        std::vector<ArtifactSectionEntry> entries;
+        if (!ReadSectionTable(r, raw.size(), entries)) return std::nullopt;
 
-        // Same cheap sanity bound as ReadTextureArtifact's own section table check -- this is
-        // literally the SAME on-disk structure (the container's top-level {tag,offset,size}
-        // index), shared by both kinds.
-        if (static_cast<std::uint64_t>(containerSectionCount) * kSectionEntrySize > raw.size())
-            return std::nullopt;
-
-        std::vector<SectionTableEntry> entries;
-        entries.reserve(containerSectionCount);
-        for (std::uint32_t i = 0; i < containerSectionCount; ++i)
-        {
-            SectionTableEntry e{};
-            if (!r.U32(e.tag) || !r.U64(e.offset) || !r.U64(e.size)) return std::nullopt;
-            entries.push_back(e);
-        }
-
-        for (const SectionTableEntry& e : entries)
+        for (const ArtifactSectionEntry& e : entries)
         {
             std::vector<std::byte> body;
             if (!r.Slice(e.offset, e.size, body))

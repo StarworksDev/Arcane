@@ -75,7 +75,8 @@
 #include <Arcane/Render/RenderErrorLatch.hpp>     // the shared 0/0 latch every case guards
 #include <Arcane/Render/RenderFramePacket.hpp>    // ImDrawSnapshot -- the packet's ImGui copy (F5 plan 1 Task 4)
 #include <Arcane/Render/ExtractFrame.hpp>         // ExtractFrame / ExtractRequest -- the registered-material witness (F5 plan 1 Task 5)
-#include <Arcane/Scene/PhysicsSystem.hpp>         // PhysicsWorld2D, Detail::Physics2D::Adopt / Access -- the extracted overlay witness
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>         // PhysicsWorld2D, Detail::Physics2D::Adopt / Access -- the extracted overlay witness
 #include <Arcane/Material/MaterialSource.hpp>     // BuildMaterialShaderSource / MaterialTemplateFile
 #include <Arcane/Material/MaterialInstance.hpp>
 #include <Arcane/Render/ShaderSourceProvider.hpp>

@@ -14,6 +14,7 @@
 // attaches itself here. ArcaneServer, a bare Runtime in a test, and the editor's
 // embedded server world run with no client at all.
 
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Ecs.hpp>   // the Arcane:: names (aliases) this header's declarations spell; Result is by value
 #include <Arcane/Guid.hpp>
@@ -390,6 +391,8 @@ namespace Arcane
         // Arcane::PhysicsWorld2D destroys the PhysicsWorld, and ArcaneEditor.exe does
         // not link Manifold2D. Nothing to do when no world exists yet.
         void      ResetPhysics();
+        // Resolved by Arcane::ResolveGravity2D (Scene/PhysicsGravity2D.hpp), the one function
+        // the 2D physics hook's EnsureWorld reads too; Engine passes no gravity to a hook.
         // The scene-root Arcane::PhysicsSettings2D component when present, else the
         // `physics.gravity` setting (its project rung, else
         // its default (0, -9.81; +Y up, F4)). Layered on purpose: gravity is
@@ -398,6 +401,7 @@ namespace Arcane
         [[nodiscard]] glm::vec2 ResolvedGravity() const;
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::Access;   // hashes these private members (Plugin/AbiManifestEngine.hpp)
         struct Impl;
         std::unique_ptr<Impl> m_impl;
     };

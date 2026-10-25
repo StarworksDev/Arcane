@@ -1,12 +1,10 @@
-#pragma once
+// PhysicsSystem2D's pass body. It used to be header-only under the pre-attach
+// TypeID rule; AttachAllModules makes one translation unit enough.
 
-// PhysicsSystem2D's pass body. Header-only: Astra's type id is per module,
-// so the host that owns the simulation registry (and the tests) include this
-// header and instantiate the body there. Physics2D.hpp declares PhysicsSystem2D and
-// does not include this file. A game includes Physics2D.hpp.
-
+#include <Arcane/Modules/ArcanePhysics2DApi.hpp>
 #include <Arcane/Physics2D.hpp>
 #include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 
 #include <glm/vec2.hpp>
 
@@ -16,7 +14,7 @@
 
 namespace Arcane
 {
-    inline void PhysicsSystem2D::operator()(Arcane::Registry& reg)
+    ARC_PHYSICS2D_API void PhysicsSystem2D::operator()(Arcane::Registry& reg)
     {
         namespace Phys = Detail::Physics2D::Phys;
 
@@ -86,7 +84,7 @@ namespace Arcane
                     // may have shed PhysicsBodyRef2D with them.
                     if (!reg.IsValid(e)) continue;
                     if (PhysicsBodyRef2D* ref = reg.GetComponent<PhysicsBodyRef2D>(e))
-                        ref->handle = Detail::Physics2D::kInvalidBody;
+                        ref->handle = 0;
                 }
             }
 
@@ -119,9 +117,9 @@ namespace Arcane
                                  const Transform& lt)
                 {
                     // Skip entities that already have a tracked live handle.
-                    if (ref.handle != Detail::Physics2D::kInvalidBody &&
+                    if (ref.handle != 0 &&
                         entityToBody.count(entity) &&
-                        world.IsValid(ref.handle))
+                        world.IsValid(Detail::Physics2D::UnpackBody(ref.handle)))
                     {
                         return;
                     }
@@ -135,7 +133,7 @@ namespace Arcane
                     // {index, gen} to the next entity it mints.
                     if (col.fixtures.empty())
                     {
-                        ref.handle = Detail::Physics2D::kInvalidBody;
+                        ref.handle = 0;
                         return;
                     }
 
@@ -220,7 +218,7 @@ namespace Arcane
                     if (rb.velocity.x != 0.0f || rb.velocity.y != 0.0f)
                         world.SetVelocity(handle, Phys::Vec2(rb.velocity.x, rb.velocity.y));
 
-                    ref.handle           = handle;
+                    ref.handle           = Detail::Physics2D::PackBody(handle);
                     ref.appliedScale     = glm::vec2(lt.scale);   // 2D solver: scale.z is not a fixture dimension
                     entityToBody[entity] = handle;
                     const Identity* identity = std::as_const(reg).GetComponent<Identity>(entity);
@@ -313,8 +311,8 @@ namespace Arcane
                                                             const Transform& lt,
                                                             const Collider2D& col)
                 {
-                    if (ref.handle == Detail::Physics2D::kInvalidBody) return;
-                    if (!world.IsValid(ref.handle))       return;
+                    if (ref.handle == 0) return;
+                    if (!world.IsValid(Detail::Physics2D::UnpackBody(ref.handle)))       return;
                     ++res->reconciled;
 
                     // SCALE: rebuild fixtures when lt.scale changed. Exact compare --
@@ -325,12 +323,12 @@ namespace Arcane
                     if (planarScale != ref.appliedScale)
                     {
                         std::vector<Phys::FixtureHandle> neu =
-                            Detail::Physics2D::RebuildScaledFixtures(world, ref.handle, col, planarScale);
+                            Detail::Physics2D::RebuildScaledFixtures(world, Detail::Physics2D::UnpackBody(ref.handle), col, planarScale);
                         ref.appliedScale = planarScale;
                         // R16: the record follows the new handles. Each dropped
                         // generation is appended (handle + Collider2D index) and
                         // stays resolvable until CaptureStep reads its End.
-                        if (const auto rec = res->bodyRecords.find(Detail::Physics2D::PackBody(ref.handle));
+                        if (const auto rec = res->bodyRecords.find(ref.handle);
                             rec != res->bodyRecords.end())
                         {
                             auto& record = rec->second;
@@ -346,8 +344,8 @@ namespace Arcane
                     // who tilts an entity out of the XY plane in the Inspector
                     // is editing something the 2D solver has no state for, so
                     // that part of the edit is simply not a divergence here.
-                    const Phys::Vec2 bp = world.Position(ref.handle);
-                    const float      ba = static_cast<float>(world.GetAngle(ref.handle));
+                    const Phys::Vec2 bp = world.Position(Detail::Physics2D::UnpackBody(ref.handle));
+                    const float      ba = static_cast<float>(world.GetAngle(Detail::Physics2D::UnpackBody(ref.handle)));
                     if (std::abs(lt.position.x - static_cast<float>(bp.x)) > Detail::Physics2D::kAuthorPosEps ||
                         std::abs(lt.position.y - static_cast<float>(bp.y)) > Detail::Physics2D::kAuthorPosEps ||
                         Detail::Physics2D::AngleDelta(RotationZ(lt.rotation), ba) > Detail::Physics2D::kAuthorRotEps)
@@ -360,10 +358,10 @@ namespace Arcane
                         // that never refreshes. Velocity is zeroed unconditionally ("don't
                         // fling on resume") -- for a Kinematic body with authored rb.velocity
                         // this is a SPEC #1 design consequence (velocity re-apply is a non-goal).
-                        world.SetPosition(ref.handle, Phys::Vec2(lt.position.x, lt.position.y));
-                        world.SetAngle(ref.handle, static_cast<Phys::Real>(RotationZ(lt.rotation)));
-                        world.SetVelocity(ref.handle, Phys::Vec2(0.0f, 0.0f));
-                        world.SetAngularVelocity(ref.handle, static_cast<Phys::Real>(0));
+                        world.SetPosition(Detail::Physics2D::UnpackBody(ref.handle), Phys::Vec2(lt.position.x, lt.position.y));
+                        world.SetAngle(Detail::Physics2D::UnpackBody(ref.handle), static_cast<Phys::Real>(RotationZ(lt.rotation)));
+                        world.SetVelocity(Detail::Physics2D::UnpackBody(ref.handle), Phys::Vec2(0.0f, 0.0f));
+                        world.SetAngularVelocity(Detail::Physics2D::UnpackBody(ref.handle), static_cast<Phys::Real>(0));
                     }
                 });
             }
@@ -385,8 +383,8 @@ namespace Arcane
                                  Transform& lt,
                                  RigidBody2D&    rb)
                 {
-                    if (ref.handle == Detail::Physics2D::kInvalidBody) return;
-                    if (!world.IsValid(ref.handle))          return;
+                    if (ref.handle == 0) return;
+                    if (!world.IsValid(Detail::Physics2D::UnpackBody(ref.handle)))          return;
 
                     // THE 2D WRITE-BACK, NAMED DELIBERATELY (Task 3, F1). The
                     // solver owns the XY plane and the Z-axis turn, so that is
@@ -405,9 +403,9 @@ namespace Arcane
                     //     not be a physics body until the solver is 3D.
                     //   * scale is untouched, as it always was (physics never
                     //     writes scale -- see the appliedScale reconcile above).
-                    const Phys::Vec2 pos = world.Position(ref.handle);
+                    const Phys::Vec2 pos = world.Position(Detail::Physics2D::UnpackBody(ref.handle));
                     lt.position = glm::vec3(pos.x, pos.y, lt.position.z);
-                    lt.rotation = RotationAboutZ(static_cast<float>(world.GetAngle(ref.handle)));
+                    lt.rotation = RotationAboutZ(static_cast<float>(world.GetAngle(Detail::Physics2D::UnpackBody(ref.handle))));
 
                     // Mirror post-step velocity back into RigidBody2D for Dynamic
                     // bodies so authored velocity field stays consistent with physics.
@@ -415,7 +413,7 @@ namespace Arcane
                     // does not modify it, so rb.velocity retains its authored value.
                     if (rb.type == BodyType2D::Dynamic)
                     {
-                        const Phys::Vec2 vel = world.Velocity(ref.handle);
+                        const Phys::Vec2 vel = world.Velocity(Detail::Physics2D::UnpackBody(ref.handle));
                         rb.velocity = glm::vec2(vel.x, vel.y);
                     }
                 });

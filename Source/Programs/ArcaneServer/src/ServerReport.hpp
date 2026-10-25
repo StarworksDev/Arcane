@@ -49,6 +49,7 @@ namespace Arcane::Server
         // --- systems (Astra::SystemScheduler::Size() -- direct, not derived) ---
         std::size_t fixedUpdate = 0, update = 0, render = 0;
         bool        hasPhysics            = false;
+        bool        hasPhysicsWorld       = false;   // additive (schema stays 1): the PhysicsWorld2D resource exists after the ticks
         bool        hasPropagation        = false;
         bool        hasRenderSubmission   = false;   // ALWAYS false: no ClientRuntime exists in this process, by construction
 

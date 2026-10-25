@@ -4,12 +4,18 @@
 // Collider2D (a fixture list) and PhysicsBodyRef2D (the runtime handle). PhysicsSettings2D,
 // the per-scene gravity override, lives in Components.hpp.
 
+#include <Arcane/Core/Constant.hpp>
 #include <Arcane/Ecs.hpp>
 #include <Arcane/Reflection.hpp>
-#include <Arcane/Scene/Physics2DHandles.hpp>
+#include <Arcane/Scene/PhysicsBodyRef2DDisk.hpp>
+#include <Arcane/Scene/TypeList.hpp>
+
+#include <Astra/Serialization/BinaryArchive.hpp>
+#include <Astra/Serialization/BinaryReader.hpp>
 
 #include <glm/vec2.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -96,10 +102,13 @@ namespace Arcane
     };
 
     // Runtime handle. Hidden, not serialized. Re-established by System on load.
+    // handle is the solver's body handle packed as (index << 32) | generation
+    // (Detail::Physics2D::PackBody); 0 is no body. This header names no solver
+    // type, so the packing lives in the physics module.
     struct PhysicsBodyRef2D
     {
-        Detail::Physics2D::BodyHandle handle{};
-        glm::vec2          appliedScale{1.0f, 1.0f};
+        std::uint64_t handle = 0;
+        glm::vec2     appliedScale{1.0f, 1.0f};
     };
 
     ARC_REFLECT_TYPE(RigidBody2D)
@@ -146,6 +155,10 @@ namespace Arcane
             ARC_REFLECT_ATTR(Hidden)
     ARC_END_REFLECT_TYPE()
 
+    // EXACTLY the order RegisterPhysicsComponents2D registers in. Appended after the
+    // scene roster (EngineRoster.hpp); ProjectHost's VerifySharedTypeContext walks both.
+    using PhysicsComponentRoster2D = TypeList<RigidBody2D, Collider2D, PhysicsBodyRef2D>;
+
     inline void RegisterPhysicsComponents2D(Arcane::ComponentRegistry& creg)
     {
         creg.RegisterComponent<RigidBody2D>();
@@ -157,4 +170,56 @@ namespace Arcane
     {
         RegisterPhysicsComponents2D(*reg.GetComponentRegistry());
     }
+}
+
+// Binary form of PhysicsBodyRef2D. Version 2 writes appliedScale only (two
+// floats); the handle is runtime state and loads as 0. Version 1 was the whole
+// component written as bytes (an 8-byte BodyHandle {index, generation}, then
+// the scale), and Migrate reads that explicit layout. JSON is unaffected: the
+// reflected Serializable(false) attributes govern that walk, not this one.
+namespace Astra
+{
+    template<>
+    struct SerializationTraits<Arcane::PhysicsBodyRef2D>
+    {
+        static constexpr bool HasCustomSerializer = true;
+        static constexpr bool IsTrivial = false;
+        ARC_CONSTANT("file format: the PhysicsBodyRef2D binary component version")
+        static constexpr uint32_t Version = 2;
+        ARC_CONSTANT("file format: the oldest PhysicsBodyRef2D binary version Migrate reads")
+        static constexpr uint32_t MinVersion = 1;
+
+        template<typename Archive>
+        static void Serialize(Archive& ar, Arcane::PhysicsBodyRef2D& value)
+        {
+            if (ar.IsLoading())
+                value.handle = 0;
+            float x = value.appliedScale.x;
+            float y = value.appliedScale.y;
+            ar(x);
+            ar(y);
+            if (ar.IsLoading())
+                value.appliedScale = glm::vec2{ x, y };
+        }
+
+        // Reached for every stored version >= MinVersion that is not Version.
+        static void Migrate(BinaryReader& ar, Arcane::PhysicsBodyRef2D& value, uint32_t storedVersion)
+        {
+            if (storedVersion == 1)
+            {
+                Arcane::Detail::PhysicsBodyRef2DDiskV1 old{};
+                ar.ReadBytes(&old, sizeof old);
+                if (ar.HasError())
+                    return;
+                value.handle = 0;
+                value.appliedScale = glm::vec2{ old.scaleX, old.scaleY };
+                return;
+            }
+            // A version this build does not know: the reader has no error
+            // setter, so ask for one byte more than remains. The size check
+            // sets CorruptedData and returns before any copy.
+            std::byte sink{};
+            ar.ReadBytes(&sink, ar.GetRemaining() + 1);
+        }
+    };
 }

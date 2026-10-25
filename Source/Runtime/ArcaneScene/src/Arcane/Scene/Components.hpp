@@ -8,6 +8,7 @@
 
 #include <Arcane/Guid.hpp>
 #include <Arcane/Math/Aabb.hpp>   // WorldBounds::box (F3 plan 1 T2)
+#include <Arcane/Math/DeterministicTrig.hpp>   // the planar bridge below (PR #20)
 
 #include <Arcane/Reflection.hpp>
 
@@ -114,15 +115,22 @@ namespace Arcane
     // the two agree for a planar pose, and degrade identically for one that is
     // not: an out-of-plane rotation projects onto the XY plane rather than
     // producing a different answer per call site.
+    //
+    // Both are DETERMINISTIC (PR #20): the physics write-back stores
+    // RotationAboutZ(solver angle) and the v1 step trace reads RotationZ back,
+    // so libm's sin/cos/atan2 -- which round differently on MSVC, glibc and
+    // Apple -- split the trace by 1 ULP across platforms. The math lives in
+    // ArcaneCore (Math/DeterministicTrig.hpp), compiled once under the
+    // engine's flags: the same bits on every platform. RotationZ computes the
+    // image of +X with glm's own formula, 2(xy + wz) and 1 - 2(y^2 + z^2).
     [[nodiscard]] inline float RotationZ(const glm::quat& q) noexcept
     {
-        const glm::vec3 forward = q * glm::vec3(1.0f, 0.0f, 0.0f);
-        return std::atan2(forward.y, forward.x);
+        return DeterministicTrig::AngleAboutZ(q);
     }
 
     [[nodiscard]] inline glm::quat RotationAboutZ(float radians) noexcept
     {
-        return glm::angleAxis(radians, glm::vec3(0.0f, 0.0f, 1.0f));
+        return DeterministicTrig::QuatAboutZ(radians);
     }
 
     // The primitive a SpriteRenderer draws. Lets the ONE canonical 2D submission

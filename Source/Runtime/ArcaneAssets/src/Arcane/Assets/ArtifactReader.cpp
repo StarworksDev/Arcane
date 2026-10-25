@@ -1,11 +1,10 @@
 #include <Arcane/Assets/ArtifactReader.hpp>
 
+#include <Arcane/Assets/ArtifactCodec.hpp>
+
 #include <Json.hpp>
 
-#include <array>
-#include <bit>
 #include <exception>
-#include <fstream>
 #include <string>
 #include <system_error>
 #include <Arcane/Core/Constant.hpp>
@@ -16,127 +15,14 @@ namespace Arcane
 {
     namespace
     {
-        ARC_CONSTANT("file format: the cooked-artifact version this reader accepts (the pipeline's ArtifactFormat writes it)")
-        constexpr std::uint32_t kArtifactVersion = 1;
-        constexpr std::array<std::uint8_t, 4> kMagic{
-            static_cast<std::uint8_t>('A'), static_cast<std::uint8_t>('R'),
-            static_cast<std::uint8_t>('C'), static_cast<std::uint8_t>('A'),
-        };
-        // On-disk width of one section table entry: tag(u32) + offset(u64) + size(u64).
-        // Mirrors ArtifactFormat.cpp's own kSectionEntrySize -- duplicated, not shared,
-        // per this file's no-pipeline-code banner (ArtifactReader.hpp).
-        ARC_CONSTANT("file format: a cooked artifact's section-table entry size in bytes")
-        constexpr std::uint64_t kSectionEntrySize = 4 + 8 + 8;
-        // On-disk width of one MipTable entry: offset(u64) + size(u64) + width(u32) +
-        // height(u32). Mirrors ArtifactFormat.cpp's own kMipEntrySize -- same duplication
-        // discipline as kSectionEntrySize above.
-        ARC_CONSTANT("file format: a cooked texture's mip-table entry size in bytes")
-        constexpr std::uint64_t kMipEntrySize = 8 + 8 + 4 + 4;
-        // Minimum on-disk width of one MESH SectionTable entry (a zero-length name):
-        // nameLen(u16) + indexOffset(u32) + indexCount(u32) + slotIndex(u32). Mirrors
-        // ArtifactFormat.cpp's own kMeshSectionEntrySize -- same duplication discipline as
-        // kSectionEntrySize/kMipEntrySize above.
-        ARC_CONSTANT("file format: a cooked mesh's section entry size in bytes")
-        constexpr std::uint64_t kMeshSectionEntrySize = 2 + 4 + 4 + 4;
-        // Mirrors AssetPipeline::ContentKind's numeric values (ArtifactFormat.hpp) -- kept
-        // in lockstep BY HAND, same discipline as ArtifactPixelFormatValue's own mirrored
-        // values (ArtifactReader.hpp).
-        ARC_CONSTANT("file format: the artifact content-kind tag of a texture")
-        constexpr std::uint8_t kContentKindTexture = 1;
-        ARC_CONSTANT("file format: the artifact content-kind tag of a mesh")
-        constexpr std::uint8_t kContentKindMesh = 2;
-
-        // Bounds-checked little-endian reader over an in-memory buffer, independently
-        // reimplemented from ArtifactFormat.cpp's own ByteReader (that class is private to
-        // the pipeline's anonymous namespace and is not reachable from here even if we
-        // wanted it -- ArcaneClient does not link ArcaneAssetPipeline at all). Every
-        // accessor returns false (never throws/UB) on a short read so callers can turn ANY
-        // truncation into a single Missing refusal.
-        class ByteReader
-        {
-        public:
-            ByteReader(const std::byte* data, std::size_t size) noexcept : m_data(data), m_size(size) {}
-
-            [[nodiscard]] bool U8(std::uint8_t& out) noexcept
-            {
-                if (m_pos + 1 > m_size) return false;
-                out = static_cast<std::uint8_t>(m_data[m_pos]);
-                m_pos += 1;
-                return true;
-            }
-
-            [[nodiscard]] bool U16(std::uint16_t& out) noexcept
-            {
-                if (m_pos + 2 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 2; ++i)
-                    out |= static_cast<std::uint16_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 2;
-                return true;
-            }
-
-            [[nodiscard]] bool U32(std::uint32_t& out) noexcept
-            {
-                if (m_pos + 4 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 4; ++i)
-                    out |= static_cast<std::uint32_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 4;
-                return true;
-            }
-
-            [[nodiscard]] bool U64(std::uint64_t& out) noexcept
-            {
-                if (m_pos + 8 > m_size) return false;
-                out = 0;
-                for (int i = 0; i < 8; ++i)
-                    out |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(m_data[m_pos + i])) << (8 * i);
-                m_pos += 8;
-                return true;
-            }
-
-            // Floats go through their EXACT bit pattern via std::bit_cast, never a numeric
-            // conversion -- same discipline as ArtifactFormat.cpp's own F32 accessor (an
-            // AABB that round-trips approximately is an AABB that fails the mesh's own
-            // framing math on the second load).
-            [[nodiscard]] bool F32(float& out) noexcept
-            {
-                std::uint32_t bits = 0;
-                if (!U32(bits)) return false;
-                out = std::bit_cast<float>(bits);
-                return true;
-            }
-
-            // Copies `count` bytes starting at ABSOLUTE offset `at` against the whole
-            // backing buffer (not the sequential cursor) -- section bodies are addressed by
-            // the section table's own offset/size, not read in sequence.
-            [[nodiscard]] bool Slice(std::uint64_t at, std::uint64_t count, std::vector<std::byte>& out) const
-            {
-                if (at > m_size || count > m_size - at) return false;
-                const auto* begin = m_data + static_cast<std::size_t>(at);
-                out.assign(begin, begin + static_cast<std::size_t>(count));
-                return true;
-            }
-
-            [[nodiscard]] std::size_t Pos() const noexcept { return m_pos; }
-
-        private:
-            const std::byte* m_data;
-            std::size_t m_pos = 0;
-            std::size_t m_size;
-        };
-
-        struct SectionTableEntry
-        {
-            std::uint32_t tag;
-            std::uint64_t offset;
-            std::uint64_t size;
-        };
+        // The version, magic, section-entry widths, ByteReader, the common prefix parse and the
+        // container section table all live in ArtifactCodec.hpp -- shared with the pipeline's
+        // writers, so the two sides cannot drift.
 
         // Fixed header, parsed out of a whole-file buffer. Mirrors
         // AssetPipeline::TextureArtifactDesc field-for-field (ArtifactFormat.hpp), minus the
-        // pipeline type -- see this file's header banner for why this is a hand-mirrored
-        // reimplementation rather than a shared struct.
+        // pipeline type (the runtime reader does not include pipeline headers). The byte layout
+        // itself is owned by ArtifactCodec.
         struct ParsedHeader
         {
             std::uint8_t  contentKind = 0;
@@ -151,42 +37,11 @@ namespace Arcane
             std::uint32_t thumbWidth = 0, thumbHeight = 0;
         };
 
-        // The KIND-AGNOSTIC COMMON PREFIX every artifact kind shares, laid out before
-        // any kind-specific field by F2b's own design (ArtifactFormat.hpp's header
-        // ordering). Split out at F2c Task 4 because ParseHeader below FAILS CLOSED on
-        // a non-Texture contentKind -- correct for a texture READ, fatal for the guid
-        // SCAN, which must recognise every kind or a cooked mesh artifact resolves as
-        // Missing forever no matter how many times it is cooked.
-        struct CommonPrefix
-        {
-            std::uint8_t  contentKind = 0;
-            Guid          sourceGuid;
-            std::uint64_t sourceHash = 0;
-            std::uint32_t importerVersion = 0;
-        };
-
-        [[nodiscard]] bool ParseCommonPrefix(ByteReader& r, CommonPrefix& out) noexcept
-        {
-            std::uint8_t magic[4]{};
-            for (std::uint8_t& b : magic)
-                if (!r.U8(b)) return false;
-            if (magic[0] != kMagic[0] || magic[1] != kMagic[1] ||
-                magic[2] != kMagic[2] || magic[3] != kMagic[3])
-                return false;
-
-            std::uint32_t version = 0;
-            if (!r.U32(version)) return false;
-            if (version != kArtifactVersion) return false;
-
-            if (!r.U8(out.contentKind)) return false;
-            // NO contentKind GATE HERE, deliberately: this function's whole purpose is
-            // to answer "whose guid is this" for ANY kind. The per-kind readers below
-            // apply their own fail-closed check, unchanged.
-            if (!r.U64(out.sourceGuid.hi)) return false;
-            if (!r.U64(out.sourceGuid.lo)) return false;
-            if (!r.U64(out.sourceHash)) return false;
-            return r.U32(out.importerVersion);
-        }
+        // The KIND-AGNOSTIC COMMON PREFIX is the codec's ArtifactCommonPrefix / ParseCommonPrefix.
+        // ParseHeader below FAILS CLOSED on a non-Texture contentKind -- correct for a texture
+        // READ, fatal for the guid SCAN, which must recognise every kind or a cooked mesh
+        // artifact resolves as Missing forever; the scan goes through ParseCommonPrefix directly.
+        using CommonPrefix = ArtifactCommonPrefix;
 
         // Parses the common prefix, then the TEXTURE-specific tail ONLY -- stops before
         // the section table. Used both by the full texture read (ReadArtifactFile below)
@@ -202,7 +57,7 @@ namespace Arcane
             // non-Texture artifact here, rather than silently parsing (misreading) a
             // future/other artifact kind's bytes as if they were this reader's own
             // Texture shape.
-            if (prefix.contentKind != kContentKindTexture) return false;
+            if (prefix.contentKind != static_cast<std::uint8_t>(ContentKind::Texture)) return false;
 
             out.contentKind     = prefix.contentKind;
             out.sourceGuid      = prefix.sourceGuid;
@@ -225,12 +80,10 @@ namespace Arcane
 
         [[nodiscard]] std::optional<std::vector<std::byte>> ReadWholeFile(const std::filesystem::path& path)
         {
-            // Fuzz finding (fuzz/regressions/artifact/gltf-empty-uri-opens-directory,
-            // 2026-10-07): a .gltf buffer with "uri": "" (or ".", "..", any directory)
-            // resolves to the source's own DIRECTORY, and a tellg-sized read of it threw
-            // out of this exception-free path. ReadRegularFile reads only a regular file
-            // under a size cap and refuses everything else with nullopt.
-            return Arcane::ReadRegularFile(path);
+            // The codec reads only a regular file under the size cap (fuzz finding
+            // fuzz/regressions/artifact/gltf-empty-uri-opens-directory) and refuses everything
+            // else with nullopt.
+            return ReadArtifactBytes(path);
         }
 
         // REVIEW FIX (post-Task-7): the fixed header ParseHeader actually reads is exactly
@@ -244,31 +97,8 @@ namespace Arcane
         ARC_CONSTANT("file format: the header-only read size, headroom over the artifact header's exact length")
         constexpr std::size_t kHeaderProbeBytes = 256;
 
-        // Reads at most `maxBytes` from the START of `path` -- NEVER the whole file. A
-        // file shorter than `maxBytes` on disk reads however many bytes actually exist;
-        // ParseHeader's own bounds-checked accessors then correctly refuse anything
-        // truncated inside the header, exactly as they would reading the same short buffer
-        // out of a full-file read. `ifs.bad()` (a genuine I/O error) is distinguished from
-        // merely hitting EOF before `maxBytes` (which sets failbit/eofbit, not badbit, and
-        // is the ordinary "short file" case, not a failure).
-        [[nodiscard]] std::optional<std::vector<std::byte>> ReadFilePrefix(
-            const std::filesystem::path& path, std::size_t maxBytes)
-        {
-            std::error_code ec;
-            if (!std::filesystem::is_regular_file(path, ec) || ec) return std::nullopt;
-
-            std::ifstream ifs(path, std::ios::binary);
-            if (!ifs) return std::nullopt;
-
-            std::vector<std::byte> raw(maxBytes);
-            ifs.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(maxBytes));
-            if (ifs.bad()) return std::nullopt;
-
-            const std::streamsize got = ifs.gcount();
-            if (got < 0) return std::nullopt;
-            raw.resize(static_cast<std::size_t>(got));
-            return raw;
-        }
+        // The bounded prefix read (regular file only, never the whole artifact) is the codec's
+        // ReadArtifactPrefixBytes.
 
         // Common-prefix-only parse -- FindArtifactForGuid's workhorse, one call per
         // directory-scan candidate. REVIEW FIX (post-Task-7): this used to call
@@ -286,7 +116,7 @@ namespace Arcane
         // content kind.
         [[nodiscard]] std::optional<CommonPrefix> ReadCommonPrefixOnly(const std::filesystem::path& path)
         {
-            const std::optional<std::vector<std::byte>> raw = ReadFilePrefix(path, kHeaderProbeBytes);
+            const std::optional<std::vector<std::byte>> raw = ReadArtifactPrefixBytes(path, kHeaderProbeBytes);
             if (!raw) return std::nullopt;
 
             ByteReader r(raw->data(), raw->size());
@@ -368,35 +198,21 @@ namespace Arcane
             FullyParsed out;
             if (!ParseHeader(r, out.header)) return std::nullopt;
 
-            std::uint32_t sectionCount = 0;
-            if (!r.U32(sectionCount)) return std::nullopt;
-
-            // Same cheap sanity bound as ArtifactFormat.cpp's reader: a section count that
-            // could not possibly fit in the remaining file is corrupt, and rejecting it here
-            // avoids reserving an attacker-controlled amount of memory before the per-entry
-            // bounds checks below get a chance to fail closed.
-            if (static_cast<std::uint64_t>(sectionCount) * kSectionEntrySize > raw->size())
-                return std::nullopt;
-
-            std::vector<SectionTableEntry> entries;
-            entries.reserve(sectionCount);
-            for (std::uint32_t i = 0; i < sectionCount; ++i)
-            {
-                SectionTableEntry e{};
-                if (!r.U32(e.tag) || !r.U64(e.offset) || !r.U64(e.size)) return std::nullopt;
-                entries.push_back(e);
-            }
+            // The container's top-level {tag, offset, size} index (shared by both kinds); the
+            // codec refuses a count that could not fit in the file before it reserves.
+            std::vector<ArtifactSectionEntry> entries;
+            if (!ReadSectionTable(r, raw->size(), entries)) return std::nullopt;
 
             ByteReader whole(raw->data(), raw->size());   // Slice() addresses the WHOLE buffer
-            for (const SectionTableEntry& e : entries)
+            for (const ArtifactSectionEntry& e : entries)
             {
                 std::vector<std::byte> body;
                 if (!whole.Slice(e.offset, e.size, body))
                     return std::nullopt;   // section runs past EOF -- truncated/corrupt file
 
-                switch (e.tag)
+                switch (static_cast<SectionTag>(e.tag))
                 {
-                case 1:   // MipTable
+                case SectionTag::MipTable:   // MipTable
                 {
                     ByteReader mr(body.data(), body.size());
                     std::uint32_t mipCount = 0;
@@ -423,10 +239,10 @@ namespace Arcane
                     }
                     break;
                 }
-                case 2:   // Payload
+                case SectionTag::Payload:   // Payload
                     out.payload = std::move(body);
                     break;
-                case 3:   // Thumbnail
+                case SectionTag::Thumbnail:   // Thumbnail
                     out.thumbRgba = std::move(body);
                     break;
                 default:
@@ -442,15 +258,15 @@ namespace Arcane
         }
 
         // ---- Mesh artifacts (F2c Task 4) --------------------------------------------------
-        // Independent reimplementation of the mesh half -- see ArtifactReader.hpp's own
-        // header banner (MESH TAIL layout) for the contract this mirrors field-for-field
+        // The byte codec lives in ArcaneAssets (ArtifactCodec.hpp); see ArtifactReader.hpp's
+        // header banner (MESH TAIL layout) for the contract these types mirror field-for-field
         // from AssetPipeline::MeshArtifactDesc/MeshArtifactSection, without including that
         // header.
 
         // Fixed mesh header tail, parsed out of a whole-file buffer. Mirrors
         // AssetPipeline::MeshArtifactDesc field-for-field (ArtifactFormat.hpp), minus the
-        // pipeline type -- see this file's header banner for why this is a hand-mirrored
-        // reimplementation rather than a shared struct.
+        // pipeline type (the runtime reader does not include pipeline headers). The byte layout
+        // itself is owned by ArtifactCodec.
         struct ParsedMeshHeader
         {
             std::uint8_t  contentKind = 0;
@@ -477,7 +293,7 @@ namespace Arcane
             // Fail-closed contentKind check -- the mesh reader's own copy of the same rule
             // ParseHeader (texture) carries: refuse rather than misread a non-Mesh
             // artifact's bytes as this reader's own Mesh tail shape.
-            if (prefix.contentKind != kContentKindMesh) return false;
+            if (prefix.contentKind != static_cast<std::uint8_t>(ContentKind::Mesh)) return false;
 
             out.contentKind     = prefix.contentKind;
             out.sourceGuid      = prefix.sourceGuid;
@@ -519,37 +335,24 @@ namespace Arcane
             FullyParsedMesh out;
             if (!ParseMeshHeader(r, out.header)) return std::nullopt;
 
-            std::uint32_t containerSectionCount = 0;
-            if (!r.U32(containerSectionCount)) return std::nullopt;
-
-            // Same cheap sanity bound ReadArtifactFile's own section table check applies --
-            // this is literally the SAME on-disk structure (the container's top-level
-            // {tag,offset,size} index), shared by both kinds.
-            if (static_cast<std::uint64_t>(containerSectionCount) * kSectionEntrySize > raw->size())
-                return std::nullopt;
-
-            std::vector<SectionTableEntry> entries;
-            entries.reserve(containerSectionCount);
-            for (std::uint32_t i = 0; i < containerSectionCount; ++i)
-            {
-                SectionTableEntry e{};
-                if (!r.U32(e.tag) || !r.U64(e.offset) || !r.U64(e.size)) return std::nullopt;
-                entries.push_back(e);
-            }
+            // The container's top-level {tag, offset, size} index (shared by both kinds); the
+            // codec refuses a count that could not fit in the file before it reserves.
+            std::vector<ArtifactSectionEntry> entries;
+            if (!ReadSectionTable(r, raw->size(), entries)) return std::nullopt;
 
             ARC_CONSTANT("file format: the cooked mesh vertex stride (8 floats)")
             constexpr std::uint64_t kVertexStride = 8 * 4;   // 8 floats, 4 bytes each
 
             ByteReader whole(raw->data(), raw->size());   // Slice() addresses the WHOLE buffer
-            for (const SectionTableEntry& e : entries)
+            for (const ArtifactSectionEntry& e : entries)
             {
                 std::vector<std::byte> body;
                 if (!whole.Slice(e.offset, e.size, body))
                     return std::nullopt;   // section runs past EOF -- truncated/corrupt file
 
-                switch (e.tag)
+                switch (static_cast<SectionTag>(e.tag))
                 {
-                case 4:   // VertexData
+                case SectionTag::VertexData:   // VertexData
                 {
                     if (body.size() != static_cast<std::uint64_t>(out.header.vertexCount) * kVertexStride)
                         return std::nullopt;
@@ -564,7 +367,7 @@ namespace Arcane
                     }
                     break;
                 }
-                case 5:   // IndexData
+                case SectionTag::IndexData:   // IndexData
                 {
                     if (body.size() != static_cast<std::uint64_t>(out.header.indexCount) * 4)
                         return std::nullopt;
@@ -580,7 +383,7 @@ namespace Arcane
                     }
                     break;
                 }
-                case 6:   // SectionTable -- the MESH's own per-section records, NOT the
+                case SectionTag::SectionTable:   // SectionTable -- the MESH's own per-section records, NOT the
                           // container's own section table above.
                 {
                     ByteReader mr(body.data(), body.size());
@@ -663,25 +466,8 @@ namespace Arcane
             return out;
         }
 
-        // FNV-1a 64-bit over just the source bytes -- the SAME algorithm and constants
-        // TextureImporter.cpp's own HashSourceBytes uses to write an artifact's sourceHash
-        // field, duplicated here rather than shared (this file's no-pipeline-code banner).
-        // TextureImporter.cpp's own comment notes it is ALREADY a second copy of CookKey.cpp's
-        // private Fnv1a64 -- this makes a third, the same "no std::hash for anything that
-        // lands on disk, duplicate per translation boundary" discipline the pipeline itself
-        // already established twice over.
-        [[nodiscard]] std::uint64_t HashSourceBytes(std::span<const std::byte> bytes) noexcept
-        {
-            std::uint64_t h = 14695981039346656037ULL;
-            ARC_CONSTANT("file format: the FNV-1a 64-bit prime of the on-disk source hash (the pipeline's CookKey agrees)")
-            constexpr std::uint64_t prime = 1099511628211ULL;
-            for (std::byte b : bytes)
-            {
-                h ^= static_cast<std::uint64_t>(static_cast<std::uint8_t>(b));
-                h *= prime;
-            }
-            return h;
-        }
+        // HashSourceBytes (FNV-1a 64) is the codec's: the pipeline's importers write an
+        // artifact's sourceHash through the same function.
 
         // Review fix (post-Task-11): ONE hex digit's value, or -1 -- mirrors
         // ThirdParty/cgltf/cgltf.h's own file-local `cgltf_unhex` exactly (0-9, A-F, a-f;
@@ -696,8 +482,8 @@ namespace Arcane
         }
 
         // Review fix (post-Task-11): percent-decode a URI, mirroring
-        // ThirdParty/cgltf/cgltf.h's own `cgltf_decode_uri` BYTE FOR BYTE (this file's
-        // no-shared-code banner -- cgltf is a pipeline-side dependency, never linked here).
+        // ThirdParty/cgltf/cgltf.h's own `cgltf_decode_uri` BYTE FOR BYTE (cgltf is a
+        // pipeline-side dependency, never linked into this runtime library).
         // ReadClientExternalBuffers below is the ONE caller, and it is REQUIRED: a glTF
         // buffer uri is percent-encoded whenever it carries a reserved character (a space
         // -> "%20", non-ASCII -- common in an artist's export), and the pipeline's OWN

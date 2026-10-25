@@ -16,7 +16,8 @@
 #include <Arcane/Host/EarlyConfig.hpp>
 #include <Arcane/Host/HostConfig.hpp>
 #include <Arcane/Jobs/JobSystem.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Sim/RunLoop.hpp>
 #include <Arcane/Sim/SimSettings.hpp>
 #include <Arcane/Render/RenderDeviceSettings.hpp>

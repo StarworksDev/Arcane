@@ -5,7 +5,6 @@
 #include <Arcane/Assets/Assets.hpp>
 #include <Arcane/Config/Bindings/AstraBinding.hpp>
 #include <Arcane/Config/Bindings/JobsBinding.hpp>
-#include <Arcane/Config/Bindings/Physics2DBinding.hpp>
 #include <Arcane/Config/CVarConfig.hpp>
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Config/Config.hpp>
@@ -22,13 +21,12 @@
 #include <Arcane/Scene/BoundsSystem.hpp>        // BoundsSystem (engine-owned, instantiated IN this module; F3 plan 1 T2)
 #include <Arcane/Scene/Components.hpp>          // Transform / .../MeshRenderer (engine roster types)
 #include <Arcane/Scene/EngineRoster.hpp>        // EngineComponentRoster -- THE roster list (registered below, verified in ProjectHost.hpp)
-#include <Arcane/Scene/PhysicsComponents.hpp>   // Arcane::RigidBody2D/Arcane::Collider2D/Arcane::PhysicsBodyRef2D (engine roster types)
-#include <Arcane/Scene/PhysicsSystem.hpp>       // Arcane::PhysicsSystem2D/Arcane::PhysicsWorld2D (instantiated IN this module)
-#include <Arcane/Scene/SceneResources.hpp>   // SceneRoot (ResolvedGravity's scene-root lookup)
+#include <Arcane/Scene/PhysicsGravity2D.hpp>   // ResolveGravity2D (ResolvedGravity forwards to it)
 #include <Arcane/Scene/TransformSystems.hpp>    // TransformPropagationSystem (engine-owned, instantiated IN this module)
 #include <Arcane/Serialization/RegistrySnapshot.hpp>
 #include <Arcane/Serialization/ResourceSerialization.hpp>
 #include <Arcane/Sim/NetDriver.hpp>   // INetDriver::IsActive (the hot-reload refusal asks it)
+#include <Arcane/Sim/SimHook.hpp>
 #include <Arcane/Sim/SimSettings.hpp>
 
 #include <Astra/Registry/Registry.hpp>
@@ -324,6 +322,11 @@ namespace Arcane
             // early WorldTransform resolve). Ids are a first-touch counter, so
             // same order == same numbering as before.
             RegisterRoster(*engineModule, EngineComponentRoster{});
+            // The sim hooks' component types (the 2D physics module's three), in hook
+            // order, so their ids follow WorldBounds whatever the DLL load order was.
+            // A secondary world sharing this registry runs the same functions again.
+            for (const SimHook& hook : SimHooks())
+                if (hook.RegisterComponents) hook.RegisterComponents(*components);
 
             registry   = std::make_unique<Astra::Registry>(components, ToAstraConfig(Settings<AstraMemorySettings>(), sched));
             schedulers = std::make_unique<SystemSchedulers>(sched);
@@ -362,17 +365,18 @@ namespace Arcane
         : m_impl(std::make_unique<Impl>(process, mode, std::move(sharedComponents)))
     {
         // Mosaic diagnostics: install the log sink + assert handler into THIS module
-        // (ArcaneCore.dll) so Astra/Manifold2D/Mosaic code running here routes to the
+        // (ArcaneCore.dll) so Astra/Mosaic code running here routes to the
         // engine logger. Each module installs its own (per-module Mosaic storage);
         // ClientRuntime's ctor does the same for ArcaneClient.dll.
         Arcane::Log::InstallMosaicSink();
         Arcane::Assert::InstallMosaicHandler();
         InstallEngineSystems();
-        // The 2D physics per-frame event window clears at frame begin (spec
-        // 2026-10-08 s7.2): every reader (Update, OnUpdate, render) ran before.
+        // Per-frame event windows clear at frame begin (spec 2026-10-08 s7.2): every
+        // reader (Update, OnUpdate, render) ran before. Each sim hook owns its own.
         m_impl->loop->SetFrameBeginHook([](Astra::Registry& reg)
         {
-            if (Arcane::PhysicsWorld2D* res = reg.GetResource<Arcane::PhysicsWorld2D>()) res->BeginFrame();
+            for (const SimHook& hook : SimHooks())
+                if (hook.FrameBegin) hook.FrameBegin(reg);
         });
         // ...and then whatever the LOADED module already registered, for THIS mode:
         // a Runtime built after the module loaded (the editor's embedded server
@@ -448,10 +452,11 @@ namespace Arcane
         // PhysicsEditPass read, so every later step agrees with the loop.
         m_impl->loopCfg.fixedHz = hz;
         m_impl->loop->SetFixedHz(hz);
-        // Arcane::PhysicsSystem2D captured its dt at AddSystem: re-add it at the new
-        // rate (its Before<TransformPropagationSystem> keeps it ordered).
-        m_impl->schedulers->fixedUpdate.RemoveSystem<Arcane::PhysicsSystem2D>();
-        InstallEngineSystems();
+        // A hook's system captured its dt at AddSystem: each hook re-adds it at the
+        // new rate (its Before<TransformPropagationSystem> keeps it ordered).
+        const float fixedDt = static_cast<float>(1.0 / hz);
+        for (const SimHook& hook : SimHooks())
+            if (hook.ReplaceFixedRate) hook.ReplaceFixedRate(m_impl->schedulers->fixedUpdate, fixedDt);
     }
 
     Astra::TypeContext*    Runtime::TypeContext()   noexcept { return m_impl->context; }
@@ -549,7 +554,7 @@ namespace Arcane
         if (resources.IsErr())
             return false;
 
-        // No strip needed: Arcane::PhysicsWorld2D/Arcane::PhysicsInterpBuffer2D (like Time and
+        // No strip needed: the sim hooks' world resources (like Time and
         // GameInput) are AstraTransientResource, so the blob never carried them
         // and the loaded registry has none -- the next EnsurePhysics mints both
         // fresh, the way propagation re-derives WorldTransform. (They used to be
@@ -595,7 +600,7 @@ namespace Arcane
         // places them with Astra::Before/After against these types. Each behind
         // its own HasSystem guard: AlreadyRegistered is the only failure and
         // this runs from the ctor AND after every ClearSystems. Order within a
-        // scheduler: Arcane::PhysicsSystem2D declares Before<TransformPropagationSystem>,
+        // scheduler: a physics hook's system declares Before<TransformPropagationSystem>,
         // BoundsSystem declares After<TransformPropagationSystem> (F3 plan 1 T2:
         // it reads the composed WorldTransform); insertion order carries the
         // rest (Astra's reorder is stable).
@@ -604,11 +609,10 @@ namespace Arcane
         // construction and on every OnSystemsCleared) and a Core-only host has
         // exactly the systems it can execute.
         auto& fixed  = m_impl->schedulers->fixedUpdate;
-        if (!fixed.HasSystem<Arcane::PhysicsSystem2D>())
-        {
-            const float fixedDt = static_cast<float>(1.0 / m_impl->loopCfg.fixedHz);
-            std::ignore = fixed.AddSystem<Arcane::PhysicsSystem2D>(fixedDt, /*stepWorld*/ true);
-        }
+        // The sim hooks' systems (2D physics today), before transform propagation.
+        const float fixedDt = static_cast<float>(1.0 / m_impl->loopCfg.fixedHz);
+        for (const SimHook& hook : SimHooks())
+            if (hook.InstallSystems) hook.InstallSystems(fixed, fixedDt);
         if (!fixed.HasSystem<TransformPropagationSystem>())
             std::ignore = fixed.AddSystem<TransformPropagationSystem>();
         if (!fixed.HasSystem<BoundsSystem>())
@@ -617,58 +621,35 @@ namespace Arcane
 
     glm::vec2 Runtime::ResolvedGravity() const
     {
-        const CVarVec2 p = Settings<Arcane::PhysicsWorldSettings2D>().gravity;
-        glm::vec2 g{p.x, p.y};
-        if (const SceneRoot* sr = m_impl->registry->GetResource<SceneRoot>())
-            if (const Arcane::PhysicsSettings2D* ps = std::as_const(*m_impl->registry).GetComponent<Arcane::PhysicsSettings2D>(sr->entity))
-                g = ps->gravity;
-        return g;
+        return ResolveGravity2D(*m_impl->registry);
     }
 
     void Runtime::EnsurePhysics()
     {
+        // Engine resolves no gravity and names no solver: each hook mints (or keeps)
+        // its own world from the registry. The scheduler is this Runtime's pool;
+        // a hook decides whether its solver uses it.
         Astra::Registry& reg = *m_impl->registry;
-        const glm::vec2 g = ResolvedGravity();
-        Arcane::PhysicsWorld2D* res = reg.GetResource<Arcane::PhysicsWorld2D>();
-        if (res && Arcane::Detail::Physics2D::Access::Solver(*res))
-        {
-            const auto cur = Arcane::Detail::Physics2D::Access::Solver(*res)->Gravity();
-            if (static_cast<float>(cur.x) == g.x && static_cast<float>(cur.y) == g.y)
-                return;
-            // Gravity changed: replace the world. Bodies re-mint from their
-            // current Transforms on the next pass (PASS 1 sees every handle
-            // invalid against the new world; PASS 2 self-heals).
-        }
-        // physics.* (settings arc S2): NextWorld -- read here, where a world is minted.
-        const Arcane::PhysicsWorldSettings2D& settings = Settings<Arcane::PhysicsWorldSettings2D>();
-        Manifold2D::Physics::WorldDef wd = Arcane::Detail::Physics2D::ToWorldDef(settings);
-        wd.gravityX = g.x;
-        wd.gravityY = g.y;
-        auto world = std::make_unique<Manifold2D::Physics::PhysicsWorld>(wd);
-        // physics.parallelSolver (default OFF: the serial solver, bit-identical
-        // to before). The pool is this Runtime's JobSystem, which outlives every
-        // registry (Impl declares it first).
-        if (settings.parallelSolver)
-            world->SetExecutor(m_impl->sched.get());
-        reg.SetResource(Arcane::Detail::Physics2D::Adopt(std::move(world)));
-        reg.SetResource(Arcane::PhysicsInterpBuffer2D{});
+        for (const SimHook& hook : SimHooks())
+            if (hook.EnsureWorld) hook.EnsureWorld(reg, m_impl->sched.get());
     }
 
     void Runtime::PhysicsEditPass()
     {
         const float fixedDt = static_cast<float>(1.0 / m_impl->loopCfg.fixedHz);
-        Arcane::PhysicsSystem2D{ fixedDt, /*stepWorld*/ false }(*m_impl->registry);
+        for (const SimHook& hook : SimHooks())
+            if (hook.EditPass) hook.EditPass(*m_impl->registry, fixedDt);
     }
 
     void Runtime::ResetPhysics()
     {
-        // Drop the transient physics pair on the LIVE registry (a restore never
-        // carries it either): the next EnsurePhysics sees neither and mints both. PASS 2 then
-        // re-mints every body from its components -- and PASS 1/2 clear any
-        // Arcane::PhysicsBodyRef2D the fresh world does not track, so nothing here can
-        // leave a handle behind for the fresh world to reissue to someone else.
-        m_impl->registry->RemoveResource<Arcane::PhysicsWorld2D>();
-        m_impl->registry->RemoveResource<Arcane::PhysicsInterpBuffer2D>();
+        // Each hook drops the transient world resources it minted on the LIVE registry
+        // (a restore never carries them either): the next EnsurePhysics sees none and
+        // mints fresh. PASS 2 then re-mints every body from its components -- and PASS
+        // 1/2 clear any body reference the fresh world does not track, so nothing here
+        // can leave a handle behind for the fresh world to reissue to someone else.
+        for (const SimHook& hook : SimHooks())
+            if (hook.ResetWorld) hook.ResetWorld(*m_impl->registry);
     }
 
     namespace

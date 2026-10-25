@@ -76,7 +76,7 @@ first failing step and exits with its code:
 | Step | `scripts/ci/build.sh <cfg> [-j N]` (Linux, macOS) | `scripts/ci/build.ps1 <cfg> [-Jobs N]` (Windows) |
 |---|---|---|
 | generate | `premake5 --cc=<gcc\|clang> gmake` | `GenerateProjects.bat` (vs2026) |
-| engine | `make -k ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient` | `msbuild Arcane.slnx` |
+| engine | `make -k ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest` (then `arcane-abi-digest --check`) | `msbuild Arcane.slnx` |
 | game | `arcbuild build --project ReferenceProject --config <cfg> --sdk <checkout>` | the same |
 | hosts | `make -k ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests` (their postbuild stages ReferenceProject, `Binaries/` included) | `msbuild Arcane.slnx` again, so every host restages the game module |
 

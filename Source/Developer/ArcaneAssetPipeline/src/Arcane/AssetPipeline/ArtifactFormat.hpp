@@ -16,14 +16,9 @@
 // artifact non-deterministic across toolchains/configs, which breaks content-hash-based caching
 // in later tasks (spec s4).
 //
-// BYTE-CONTRACT PEER (F2b Task 6): Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.hpp/.cpp
-// mirrors BOTH pairs by hand -- a DELIBERATE, INDEPENDENT reimplementation, not a shared
-// consumer of this header (ArcaneClient must never link/include ArcaneAssetPipeline). It
-// mirrors the texture pair (ReadClientArtifact, F2b) AND the mesh pair (ReadClientMeshArtifact,
-// F2c Task 4). The two sides stay byte-compatible ONLY by both following this written contract
-// by hand; a layout change to EITHER pair must be mirrored there, or the cross-lib round-trip
-// cases (ArtifactReaderTest.cpp for Texture, MeshArtifactReaderTest.cpp for Mesh -- fixtures
-// written through THIS file's writers, read back through that file's readers) fail loudly.
+// The byte codec lives in ArcaneAssets (Source/Runtime/ArcaneAssets/src/Arcane/Assets/
+// ArtifactCodec.hpp): the version constant, SectionTag, ContentKind, the common prefix, the
+// container section table and the source hash. The pipeline keeps cook policy.
 //
 // MESH READER VALIDATION RULES shared by BOTH readers, restated here so neither side drifts
 // (ReadMeshArtifact below; ReadClientMeshArtifact on the client): indexWidth == 4;
@@ -45,6 +40,7 @@
 #include <vector>
 
 #include "Arcane/Guid.hpp"
+#include <Arcane/Assets/ArtifactCodec.hpp>
 
 namespace Arcane::AssetPipeline
 {
@@ -65,36 +61,10 @@ namespace Arcane::AssetPipeline
         Tex3D_Reserved,
     };
 
-    // Tagged-section table entries. Values are stable on disk -- never renumber an existing
-    // tag; a future section kind adds a NEW value. ReadTextureArtifact/ReadMeshArtifact each
-    // skip any tag they do not recognise instead of failing (forward-compat pin).
-    //
-    // 1-3 are the texture kind's; 4-7 are the mesh kind's. The two kinds share ONE tag space
-    // on purpose: the container's skip-unknown rule (each reader's default: case) is what
-    // keeps a reader of one kind safe in the presence of the other kind's tags, and one shared
-    // space makes that property trivially auditable (there is only one enum to check).
-    enum class SectionTag : std::uint32_t
-    {
-        MipTable     = 1,
-        Payload      = 2,
-        Thumbnail    = 3,   // MESH ALSO: reserved, UNWRITTEN (R5 harvests editor-side)
-        VertexData   = 4,
-        IndexData    = 5,
-        SectionTable = 6,   // the MESH's per-section records -- NOT the container's
-                            // own section table, which is a fixed structure with no tag
-        Tangents     = 7,   // reserved, UNWRITTEN (spec s2; A3 records the handedness
-                            // obligation this tag inherits when it is first written)
-    };
-
-    // Discriminates which artifact kind a given .arcart file holds. F2c's mesh artifacts
-    // (Mesh) discriminate on this same header field the texture kind (Texture) reserved it
-    // for -- both writer/reader pairs check it and fail closed on a mismatch (see the
-    // contentKind gate near the top of each Read*Artifact).
-    enum class ContentKind : std::uint8_t
-    {
-        Texture = 1,
-        Mesh    = 2,
-    };
+    // SectionTag and ContentKind are owned by the codec header; re-exported here so the
+    // pipeline's writers, importers and tools keep their spelling.
+    using Arcane::ContentKind;
+    using Arcane::SectionTag;
 
     // The common prefix every artifact kind shares, read WITHOUT committing to a kind:
     // exactly what ArtifactStore::RebuildIndexFromScan needs to recover a Guid, and
@@ -111,10 +81,9 @@ namespace Arcane::AssetPipeline
     };
 
     // Reads a BOUNDED PREFIX, never the whole file: this runs once per artifact in the
-    // store on every scan, and a texture artifact's payload is megabytes. Mirrors
-    // Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.cpp's own ParseCommonPrefix/
-    // kHeaderProbeBytes reasoning (that file's the client-side twin of this one; see
-    // this header's own BYTE-CONTRACT PEER paragraph) -- a generous fixed-size read from
+    // store on every scan, and a texture artifact's payload is megabytes. Goes through
+    // the codec's ReadArtifactPrefixBytes/ParseCommonPrefix (the same calls the runtime
+    // reader's FindArtifactForGuid makes) -- a generous fixed-size read from
     // the start of the file, well inside which the 37-byte common prefix (magic 4 +
     // artifactVersion 4 + contentKind 1 + sourceGuid 16 + sourceHash 8 + importerVersion
     // 4) always lives. Deliberately does NOT gate on contentKind -- that is the whole
@@ -177,9 +146,9 @@ namespace Arcane::AssetPipeline
     [[nodiscard]] ARC_ASSET_PIPELINE_API std::optional<LoadedArtifact> ReadTextureArtifact(const std::filesystem::path& path);
 
     // ---- Mesh artifacts (F2c) ---------------------------------------------------------------
-    // Independent writer/reader pair, sharing this file's byte-explicit ByteWriter/ByteReader
-    // primitives and the SectionTag space above -- see the file banner and SectionTag's own
-    // comment for why one shared tag space is load-bearing rather than incidental.
+    // Writer/reader pair over the byte codec in ArcaneAssets (ArtifactCodec.hpp), which owns the
+    // byte-explicit ByteWriter/ByteReader primitives and the SectionTag space -- see the file
+    // banner for why one shared tag space is load-bearing rather than incidental.
 
     // One drawable range with its material slot. `slotIndex` is comparison A1: two primitives
     // sharing one glTF material become TWO sections pointing at ONE slot, never two identically
@@ -196,8 +165,7 @@ namespace Arcane::AssetPipeline
     // vertex input). DELIBERATELY NOT Arcane::MeshVertex: that type lives in ArcaneClient
     // (Mesh/MeshBuilder.hpp) and this library must never include ArcaneClient. The two are
     // hand-mirrored, and the mirror is pinned by MeshArtifactReaderTest.cpp's cross-lib
-    // round-trip plus the static_assert on sizeof below -- exactly the discipline this file's
-    // own BYTE-CONTRACT PEER banner paragraph keeps for the whole format.
+    // round-trip plus the static_assert on sizeof below.
     struct ARC_ASSET_PIPELINE_API MeshArtifactVertex
     {
         float px, py, pz;
@@ -223,7 +191,7 @@ namespace Arcane::AssetPipeline
         std::uint32_t sectionCount = 0;
         // Comparison A5: DECLARED, not inferred. 4 in v1, asserted == 4 on read, so a future
         // 16-bit path is a reader BRANCH rather than a tag-presence dance duplicated across
-        // the two deliberately-independent readers.
+        // the pipeline reader and the runtime reader.
         std::uint8_t  indexWidth = 4;
 
         // The cooked AABB (s7.1): taken from the artifact rather than recomputed on load.

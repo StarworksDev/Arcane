@@ -10,6 +10,7 @@
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/PhysicsDebugDraw.hpp>
+#include "Helpers/PhysicsDebugDrawSolver.hpp"
 #include <Manifold2D/Physics/Narrowphase/NarrowphaseTrace.hpp>
 
 #include <array>

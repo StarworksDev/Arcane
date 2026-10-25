@@ -2,7 +2,7 @@
 
 #include "Arcane/AssetPipeline/CgltfGuard.hpp"
 #include "Arcane/AssetPipeline/CookKey.hpp"
-#include "Arcane/AssetPipeline/SourceHash.hpp"
+#include <Arcane/Assets/ArtifactCodec.hpp>
 #include <Arcane/IO/PathConfine.hpp>
 #include <Arcane/IO/ReadRegularFile.hpp>
 

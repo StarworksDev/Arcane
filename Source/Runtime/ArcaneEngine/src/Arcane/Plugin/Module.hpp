@@ -104,15 +104,33 @@ namespace Arcane
         // Snapshot every image currently mapped in this process. PluginHost
         // diffs this around each load so dependency DLLs that ran registration
         // statics can be disowned before the load session releases them.
-        // Windows-only; empty elsewhere (no dependency is then tracked).
+        // Windows and Linux; empty on macOS (no dependency is then tracked:
+        // neither Plugin::Load's refusal net nor PluginHost's pins run there;
+        // follow-up: Mach-O, excluding dyld shared-cache images).
         [[nodiscard]] static std::vector<MappedModule> MappedModules() noexcept;
-        // Take a loader reference on the ALREADY-mapped image `mapped` names,
-        // located by its base address (not its path, so a renamed or
-        // differently-pathed DLL is still the one image). Nothing is loaded and
-        // no initializer runs; destroying the returned Module drops exactly that
-        // reference. nullopt when no image is mapped at that base any more, and
-        // always on non-Windows.
+        // Take a loader reference on the ALREADY-mapped image `mapped` names.
+        // Windows locates it by its base address (so a renamed or
+        // differently-pathed DLL is still the one image); destroying the
+        // returned Module drops exactly that reference. Linux reopens its path
+        // with RTLD_NOLOAD | RTLD_NODELETE and requires the same base: the
+        // image is then mapped for the life of the process (see
+        // PinsForProcessLife). Nothing is loaded and no initializer runs.
+        // nullopt when no image is mapped at that base any more, and always
+        // on macOS.
         [[nodiscard]] static std::optional<Module> PinMapped(const MappedModule& mapped) noexcept;
+        // True where a PinMapped pin keeps the image mapped for the life of
+        // the process (ELF): the image never unmaps, so its registrations stay
+        // valid and callers must NOT disown them. Engine libraries are never
+        // hot-reloaded, only the game module is. False on Windows, where the
+        // pin is one reference and the caller disowns before releasing it.
+        [[nodiscard]] static constexpr bool PinsForProcessLife() noexcept
+        {
+#if defined(_WIN32) || defined(__APPLE__)
+            return false;
+#else
+            return true;
+#endif
+        }
         // The image span of a module `path` already mapped in this process, or
         // `{nullptr, 0}` when it is not. Plugin::Load compares this to the
         // span after Load() so a refused already-mapped engine DLL is not

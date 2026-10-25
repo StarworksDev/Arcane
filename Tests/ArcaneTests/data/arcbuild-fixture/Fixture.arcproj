@@ -3,7 +3,7 @@
   "name": "Fixture",
   "description": "Input-only premake fixture for arcbuild's multibackend structural tests (Task 4, arcbuild multibackend hardening). Never built by ArcaneTests -- only copied to a temp directory and run through premake so the RED/GREEN scripts and later acceptance tasks (5, 7) can generate real gmake/ninja/xcode4 project files and inspect them.",
   "engine": {
-    "abi": 61
+    "abi": 62
   },
   "gameModule": "Fixture.dll",
   "sourceDir": "Source/Game"

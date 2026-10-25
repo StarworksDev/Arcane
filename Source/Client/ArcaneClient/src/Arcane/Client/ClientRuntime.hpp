@@ -17,6 +17,7 @@
 // server world).
 
 #include <Arcane/Base/Runtime.hpp>
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Client/RuntimePresentation.hpp>
 #include <Arcane/Plugin/ClientHooks.hpp>
 
@@ -172,6 +173,8 @@ namespace Arcane
         [[nodiscard]] glm::vec2 ResolvedGravity() const { return m_core.ResolvedGravity(); }
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::ClientAccess;   // hashes m_core / m_pres (Client/AbiManifestClient.hpp)
+
         // IClientHooks -- Core's ONE reach-back. Private: only PluginHost (through
         // Runtime::ClientHooks()) is meant to call these, never a host directly.
         void* SaveUiContext() noexcept override;

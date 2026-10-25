@@ -404,7 +404,7 @@ scripts/build-sdl3.sh "$HOME/sdl3-prefix"
 export SDL3_ROOT="$HOME/sdl3-prefix"
 export CC=gcc-14 CXX=g++-14
 ThirdParty/premake5/premake5 --cc=gcc gmake
-make -j3 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient
+make -j3 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D
 "$(scripts/arcane-bin-dir.sh Debug)/arcbuild/arcbuild" build --project ReferenceProject --config Debug --sdk "$PWD"
 make -j3 config=debug ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests
 scripts/run-tests.sh Debug --rng-seed 1
@@ -461,7 +461,7 @@ scripts/fetch-vulkan-sdk-macos.sh --system
 scripts/build-sdl3.sh "$HOME/sdl3-prefix"
 export SDL3_ROOT="$HOME/sdl3-prefix"
 ThirdParty/premake5/premake5 --cc=clang gmake
-make -j3 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient
+make -j3 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D
 "$(scripts/arcane-bin-dir.sh Debug)/arcbuild/arcbuild" build --project ReferenceProject --config Debug --sdk "$PWD"
 make -j3 config=debug ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests
 scripts/run-tests.sh Debug --rng-seed 1

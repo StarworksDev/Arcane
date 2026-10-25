@@ -2651,3 +2651,20 @@ TEST_CASE("arcbuild's bundled Premake characterizes real gmake/ninja/xcode4 outp
         }
     }
 }
+
+// Final review I2: Engine no longer pulls ArcanePhysics2D in (Plan A Task 8), so a
+// monolithic package must name it among the host modules or a project whose
+// descriptor omits Physics2D ships with frozen bodies.
+#include "Helpers/ReferenceProjectDir.hpp"
+TEST_CASE("monolithic package host modules include ArcanePhysics2D", "[build][package]")
+{
+    const auto lua = Arcane::Test::FindReferenceProjectDir().parent_path() / "build" / "arcane.lua";
+    std::ifstream in(lua, std::ios::binary);
+    REQUIRE(in.good());
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto key = text.find("ARC_PACKAGE_HOST_MODULES =");
+    REQUIRE(key != std::string::npos);
+    const auto close = text.find('}', key);
+    REQUIRE(close != std::string::npos);
+    CHECK(text.substr(key, close - key).find("\"ArcanePhysics2D\"") != std::string::npos);
+}

@@ -18,7 +18,8 @@
 #include <Arcane/Scene/BoundsSystem.hpp>
 #include <Arcane/Scene/Components.hpp>
 #include <Arcane/Scene/RenderViewSettings.hpp>   // Ortho2DView
-#include <Arcane/Scene/PhysicsSystem.hpp>        // PhysicsWorld2D, Detail::Physics2D::Adopt / Access
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>        // PhysicsWorld2D, Detail::Physics2D::Adopt / Access
 #include <Arcane/Scene/SceneCamera.hpp>          // ActiveSceneCamera, ActivePerspectiveSceneCamera
 #include <Arcane/Scene/SceneModule.hpp>
 #include <Arcane/Scene/SceneResources.hpp>

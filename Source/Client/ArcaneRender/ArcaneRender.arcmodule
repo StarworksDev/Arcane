@@ -5,7 +5,6 @@
     "public": [
       "ArcaneAssets",
       "ArcaneCore",
-      "ArcanePhysics2D",
       "ArcaneScene",
       "ArcaneWindow"
     ],

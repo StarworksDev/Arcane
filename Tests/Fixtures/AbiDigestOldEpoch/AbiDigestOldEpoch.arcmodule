@@ -1,0 +1,6 @@
+{
+  "name": "AbiDigestOldEpoch",
+  "type": "Game",
+  "dependencies": { "public": [], "private": ["ArcaneEngine"] },
+  "thirdParty": { "public": [], "private": [] }
+}

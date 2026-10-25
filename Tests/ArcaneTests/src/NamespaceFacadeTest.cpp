@@ -120,6 +120,9 @@ TEST_CASE("Physics2D game-facing types", "[namespaces]")
     STATIC_REQUIRE(std::is_enum_v<Arcane::ShapeKind2D>);
     STATIC_REQUIRE(std::is_same_v<decltype(Arcane::RigidBody2D::type), Arcane::BodyType2D>);
     STATIC_REQUIRE(std::is_same_v<decltype(Arcane::Fixture2D::kind), Arcane::ShapeKind2D>);
+    // The thirteen are the ten scene types, then the 2D physics roster (Scene's
+    // PhysicsComponentRoster2D, registered by the 2D sim hook): locked as the
+    // concatenation VerifySharedTypeContext walks, not as one alias.
     STATIC_REQUIRE(std::is_same_v<Arcane::EngineComponentRoster,
         Arcane::TypeList<
             Arcane::Transform,
@@ -131,7 +134,9 @@ TEST_CASE("Physics2D game-facing types", "[namespaces]")
             Arcane::Camera,
             Arcane::MeshRenderer,
             Arcane::PhysicsSettings2D,
-            Arcane::WorldBounds,
+            Arcane::WorldBounds>>);
+    STATIC_REQUIRE(std::is_same_v<Arcane::PhysicsComponentRoster2D,
+        Arcane::TypeList<
             Arcane::RigidBody2D,
             Arcane::Collider2D,
             Arcane::PhysicsBodyRef2D>>);

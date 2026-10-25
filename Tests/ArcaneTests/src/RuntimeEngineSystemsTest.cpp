@@ -16,7 +16,7 @@
 
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Client/ClientRuntime.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Render/RenderSystems.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 

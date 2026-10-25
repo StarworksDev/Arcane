@@ -46,7 +46,7 @@ CXXFLAGS=(-std=c++23 -g -O1 -fno-omit-frame-pointer
 sources_for() {
     case "$1" in
         protocol) echo "Source/Runtime/ArcaneCore/src/Arcane/Config/CVarRegistry.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarFormat.cpp Source/Runtime/ArcaneCore/src/Arcane/Base/Assert.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp" ;;
-        artifact) echo "Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/IO/ReadRegularFile.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/LogStub.cpp" ;;
+        artifact) echo "Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.cpp Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactCodec.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/IO/ReadRegularFile.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/LogStub.cpp" ;;
         scene)    echo "Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp" ;;
         sprite)   echo "Source/Runtime/ArcaneAssets/src/Arcane/Sprite/SpriteAsset.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/LogStub.cpp" ;;
         cli)      echo "Source/Runtime/ArcaneCore/src/Arcane/Cli/Cli.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarRegistry.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarFormat.cpp Source/Runtime/ArcaneCore/src/Arcane/Base/Assert.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp Source/Programs/ArcaneServer/src/ServerConfig.cpp" ;;

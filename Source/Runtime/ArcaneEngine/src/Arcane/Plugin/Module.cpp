@@ -178,7 +178,18 @@ namespace Arcane
             const std::filesystem::path besideExe = std::filesystem::path(self).parent_path() / dependency;
             if (!std::filesystem::exists(besideExe, ec))
                 break;
-            if (!::dlopen(besideExe.c_str(), RTLD_NOW | RTLD_LOCAL))
+            // The dependency is an ENGINE library a game module imports. On
+            // ELF it is mapped for the life of the process (RTLD_NODELETE), the
+            // rule PinMapped states: engine libraries are never hot-reloaded,
+            // only the game module is, so its registrations stay valid across
+            // every unload, reload and refused load. The handle is not kept.
+            // macOS keeps it mapped by never closing this reference.
+#if defined(__APPLE__)
+            constexpr int kDependencyFlags = RTLD_NOW | RTLD_LOCAL;
+#else
+            constexpr int kDependencyFlags = RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE;
+#endif
+            if (!::dlopen(besideExe.c_str(), kDependencyFlags))
             {
                 const char* depErr = ::dlerror();
                 t_lastLoadError = depErr ? depErr : err;
@@ -376,6 +387,32 @@ namespace Arcane
             while (::Module32NextW(snapshot, &entry));
         }
         ::CloseHandle(snapshot);
+#elif !defined(__APPLE__)
+        // ELF: every loaded object, its span computed exactly as ImageFromHandle
+        // does (load bias + the PT_LOAD union), so a base here compares equal to
+        // the same image's Module::Image().base. Plugin::Load's refusal net
+        // depends on it: a refused game module's freshly mapped dependency
+        // (ArcanePhysics2D in a host that does not link it) unmaps with the
+        // refused module, and its registrations must be dropped first. So do
+        // PluginHost's dependency pins (PinMapped below), for the unload path.
+        ::dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* user) -> int
+        {
+            ElfW(Addr) lo = ~ElfW(Addr){ 0 };
+            ElfW(Addr) hi = 0;
+            for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i)
+            {
+                const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+                if (ph.p_type != PT_LOAD)
+                    continue;
+                lo = std::min(lo, ph.p_vaddr);
+                hi = std::max(hi, ph.p_vaddr + ph.p_memsz);
+            }
+            if (hi > lo)
+                static_cast<std::vector<MappedModule>*>(user)->push_back(MappedModule{
+                    std::filesystem::path(info->dlpi_name ? info->dlpi_name : ""),
+                    ImageSpan{ reinterpret_cast<const void*>(info->dlpi_addr + lo), static_cast<std::size_t>(hi - lo) } });
+            return 0;   // keep iterating: every object
+        }, &result);
 #endif
         return result;
     }
@@ -397,9 +434,41 @@ namespace Arcane
             return std::nullopt;
         }
         return Module(mapped.path, reinterpret_cast<NativeHandle>(handle));
-#else
+#elif defined(__APPLE__)
+        // Mach-O: MappedModules lists nothing here, so there is nothing to pin.
         (void)mapped;
         return std::nullopt;
+#else
+        // ELF: PIN FOR PROCESS LIFE (user decision 2026-10-24, PR #20 I1).
+        // RTLD_NOLOAD never maps; RTLD_NODELETE marks the already-loaded object
+        // so no dlclose ever unmaps it. Engine libraries are never
+        // hot-reloaded -- only the game module is -- so a dependency image a
+        // game load pulled in stays mapped with every registration it made
+        // (cvars, settings blocks, log setters, module-attach) valid across
+        // game unload, reload and refused loads, and nothing disowns it
+        // (PinsForProcessLife). glibc decides on its own whether a released
+        // object unmaps (a leaked reference, an STB_GNU_UNIQUE symbol or a TLS
+        // destructor keeps it), so "disown, then let go" could leave a later
+        // session with a mapped image whose registrations were dropped and
+        // whose statics never run again. The path is the dl_iterate_phdr name
+        // MappedModules recorded; the base check is the same guard as
+        // Windows': if that path now names an object at a DIFFERENT base, it
+        // is not ours to pin. The returned Module's dlclose drops only the
+        // extra reference; the NODELETE marking stays.
+        if (!mapped.image.base || mapped.path.empty())
+            return std::nullopt;
+        void* handle = ::dlopen(mapped.path.c_str(), RTLD_LAZY | RTLD_NOLOAD | RTLD_NODELETE);
+        if (!handle)
+        {
+            (void)::dlerror();   // a miss is an answer, not a pending error
+            return std::nullopt;
+        }
+        if (ImageFromHandle(handle).base != mapped.image.base)
+        {
+            ::dlclose(handle);
+            return std::nullopt;
+        }
+        return Module(mapped.path, handle);
 #endif
     }
 

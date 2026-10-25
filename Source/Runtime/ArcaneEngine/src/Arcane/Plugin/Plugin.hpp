@@ -39,6 +39,10 @@ namespace Arcane
         std::uint32_t engineAbi = 0;       // Kind::AbiMismatch: what this engine enforces
         bool pluginDebugCrt = false;       // Kind::CrtFlavorMismatch: the plugin's CRT family
         bool hostDebugCrt   = false;       // Kind::CrtFlavorMismatch: this host's CRT family
+        // Kind::AbiMismatch with pluginAbi == engineAbi: the epoch matched and the
+        // layout digest did not (or the module exported none: pluginDigest 0).
+        std::uint64_t pluginDigest = 0;
+        std::uint64_t engineDigest = 0;
     };
 
     class ARC_ENGINE_API Plugin
@@ -58,9 +62,9 @@ namespace Arcane
         static std::optional<Plugin> Load(std::filesystem::path path, PluginResolveError* error);
 
         // A game linked INTO the host (the monolithic layout; engine
-        // modularization s3.1): no Module, no file, no ABI probe -- the table is
-        // ArcGameModule_Get()'s, and the static_assert in ARC_GAME_MODULE already
-        // pinned the ABI at compile time. `table` must outlive the Plugin (it is
+        // modularization s3.1): no Module, no file -- the table is
+        // ArcGameModule_Get()'s. This only copies the table; the ABI gate for it
+        // is AdoptStaticGameModule (below), which PluginHost calls first. `table` must outlive the Plugin (it is
         // the game's function-local static). The cvar module is registered by
         // NAME only: there is no image range, and nothing in a package unloads.
         [[nodiscard]] static Plugin FromStatic(const PluginVTable& table, std::string cvarModule);
@@ -132,4 +136,19 @@ namespace Arcane
         // cvars, commands and callbacks go BEFORE the FreeLibrary.
         CVarOwner m_cvars;
     };
+
+    // The ABI gate shared by Plugin::Load and the static adoption path. Returns
+    // false with Kind::AbiMismatch when table.ABIVersion is null, the epoch
+    // disagrees with kGamePluginABIVersion, table.ABIDigest is null, or
+    // table.ABIDigest() disagrees with kGamePluginABIDigest. It never calls Init.
+    // `error` may be null.
+    ARC_ENGINE_API bool AcceptPluginAbi(const PluginVTable& table, PluginResolveError* error) noexcept;
+
+    // Adopts a game linked INTO the host (the monolithic layout): runs
+    // AcceptPluginAbi and, only on success, FromStatic into *out. On false it
+    // returns false, leaves *out empty and does not call Init. Compiled in every
+    // configuration (PluginHost's ARC_MONOLITHIC block calls it; so does a test).
+    // `table` must outlive the Plugin it produces.
+    ARC_ENGINE_API bool AdoptStaticGameModule(const PluginVTable& table, PluginResolveError* error,
+                                              std::optional<Plugin>* out, std::string cvarModule);
 }

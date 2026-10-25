@@ -426,7 +426,7 @@ end
 -- SDK export, the linked module list (logged at boot) and the staged project's
 -- path, handed to Arcane::RuntimeHost::Run. `arcbuild package` stages the result.
 -- ============================================================================
-ARC_PACKAGE_HOST_MODULES = { "ArcaneClient", "ArcaneImGui" }   -- ArcaneRuntimeHost's own needs
+ARC_PACKAGE_HOST_MODULES = { "ArcaneClient", "ArcaneImGui", "ArcanePhysics2D" }   -- ArcaneRuntimeHost's own needs
 -- The package workspace, relative to the project root (arcbuild's
 -- ProjectLayout.cpp PackageWorkspaceDir spells the same path).
 ARCANE_PACKAGE_WORKSPACE = "Intermediate/Package/Workspace"

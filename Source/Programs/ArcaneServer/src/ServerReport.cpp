@@ -30,6 +30,7 @@ namespace Arcane::Server
                           { "update",               update },
                           { "render",               render },
                           { "hasPhysics",            hasPhysics },
+                          { "hasPhysicsWorld",       hasPhysicsWorld },
                           { "hasPropagation",        hasPropagation },
                           { "hasRenderSubmission",   hasRenderSubmission } };
 

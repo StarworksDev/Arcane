@@ -38,6 +38,7 @@
 // NetMode. Conflating the two is UE's IsRunningDedicatedServer-vs-NetMode bug
 // class, and RoleMaskTest.cpp pins them apart.
 
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Core/NetMode.hpp>
 #include <Arcane/EcsFwd.hpp>   // Arcane::SystemScheduler (declared, aliased)
@@ -151,6 +152,7 @@ namespace Arcane
         std::size_t InstantiateInto(SystemSchedulers& into, NetMode mode) const;
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::Access;   // hashes these private members (Plugin/AbiManifestEngine.hpp)
         std::vector<SystemFactoryEntry> m_entries;
         const void*                     m_openOwner = nullptr;
     };

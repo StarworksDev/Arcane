@@ -3,7 +3,7 @@
 // OverlayBatchCollector -- the bridge from Batcher2D producers to the
 // post-tonemap overlay pass (F5 plan 1 Task 3). A Batcher2D whose Line,
 // Circle and Rect append OverlayPrimitive entries instead of quads, so code
-// that already draws through a Batcher2D (DrawGrid2D, DrawPhysicsDebug, the
+// that already draws through a Batcher2D (DrawGrid2D, PaintPhysicsDebug, the
 // editor's camera rect) keeps its code and emits overlay primitives in the
 // pixel space it already works in: screenSpace, z = 0, Linear (the colours
 // were authored for the linear canvas), tagged with the collector's depth

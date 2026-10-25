@@ -1,0 +1,6 @@
+{
+  "name": "AbiDigestStale",
+  "type": "Game",
+  "dependencies": { "public": [], "private": ["ArcaneEngine", "ArcanePhysics2D"] },
+  "thirdParty": { "public": [], "private": [] }
+}

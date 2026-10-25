@@ -3,8 +3,9 @@
 
 // PickEmit: the CPU "which entities are pickable" seam for GPU entity-id
 // picking (see docs/superpowers/specs/2026-07-19-arcane-entity-id-picking-design.md,
-// SS3b/3c). CollectPickables walks the registry for pickable entities (sprites,
-// physics colliders, meshes) and appends one PickDrawable per pickable shape,
+// SS3b/3c). CollectPickables (defined in ExtractFrame.cpp, where the walk lives)
+// walks the registry for pickable entities (sprites, physics colliders, meshes)
+// and appends one PickDrawable per pickable shape,
 // in WORLD space, ready for the id pass. The k-th appended drawable (0-based)
 // gets hit-proxy id k+1; PickEntityForId inverts that mapping (id 0 == background).
 //
@@ -83,16 +84,16 @@ namespace Arcane
     //      submission does (1x1 m at the centre pivot when unresolved) -- so
     //      the silhouette is the drawn quad under ANY projection, a mirrored
     //      or off-centre pivot included.
-    //   2. Colliders -- one PickDrawable per Arcane::Fixture2D, iterated via an
-    //      archetype-stable View<Arcane::Collider2D, Arcane::PhysicsBodyRef2D> (DETERMINISTIC:
-    //      the id assignment id=index+1 must not depend on unordered_map hash
-    //      order -- the same rule Arcane::PhysicsSystem2D's create pass follows). The body
-    //      pose comes from the live PhysicsWorld via Arcane::PhysicsBodyRef2D::handle;
-    //      fixture dims + local offset are scaled by Arcane::PhysicsBodyRef2D::appliedScale
-    //      so a scaled body's silhouette matches its drawn collider. Physics
-    //      colliders are read via registry.GetResource<Arcane::PhysicsWorld2D>(); if
-    //      absent (no physics world on this registry), none are collected --
-    //      not an error.
+    //   2. Colliders -- one PickDrawable per collider fixture, from
+    //      FillColliderSilhouettes2D (Scene/PhysicsQuery.hpp): the physics
+    //      query proxy walks an archetype-stable View<Arcane::Collider2D,
+    //      Arcane::PhysicsBodyRef2D> (DETERMINISTIC: the id assignment
+    //      id=index+1 must not depend on unordered_map hash order) and hands
+    //      back world-space silhouettes at the live body pose, scaled by the
+    //      body's baked appliedScale so a scaled body's silhouette matches its
+    //      drawn collider. Render names no solver type. With no physics world
+    //      on the registry (or no 2D physics module registered), none are
+    //      collected -- not an error.
     //   3. Meshes    -- View<WorldTransform, MeshRenderer, Not<Hidden>>, resolved
     //      through the registry's MeshTable; a nil, unresolved or EMPTY mesh
     //      (no sections) emits nothing, exactly what GpuSceneSync

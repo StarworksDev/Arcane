@@ -37,6 +37,7 @@
 // real marker through the production import path (the same idiom
 // AssetsPixelsTest.cpp uses -- these tests link ArcaneAssetPipeline to build
 // fixtures ONLY; ArcaneClient itself never links it).
+#include <Arcane/Assets/ArtifactCodec.hpp>
 #include <Arcane/AssetPipeline/ArtifactFormat.hpp>
 #include <Arcane/AssetPipeline/TextureImporter.hpp>
 #include <Arcane/AssetPipeline/TextureMetaSettings.hpp>
@@ -73,20 +74,11 @@ namespace
     // writer arccook drives), then read it back purely through the ArcaneClient facade
     // under test -- Assets.cpp never links the pipeline (ArtifactReader.hpp's own banner).
 
-    // FNV-1a 64-bit over just the source bytes -- the SAME algorithm and constants
-    // TextureImporter.cpp/MeshImporter.cpp's own HashSourceBytes and ArtifactReader.cpp's
-    // client-side HashSourceBytes all use, duplicated here per MeshArtifactReaderTest.cpp's
-    // own "no test-only helper library crosses the pipeline/client boundary" precedent.
+    // The source hash is the shared codec's function -- the same one the importers and the
+    // runtime reader call, so this fixture cannot drift from either.
     std::uint64_t FnvOfSource(std::span<const std::byte> bytes) noexcept
     {
-        std::uint64_t h = 14695981039346656037ULL;
-        constexpr std::uint64_t prime = 1099511628211ULL;
-        for (std::byte b : bytes)
-        {
-            h ^= static_cast<std::uint64_t>(static_cast<std::uint8_t>(b));
-            h *= prime;
-        }
-        return h;
+        return Arcane::HashSourceBytes(bytes);
     }
 
     std::filesystem::path MeshSandboxRoot(const char* leaf)

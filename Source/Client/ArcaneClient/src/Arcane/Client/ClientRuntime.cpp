@@ -122,7 +122,7 @@ namespace Arcane
     void ClientRuntime::SetRenderContext(Batcher2D* batcher)
     {
         // Epic 04.2: carry the render alpha so RenderSubmissionSystem +
-        // DrawPhysicsDebug can interpolate poses between fixed steps. The Runtime
+        // GatherPhysicsDebug (Physics2D) can interpolate poses between fixed steps. The Runtime
         // owns the RunLoop, so this needs no plugin-ABI surface.
         m_core.Registry().SetResource<RenderContext2D>(
             RenderContext2D{batcher, m_pres.view,

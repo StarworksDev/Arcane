@@ -79,8 +79,8 @@ namespace Arcane
     };
 
     // Per-body previous-pose buffer, indexed by PhysicsWorld body SLOT index (the
-    // same space DrawPhysicsDebug iterates). Populated by PhysicsSystem2D before each
-    // world.Step(); read by DrawPhysicsDebug and RenderSubmissionSystem. Transient
+    // same space GatherPhysicsDebug iterates). Populated by PhysicsSystem2D before each
+    // world.Step(); read by GatherPhysicsDebug and RenderSubmissionSystem. Transient
     // runtime state: AstraTransientResource, so Registry::Save skips it and a
     // restore never revives a stale history (IN-8; it replaced Runtime::
     // RestoreRegistry's hand-strip). The no-op Serialize still satisfies Astra's

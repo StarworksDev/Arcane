@@ -568,7 +568,7 @@ end
 -- this list is Arcane::kDefaultGameModules (Arcane/Project/GameDescriptor.hpp),
 -- which the editor writes into a new project's descriptor; keep them equal.
 -- ============================================================================
-ARC_GAME_DEFAULT_MODULES = { "ArcaneClient", "ArcaneImGui", "ImGui", "ArcaneNet", "ArcaneCrypto" }
+ARC_GAME_DEFAULT_MODULES = { "ArcaneClient", "ArcaneImGui", "ImGui", "ArcaneNet", "ArcaneCrypto", "ArcanePhysics2D" }
 
 -- Validate a game descriptor against the loaded engine graph and return the
 -- game's direct engine dependencies, or nil when `file` does not exist (the

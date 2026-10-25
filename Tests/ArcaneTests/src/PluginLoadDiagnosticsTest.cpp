@@ -157,18 +157,22 @@ TEST_CASE("Module::IsMapped tells an already-mapped image from one this process 
     CHECK_FALSE(Arcane::Module::IsMapped(bad));
 }
 
-#if defined(_WIN32)
+#if !defined(__APPLE__)   // MappedModules lists nothing on macOS
 TEST_CASE("Module::MappedModules lists mapped images and PinMapped takes a reference by base without loading", "[plugin][diagnostics]")
 {
     // The two primitives PluginHost's dependency rule stands on (S2 gate): a
     // host diffs MappedModules() around each load and pins every newly mapped
-    // image by its BASE. ArcaneClient.dll stands in for that dependency here --
+    // image by its BASE. ArcaneClient stands in for that dependency here --
     // this exe links it, so the pin is a second reference and dropping it must
     // leave the image mapped. The end-to-end case (a Core-only host whose game
     // DLL maps ArcaneClient, then unloads it) is ServerWitnessTest's
     // [witness][server] S1/S3: ArcaneTests always has Client mapped, so no
-    // in-process host here can make Client a NEWLY mapped dependency.
-    const Arcane::Module::ImageSpan client = Arcane::Module::MappedImage(std::filesystem::path("ArcaneClient.dll"));
+    // in-process host here can make Client a NEWLY mapped dependency. Linux
+    // too since PR #20 review I1 (PinMapped reopens the path RTLD_NOLOAD and
+    // checks the base); the sim-hook child in PhysicsHookBootTest is the
+    // end-to-end witness there.
+    const std::filesystem::path clientFile = Arcane::Platform::SharedLibraryFileName("ArcaneClient");
+    const Arcane::Module::ImageSpan client = Arcane::Module::MappedImage(clientFile);
     REQUIRE(client.base != nullptr);
 
     const std::vector<Arcane::Module::MappedModule> mapped = Arcane::Module::MappedModules();
@@ -177,16 +181,16 @@ TEST_CASE("Module::MappedModules lists mapped images and PinMapped takes a refer
     });
     REQUIRE(it != mapped.end());
     CHECK(it->image.size == client.size);
-    CHECK(it->path.filename() == std::filesystem::path("ArcaneClient.dll"));
+    CHECK(it->path.filename() == clientFile);
 
     {
         std::optional<Arcane::Module> pin = Arcane::Module::PinMapped(*it);
         REQUIRE(pin.has_value());
         CHECK(pin->Image().base == client.base);
         CHECK(pin->Image().size == client.size);
-    }   // the pin's FreeLibrary drops only its own reference
-    CHECK(Arcane::Module::IsMapped(std::filesystem::path("ArcaneClient.dll")));
-    CHECK(Arcane::Module::MappedImage(std::filesystem::path("ArcaneClient.dll")).base == client.base);
+    }   // the pin's FreeLibrary / dlclose drops only its own reference
+    CHECK(Arcane::Module::IsMapped(clientFile));
+    CHECK(Arcane::Module::MappedImage(clientFile).base == client.base);
 
     // An address inside an image but not at its base names no image to pin:
     // the guard against a base whose range a different module now occupies.

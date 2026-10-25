@@ -14,7 +14,7 @@
 #include <Arcane/Plugin/ClientHooks.hpp>
 #include <Arcane/Plugin/PluginABI.hpp>   // EngineContext (the hooks' fill target)
 #include <Arcane/Render/RenderSystems.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
