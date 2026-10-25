@@ -135,6 +135,13 @@ namespace Arcane
             // inert once this resolver is gone. Null disables the slot reset.
             std::function<void(const void* key, const std::function<void(std::uint32_t)>& fn)> ensureAlbedoSlotObserver;
 
+            // The frame boundary for albedo references: called once per Refresh,
+            // after the mesh sweep has (re-)resolved every referenced material. A
+            // material whose reference dropped (a whole-cache Clear on a material
+            // save) and was re-acquired by that sweep keeps its slot; only a key
+            // still at zero is released. Null leaves zero-reference keys queued.
+            std::function<void()> flushMeshAlbedoReleases;
+
             // F2c Plan 2 Task 6: drop resident GPU buffers for this .arcmesh
             // guid. Injected for the same reason resolveMeshAlbedoSlot is --
             // this class holds no device. Null (tests that do not care, a host

@@ -51,7 +51,7 @@ namespace Arcane
     {
         if (!m_device)
             return;
-        bool any = false;
+        bool any = !m_backings.empty();
         for (const Slot& s : m_slots)
             if (s.state != State::Free && s.srv) { any = true; break; }
         if (!any)
@@ -69,6 +69,7 @@ namespace Arcane
                 s.srv = nullptr;
             }
         m_slots.clear();
+        RunAllBackings(true);
     }
 
     std::uint32_t BindlessTable::LiveCount() const noexcept
@@ -159,6 +160,65 @@ namespace Arcane
         m_life->Clear(slot);
         s = Slot{};
         m_free.push_back(slot);
+        // A texture whose destruction joined this slot's retire goes after the
+        // descriptor (descriptors before the resources they view).
+        OnSlotRetired(slot);
+        return true;
+    }
+
+    void BindlessTable::OnSlotRetired(std::uint32_t slot)
+    {
+        for (std::size_t i = 0; i < m_backings.size();)
+        {
+            Backing& b = m_backings[i];
+            b.waiting.erase(std::remove(b.waiting.begin(), b.waiting.end(), slot), b.waiting.end());
+            if (b.waiting.empty())
+            {
+                std::function<void()> destroy = std::move(b.destroy);
+                m_backings.erase(m_backings.begin() + static_cast<std::ptrdiff_t>(i));
+                if (destroy)
+                    destroy();
+            }
+            else
+            {
+                ++i;
+            }
+        }
+    }
+
+    void BindlessTable::RunAllBackings(bool run)
+    {
+        std::vector<Backing> backings = std::move(m_backings);
+        m_backings.clear();
+        if (!run)
+            return;
+        for (Backing& b : backings)
+            if (b.destroy)
+                b.destroy();
+    }
+
+    bool BindlessTable::AdoptTextureBacking(const nri::Texture* texture, std::uint64_t fence,
+                                            std::function<void()> destroy)
+    {
+        if (!texture)
+            return false;
+        Backing b;
+        b.texture = texture;
+        for (std::uint32_t i = 0; i < m_slots.size(); ++i)
+        {
+            const Slot& s = m_slots[i];
+            if (s.state == State::Free || s.texture != texture)
+                continue;
+            b.waiting.push_back(i);
+            // The owning context may still be reading its own view in a submit
+            // that has not completed.
+            if (s.owner)
+                m_life->NoteSample(i, s.owner, fence);
+        }
+        if (b.waiting.empty())
+            return false;
+        b.destroy = std::move(destroy);
+        m_backings.push_back(std::move(b));
         return true;
     }
 
@@ -272,7 +332,7 @@ namespace Arcane
     }
 
     std::uint32_t BindlessTable::AddMapped(const Guid& guid, ColorSpace space, nri::Descriptor* srv,
-                                           const void* owner)
+                                           const void* owner, const nri::Texture* texture)
     {
         const std::uint32_t existing = Lookup(guid, space);
         if (existing != kInvalidSlot)
@@ -284,6 +344,7 @@ namespace Arcane
 
         Slot& s = m_slots[slot];
         s.mapped = true;
+        s.texture = texture;
         s.guid   = guid;
         s.space  = space;
         m_map[MapKey{ guid, space }] = Mapping{ slot, 0 };
@@ -303,7 +364,19 @@ namespace Arcane
         if (it == m_map.end() || it->second.refs == 0)
             return;
         if (--it->second.refs == 0)
-            ReleaseAll(guid, space);
+            m_zeroRefs.push_back(MapKey{ guid, space });   // released at the frame boundary unless re-acquired
+    }
+
+    void BindlessTable::FlushZeroRefs()
+    {
+        std::vector<MapKey> keys = std::move(m_zeroRefs);
+        m_zeroRefs.clear();
+        for (const MapKey& k : keys)
+        {
+            const auto it = m_map.find(k);
+            if (it != m_map.end() && it->second.refs == 0)
+                ReleaseAll(k.guid, k.space);
+        }
     }
 
     void BindlessTable::ReleaseAll(const Guid& guid, ColorSpace space)
@@ -368,7 +441,7 @@ namespace Arcane
     void BindlessTable::NoteSampledBy(const void* context, std::uint64_t fence)
     {
         for (std::uint32_t i = 0; i < m_slots.size(); ++i)
-            if (m_slots[i].state == State::Live)
+            if (m_slots[i].state == State::Live || m_slots[i].state == State::Pending)
                 m_life->NoteSample(i, context, fence);
     }
 
@@ -410,6 +483,12 @@ namespace Arcane
         m_free.clear();
         m_pending.clear();
         m_map.clear();
+        m_zeroRefs.clear();
+        // Textures that joined a slot's retire go after every descriptor.
+        for (Backing& b : m_backings)
+            if (b.destroy)
+                graveyard.Bury(fence, std::move(b.destroy));
+        m_backings.clear();
     }
 
     void BindlessTable::DestroyAllNow(bool destroy)
@@ -424,5 +503,7 @@ namespace Arcane
         m_free.clear();
         m_pending.clear();
         m_map.clear();
+        m_zeroRefs.clear();
+        RunAllBackings(destroy);
     }
 }

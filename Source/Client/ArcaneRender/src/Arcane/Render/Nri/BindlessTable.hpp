@@ -152,14 +152,22 @@ namespace Arcane
         // AddAndWrite + memoize under (guid, space). If the key is already mapped
         // the existing slot is returned and `srv` is NOT consumed (the caller keeps
         // ownership of it).
+        // `texture` (optional) is the texture object the descriptor views; it lets
+        // AdoptTextureBacking find the slots a texture's destruction must wait on.
         [[nodiscard]] std::uint32_t AddMapped(const Guid& guid, ColorSpace space,
-                                              nri::Descriptor* srv, const void* owner = nullptr);
+                                              nri::Descriptor* srv, const void* owner = nullptr,
+                                              const nri::Texture* texture = nullptr);
 
         // One more live material holds (guid, space). No-op for an unmapped key.
         void AcquireRef(const Guid& guid, ColorSpace space);
-        // One material dropped its hold; at zero the key is released (ReleaseAll).
-        // A key with no references is untouched.
+        // One material dropped its hold. At zero the key is NOT released at once:
+        // it is queued, and FlushZeroRefs() (a frame boundary) releases it if it is
+        // still at zero -- an AcquireRef before then cancels the release, so a
+        // whole-cache Clear + re-resolve in one frame keeps every index (acquire
+        // before release). A key with no references is untouched.
         void Release(const Guid& guid, ColorSpace space);
+        // The frame boundary: ReleaseAll every queued key still at zero references.
+        void FlushZeroRefs();
         // Unconditional: erase the memo, notify observers, take the index path.
         void ReleaseAll(const Guid& guid, ColorSpace space);
         // Project switch: ReleaseAll for every mapping.
@@ -169,8 +177,21 @@ namespace Arcane
         // means the caller already drained the device, so the slots retire at once.
         void ReleaseOwnedBy(const void* owner, bool deviceIdle);
 
-        // Notes, for every live slot, that `context` samples it in the submit that
-        // signals `fence` on its timeline.
+        // A context's texture cache is dropping `texture` (whose destruction
+        // `destroy` performs: its own view, then the texture). If a live or pending
+        // slot's descriptor views it, the destruction JOINS those slots' retire --
+        // it runs once every one of them has retired (descriptor first, then
+        // `destroy`) -- and the owning context's own pending submit (`fence` on the
+        // slot owner's timeline) is noted so it is waited on too. Returns true when
+        // adopted (the caller must NOT destroy or bury the texture); false when no
+        // slot views it (the caller keeps its own path).
+        [[nodiscard]] bool AdoptTextureBacking(const nri::Texture* texture, std::uint64_t fence,
+                                               std::function<void()> destroy);
+        [[nodiscard]] std::size_t BackingCount() const noexcept { return m_backings.size(); }
+
+        // Notes, for every live OR pending slot, that `context` samples it in the
+        // submit that signals `fence` on its timeline. A pending (released, not yet
+        // retired) index may still be read by a context that recorded with it.
         void NoteSampledBy(const void* context, std::uint64_t fence);
         // The context's timeline is gone; drop its notes.
         void ForgetContext(const void* context) { m_life->ForgetContext(context); }
@@ -211,6 +232,7 @@ namespace Arcane
             const void*      owner = nullptr;
             State            state = State::Free;
             bool             mapped = false;
+            const nri::Texture* texture = nullptr;   // what the descriptor views (optional)
             Guid             guid{};
             ColorSpace       space = ColorSpace::Srgb;
         };
@@ -232,6 +254,12 @@ namespace Arcane
             std::uint32_t slot = kInvalidSlot;
             std::uint32_t refs = 0;
         };
+        struct Backing
+        {
+            const nri::Texture*        texture = nullptr;
+            std::vector<std::uint32_t> waiting;     // slots that must retire first
+            std::function<void()>      destroy;
+        };
         struct SetEntry
         {
             const void*         owner = nullptr;
@@ -241,6 +269,8 @@ namespace Arcane
         void DropMapping(std::uint32_t slot);                 // erase memo + notify observers
         void PendIndex(std::uint32_t slot, bool force);       // Live -> Pending, retire now if possible
         bool TryRetire(std::uint32_t slot, bool force);       // Pending -> Free when AllRetired (or forced)
+        void OnSlotRetired(std::uint32_t slot);               // backings waiting on it
+        void RunAllBackings(bool run);                        // teardown
         void WriteSlot(std::uint32_t slot, nri::Descriptor* srv);
         void WriteOne(nri::DescriptorSet* set, std::uint32_t slot, nri::Descriptor* srv);
         [[nodiscard]] bool IdleOnce();
@@ -257,6 +287,8 @@ namespace Arcane
         std::vector<std::uint32_t>     m_pending;   // released, waiting on AllRetired
         std::unordered_map<MapKey, Mapping, MapKeyHash> m_map;
         std::vector<SetEntry>          m_sets;
+        std::vector<Backing>           m_backings;
+        std::vector<MapKey>            m_zeroRefs;  // keys whose last reference dropped this frame
 
         std::vector<std::pair<const void*, Observer>> m_observers;
 

@@ -1032,6 +1032,11 @@ namespace Arcane::Editor
                     if (Arcane::BindlessTable* table = graph->Device().Bindless())
                         table->SetObserver(key, fn);
             };
+            rs.flushMeshAlbedoReleases = [this]()
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->FlushMeshAlbedoReleases();
+            };
             rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
             {
                 if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())

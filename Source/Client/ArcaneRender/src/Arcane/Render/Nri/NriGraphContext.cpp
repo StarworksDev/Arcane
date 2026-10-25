@@ -443,6 +443,10 @@ namespace Arcane
         if (!m_textures)
             return false;   // already logged
 
+        // Device-wide texture invalidation reaches THIS context's cache through
+        // this hook (NriDevice::InvalidateTexture); the dtor unregisters it.
+        m_device->RegisterContext(this, [this](const Guid& id) { InvalidateContentTexture(id); });
+
         m_meshBuffers = NriMeshBufferCache::Create(*m_device);
         if (!m_meshBuffers)
             return false;   // already logged
@@ -720,7 +724,7 @@ namespace Arcane
         if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, bindlessView)) || !bindlessView)
             return BindlessTable::kInvalidSlot;   // already logged (ARC_NRI_CHECK)
 
-        const std::uint32_t slot = bindless->AddMapped(id, BindlessTable::ColorSpace::Srgb, bindlessView, this);
+        const std::uint32_t slot = bindless->AddMapped(id, BindlessTable::ColorSpace::Srgb, bindlessView, this, texture);
         if (slot == BindlessTable::kInvalidSlot)
         {
             // The table refused (a null srv cannot happen here --
@@ -770,6 +774,20 @@ namespace Arcane
         // Both colour spaces, exactly as NriTextureCache::Invalidate sweeps them.
         bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
         bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
+    }
+
+    void NriGraphContext::InvalidateTextureOnDevice(const Guid& id)
+    {
+        if (m_device)
+            m_device->InvalidateTexture(id);
+    }
+
+    void NriGraphContext::FlushMeshAlbedoReleases()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            bindless->FlushZeroRefs();
     }
 
     void NriGraphContext::ReleaseAllMeshAlbedoSlots()
@@ -828,6 +846,7 @@ namespace Arcane
         // context's last use of them has retired and they are destroyed at once
         // (on a lost device they wait for ~NriDevice). This context's notes in the
         // last-use record go too -- its timeline is about to disappear.
+        m_device->UnregisterContext(this);
         if (BindlessTable* bindless = m_device->Bindless())
         {
             bindless->ReleaseOwnedBy(this, !deviceLost);

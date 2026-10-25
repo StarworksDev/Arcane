@@ -40,6 +40,7 @@ namespace Arcane { struct D3D12DeviceCreation {}; }
 // undefine it after the last header that could define it.
 #undef ERROR
 
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 
@@ -489,6 +490,40 @@ namespace Arcane
         if (!m_bindless)
             m_bindless = BindlessTable::Create(*this, Arcane::kBindlessCapacity, m_life);
         return m_bindless.get();
+    }
+
+    void NriDevice::RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture)
+    {
+        for (ContextHook& h : m_contexts)
+            if (h.owner == owner)
+            {
+                h.invalidate = std::move(invalidateTexture);
+                return;
+            }
+        m_contexts.push_back(ContextHook{ owner, std::move(invalidateTexture) });
+    }
+
+    void NriDevice::UnregisterContext(const void* owner)
+    {
+        m_contexts.erase(std::remove_if(m_contexts.begin(), m_contexts.end(),
+                                        [owner](const ContextHook& h) { return h.owner == owner; }),
+                         m_contexts.end());
+    }
+
+    void NriDevice::InvalidateTexture(const Guid& id)
+    {
+        // Mappings first: the slots go pending (or retire at once), so the cache
+        // drops below find the slots that view the textures and join their retire.
+        if (m_bindless)
+        {
+            m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
+            m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
+        }
+        // A callback must not (un)register contexts; copy anyway for safety.
+        const std::vector<ContextHook> hooks = m_contexts;
+        for (const ContextHook& h : hooks)
+            if (h.invalidate)
+                h.invalidate(id);
     }
 
     NriDevice::~NriDevice()

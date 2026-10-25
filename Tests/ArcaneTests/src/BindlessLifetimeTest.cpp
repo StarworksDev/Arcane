@@ -21,7 +21,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <Arcane/Assets/ImageIo.hpp>
 #include <Arcane/Guid.hpp>
+#include <Arcane/Material/MaterialAsset.hpp>
+#include <Arcane/Material/MaterialTypes.hpp>
+#include <Arcane/Render/MeshMaterialCache.hpp>
+#include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/NriTextureCache.hpp>
 #include <Arcane/Host/HostConfig.hpp>
 #include <Arcane/Render/GpuSceneTypes.hpp>
 #include <Arcane/Render/Nri/BindlessTable.hpp>
@@ -35,6 +41,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <system_error>
 #include <map>
 #include <memory>
 #include <vector>
@@ -274,7 +284,9 @@ TEST_CASE("each release caller drops the mapping and dirties the row", "[nri][bi
             CHECK(table.Lookup(key, kSrgb) == slot);
             CHECK(table.IsLive(slot));
             CHECK(resolvedMaterialSlot == slot);
-            table.Release(key, kSrgb);      // the last goes
+            table.Release(key, kSrgb);      // the last goes: queued for the frame boundary...
+            CHECK(table.Lookup(key, kSrgb) == slot);
+            table.FlushZeroRefs();          // ...and released there, still unreferenced
             break;
         case TextureInvalidation:
             table.ReleaseAll(key, kSrgb);
@@ -384,6 +396,325 @@ TEST_CASE("DeviceResourceLifetime waits for every noting context and ignores the
     CHECK(life.AllRetired(10, &DeviceFixture::Completed, &dev));
     life.Clear(9);
     CHECK(life.Uses(9) == nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (Task 2 review).
+// ---------------------------------------------------------------------------
+
+// C1: a pending (released, not yet retired) slot that a context records with
+// is noted for that context, so it cannot retire under an in-flight use.
+TEST_CASE("a pending slot sampled by a context does not retire until that context's fence completes",
+          "[nri][bindless]")
+{
+    DeviceFixture dev;
+    BindlessTable& table = dev.Table();
+
+    const Arcane::Guid key{ 61, 1 };
+    const std::uint32_t slot = table.AddMapped(key, kSrgb, MockSrv(1), ContextA());
+    REQUIRE(slot != BindlessTable::kInvalidSlot);
+    dev.life.NoteSample(slot, ContextA(), 1);   // A is in flight on it
+    table.ReleaseAll(key, kSrgb);
+    REQUIRE(table.PendingCount() == 1u);        // released, but A has not completed
+
+    // B records a pass with the index AFTER it was released (a holder that had not
+    // yet heard about the release): the table notes the pending slot for B too.
+    table.NoteSampledBy(ContextB(), 7);
+    REQUIRE(dev.life.Uses(slot) != nullptr);
+    CHECK(dev.life.Uses(slot)->size() == 2u);
+
+    dev.CompleteFence(ContextA(), 1);           // A retires; B's submit has not
+    table.ProcessPending();
+    CHECK(table.PendingCount() == 1u);
+    CHECK(table.Add(MockSrv(2)) != slot);       // the index is not recycled
+
+    dev.CompleteFence(ContextB(), 6);           // still short of 7
+    table.ProcessPending();
+    CHECK(table.PendingCount() == 1u);
+
+    dev.CompleteFence(ContextB(), 7);
+    table.ProcessPending();
+    CHECK(table.PendingCount() == 0u);
+    CHECK(table.Add(MockSrv(3)) == slot);       // now it is
+}
+
+// I1: texture invalidation is device-wide: every registered context's texture
+// cache drops the guid and the device mapping is released, so no stale cache
+// can publish its old view back to the other contexts.
+TEST_CASE("a device-wide texture invalidation reaches every context's texture cache",
+          "[nri][bindless][texcache]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+
+    const Arcane::Guid id{ 62, 1 };
+    Arcane::PixelData pixels;
+    pixels.width = 2;
+    pixels.height = 2;
+    pixels.rgba.assign(16, 0xAB);
+    auto supply = [&](const Arcane::Guid&) -> const Arcane::PixelData* { return &pixels; };
+
+    // Two contexts, each with its OWN cache and its OWN graveyard (own timeline).
+    struct Ctx
+    {
+        std::unique_ptr<Arcane::NriTextureCache> cache;
+        Arcane::Graveyard graves;
+        std::uint64_t fence = 1;
+    };
+    Ctx a, b;
+    for (Ctx* c : { &a, &b })
+    {
+        c->cache = Arcane::NriTextureCache::Create(*device);
+        REQUIRE(c->cache != nullptr);
+        c->cache->SetPixelSupply(supply);
+        device->RegisterContext(c, [c](const Arcane::Guid& g) { c->cache->Invalidate(g, c->graves, c->fence); });
+    }
+    CHECK(device->RegisteredContextCount() == 2u);
+
+    BindlessTable* table = device->Bindless();
+    REQUIRE(table != nullptr);
+
+    REQUIRE(a.cache->Resolve(id) != nullptr);
+    REQUIRE(b.cache->Resolve(id) != nullptr);
+    CHECK(a.cache->ResidentCount() == 1u);
+    CHECK(b.cache->ResidentCount() == 1u);
+    const std::uint32_t first = table->AddMapped(id, kSrgb, MockSrv(1), &a);
+    REQUIRE(first != BindlessTable::kInvalidSlot);
+
+    // The cook for `id` lands: ONE call, however many contexts exist.
+    device->InvalidateTexture(id);
+
+    CHECK(a.cache->ResidentCount() == 0u);   // neither cache returns the old texture
+    CHECK(b.cache->ResidentCount() == 0u);
+    CHECK(table->Lookup(id, kSrgb) == BindlessTable::kInvalidSlot);   // mapping released
+
+    // The next resolve is a fresh upload in each cache and a fresh mapping.
+    REQUIRE(a.cache->Resolve(id) != nullptr);
+    REQUIRE(b.cache->Resolve(id) != nullptr);
+    CHECK(a.cache->ResidentCount() == 1u);
+    CHECK(b.cache->ResidentCount() == 1u);
+    const std::uint32_t second = table->AddMapped(id, kSrgb, MockSrv(2), &a);
+    CHECK(second != BindlessTable::kInvalidSlot);
+    CHECK(table->Lookup(id, kSrgb) == second);
+
+    // A context that unregisters is no longer reached.
+    device->UnregisterContext(&b);
+    device->InvalidateTexture(id);
+    CHECK(a.cache->ResidentCount() == 0u);
+    CHECK(b.cache->ResidentCount() == 1u);
+
+    device->UnregisterContext(&a);
+    for (Ctx* c : { &a, &b })
+    {
+        c->cache->Release(c->graves, c->fence + 1);
+        c->graves.Reap(c->fence + 1);
+    }
+    table->DestroyAllNow(true);
+}
+
+// I2: the texture and its descriptor wait on the last-use record together.
+TEST_CASE("an invalidated texture is not destroyed until every context sampling its slot retires",
+          "[nri][bindless]")
+{
+    DeviceFixture dev;
+    BindlessTable& table = dev.Table();
+    nri::Texture* const tex = reinterpret_cast<nri::Texture*>(0x7000u);   // context A's texture
+
+    const Arcane::Guid key{ 63, 1 };
+    const std::uint32_t slot = table.AddMapped(key, kSrgb, MockSrv(1), ContextA(), tex);
+    REQUIRE(slot != BindlessTable::kInvalidSlot);
+    dev.life.NoteSample(slot, ContextB(), 3);   // B samples a descriptor viewing A's texture
+
+    // A invalidates: the mapping is released first (pending: B is in flight)...
+    table.ReleaseAll(key, kSrgb);
+    REQUIRE(table.PendingCount() == 1u);
+
+    // ...then A's cache drops the texture, which joins the slot's retire.
+    int destroyed = 0;
+    bool descriptorFirst = false;
+    const bool adopted = table.AdoptTextureBacking(tex, 5, [&]
+    {
+        ++destroyed;
+        // By the time the texture goes, the slot's descriptor is already gone
+        // (the index is back on the free list).
+        descriptorFirst = !table.IsLive(slot) && table.FreeCount() == 1u;
+    });
+    REQUIRE(adopted);
+    CHECK(table.BackingCount() == 1u);
+
+    dev.CompleteFence(ContextA(), 5);           // A's own submit done, B's is not
+    table.ProcessPending();
+    CHECK(destroyed == 0);
+    dev.CompleteFence(ContextB(), 2);           // B short of 3
+    table.ProcessPending();
+    CHECK(destroyed == 0);
+
+    dev.CompleteFence(ContextB(), 3);
+    table.ProcessPending();
+    CHECK(destroyed == 1);
+    CHECK(descriptorFirst);
+    CHECK(table.BackingCount() == 0u);
+
+    // A texture no slot views keeps the caller's own path.
+    nri::Texture* const other = reinterpret_cast<nri::Texture*>(0x7100u);
+    CHECK_FALSE(table.AdoptTextureBacking(other, 9, [] {}));
+    // A slot that retired at once (no sampler in flight) is not waited on.
+    const std::uint32_t quick = table.AddMapped(Arcane::Guid{ 63, 2 }, kSrgb, MockSrv(2), ContextA(), other);
+    REQUIRE(quick != BindlessTable::kInvalidSlot);
+    table.ReleaseAll(Arcane::Guid{ 63, 2 }, kSrgb);
+    CHECK(table.PendingCount() == 0u);
+    CHECK_FALSE(table.AdoptTextureBacking(other, 9, [] {}));
+}
+
+namespace
+{
+    namespace fs = std::filesystem;
+
+    fs::path MakeAlbedoDir(const char* tag)
+    {
+        std::error_code ec;
+        fs::path d = fs::temp_directory_path() / (std::string("arcane_bindless_fix1_") + tag);
+        fs::remove_all(d, ec);
+        fs::create_directories(d, ec);
+        return d;
+    }
+
+    // A mesh-kind .arcmat declaring `albedo`; returns the material's id.
+    Arcane::Guid WriteAlbedoMaterial(const fs::path& file, const Arcane::Guid& albedo)
+    {
+        Arcane::MaterialAssetData data;
+        data.id   = Arcane::Guid::Generate();
+        data.name = "fix1-material";
+        data.kind = "mesh";
+        data.params.emplace_back("baseColor", Arcane::MatParamValue::MakeColor(1.0f, 1.0f, 1.0f, 1.0f));
+        data.params.emplace_back("albedo", Arcane::MatParamValue::MakeTexture(albedo));
+        REQUIRE(Arcane::SaveMaterialAsset(file, data));
+        return data.id;
+    }
+
+    // The resolver's wiring in miniature: resolve through the device table (Lookup
+    // else a fresh mapping) and hold a reference; release drops one.
+    struct TableBackedServices
+    {
+        BindlessTable* table = nullptr;
+        std::uint32_t  minted = 0;
+
+        std::uint32_t Acquire(const Arcane::Guid& g)
+        {
+            std::uint32_t slot = table->Lookup(g, kSrgb);
+            if (slot == BindlessTable::kInvalidSlot)
+            {
+                ++minted;
+                slot = table->AddMapped(g, kSrgb, MockSrv(minted), ContextA());
+            }
+            if (slot != BindlessTable::kInvalidSlot)
+                table->AcquireRef(g, kSrgb);
+            return slot;
+        }
+        void ReleaseRef(const Arcane::Guid& g) { table->Release(g, kSrgb); }
+    };
+}
+
+// I3: a whole-cache Clear (every material save) followed by the same frame's
+// re-resolve keeps every slot: no new index, nothing pending.
+TEST_CASE("a Clear and re-resolve in one frame keeps every albedo slot", "[nri][bindless][mesh]")
+{
+    constexpr int N = 12;
+    const fs::path dir = MakeAlbedoDir("clear");
+    DeviceFixture dev;
+    TableBackedServices dsvc;
+    dsvc.table = &dev.Table();
+
+    std::vector<Arcane::Guid> albedos, materials;
+    for (int i = 0; i < N; ++i)
+    {
+        albedos.push_back(Arcane::Guid{ 70, static_cast<std::uint64_t>(i + 1) });
+        materials.push_back(WriteAlbedoMaterial(dir / ("m" + std::to_string(i) + ".arcmat"), albedos.back()));
+    }
+    Arcane::MeshMaterialCache::Services s;
+    s.resolveAsset = [&](const Arcane::Guid& id) -> std::optional<fs::path>
+    {
+        for (int i = 0; i < N; ++i)
+            if (materials[i] == id)
+                return dir / ("m" + std::to_string(i) + ".arcmat");
+        return std::nullopt;
+    };
+    s.resolveAlbedoSlot = [&](const Arcane::Guid& g) { return dsvc.Acquire(g); };
+    s.releaseAlbedoSlot = [&](const Arcane::Guid& g) { dsvc.ReleaseRef(g); };
+    Arcane::MeshMaterialCache cache(std::move(s));
+
+    std::vector<std::uint32_t> before;
+    for (const Arcane::Guid& m : materials) cache.Request(m);
+    for (const Arcane::Guid& m : materials) before.push_back(cache.Table().at(m).materialSlot);
+    for (std::uint32_t slot : before) REQUIRE(slot != BindlessTable::kInvalidSlot);
+    CHECK(dev.Table().LiveCount() == static_cast<std::uint32_t>(N));
+    const std::uint32_t mintedBefore = dsvc.minted;
+
+    // The material save: Clear, then the same frame's Refresh re-Requests every
+    // referenced material, then the frame boundary.
+    cache.Clear();
+    for (const Arcane::Guid& m : materials) cache.Request(m);
+    dev.Table().FlushZeroRefs();
+
+    for (int i = 0; i < N; ++i)
+        CHECK(cache.Table().at(materials[i]).materialSlot == before[i]);   // every index kept
+    CHECK(dsvc.minted == mintedBefore);                                    // no new mint
+    CHECK(dev.Table().PendingCount() == 0u);
+    CHECK(dev.Table().LiveCount() == static_cast<std::uint32_t>(N));
+
+    // A material that is NOT re-requested is released at the boundary.
+    cache.Clear();
+    for (int i = 0; i < N - 1; ++i) cache.Request(materials[i]);
+    dev.Table().FlushZeroRefs();
+    CHECK(dev.Table().LiveCount() == static_cast<std::uint32_t>(N - 1));
+    CHECK(dev.Table().Lookup(albedos[N - 1], kSrgb) == BindlessTable::kInvalidSlot);
+
+    std::error_code ec; fs::remove_all(dir, ec);
+}
+
+// I3: a Request that finds no free slot is queued for re-resolve, not stored flat.
+TEST_CASE("a material that finds the table full is re-resolved once a slot frees", "[nri][bindless][mesh]")
+{
+    const fs::path dir = MakeAlbedoDir("pressure");
+    DeviceFixture dev(2);   // capacity 2, three materials
+    TableBackedServices dsvc;
+    dsvc.table = &dev.Table();
+
+    std::vector<Arcane::Guid> albedos, materials;
+    for (int i = 0; i < 3; ++i)
+    {
+        albedos.push_back(Arcane::Guid{ 71, static_cast<std::uint64_t>(i + 1) });
+        materials.push_back(WriteAlbedoMaterial(dir / ("m" + std::to_string(i) + ".arcmat"), albedos.back()));
+    }
+    Arcane::MeshMaterialCache::Services s;
+    s.resolveAsset = [&](const Arcane::Guid& id) -> std::optional<fs::path>
+    {
+        for (int i = 0; i < 3; ++i)
+            if (materials[i] == id)
+                return dir / ("m" + std::to_string(i) + ".arcmat");
+        return std::nullopt;
+    };
+    s.resolveAlbedoSlot = [&](const Arcane::Guid& g) { return dsvc.Acquire(g); };
+    s.releaseAlbedoSlot = [&](const Arcane::Guid& g) { dsvc.ReleaseRef(g); };
+    Arcane::MeshMaterialCache cache(std::move(s));
+
+    for (const Arcane::Guid& m : materials) cache.Request(m);
+    CHECK(cache.Table().at(materials[0]).materialSlot != BindlessTable::kInvalidSlot);
+    CHECK(cache.Table().at(materials[1]).materialSlot != BindlessTable::kInvalidSlot);
+    CHECK(cache.Table().at(materials[2]).materialSlot == BindlessTable::kInvalidSlot);   // table full
+
+    // Still full: a later Request retries and still gets nothing (no growth).
+    cache.Request(materials[2]);
+    CHECK(cache.Table().at(materials[2]).materialSlot == BindlessTable::kInvalidSlot);
+
+    // Material 0 goes away: its slot frees at the frame boundary...
+    cache.Invalidate(materials[0]);
+    dev.Table().FlushZeroRefs();
+    // ...and the starved material picks it up on its next Request.
+    cache.Request(materials[2]);
+    CHECK(cache.Table().at(materials[2]).materialSlot != BindlessTable::kInvalidSlot);
+
+    std::error_code ec; fs::remove_all(dir, ec);
 }
 
 // ---------------------------------------------------------------------------

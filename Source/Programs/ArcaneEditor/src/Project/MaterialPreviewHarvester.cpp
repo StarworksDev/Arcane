@@ -16,6 +16,7 @@
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Mesh/MeshBuilder.hpp>
 #include <Arcane/Render/MeshMaterialCache.hpp>
+#include <Arcane/Render/Nri/BindlessTable.hpp>
 #include <Arcane/Render/Nri/NriGraphContext.hpp>
 #include <Arcane/Render/PostChainCache.hpp>   // PostChainDesc
 #include <Arcane/Render/ShaderCompiler.hpp>
@@ -287,6 +288,12 @@ namespace Arcane::Editor
 
         bool EnsureVehicle(Arcane::NriGraphContext& chrome);
         void ResetVehicle();                      // destroy it + re-queue what it scoped
+        // The device table released bindless slot `slot` (a texture replaced or
+        // evicted, a material save, a project switch): this harvester is a holder of
+        // slot indices (meshMats' memo and the queued Ready records), so it resets
+        // the memo (the next Request re-resolves) and re-queues any Ready that
+        // captured the index -- never draws with a released index.
+        void OnAlbedoSlotReleased(std::uint32_t slot);
         void DropVehicle();                       // ResetVehicle, as a FAILURE (spends budget)
         void GiveUp(std::string_view why);        // no previews at all, this session
         void StartOne(const WorkKey& key, double now);
@@ -335,6 +342,9 @@ namespace Arcane::Editor
         // that device is provably alive; this is the backstop for a run that
         // never got that far (a failed boot), where nothing was ever created
         // in the first place.
+        // The slot observer is removed before the vehicle dies (ResetVehicle).
+        if (m_impl->ctx)
+            m_impl->ResetVehicle();
         delete m_impl;
     }
 
@@ -361,8 +371,36 @@ namespace Arcane::Editor
     // NO BUDGET IS SPENT HERE. This is the neutral "the vehicle is gone" half,
     // which teardown needs as much as a failed frame does; DropVehicle below
     // is the FAILURE flavour that also pays the budget.
+    void MaterialPreviewHarvester::Impl::OnAlbedoSlotReleased(std::uint32_t slot)
+    {
+        if (meshMats)
+            meshMats->ResetAlbedoSlot(slot);
+        for (std::size_t i = 0; i < ready.size();)
+        {
+            const Ready& r = ready[i];
+            bool stale = r.meshSlot == slot;
+            for (const Arcane::MeshInstance& inst : r.meshInstances)
+                stale = stale || inst.materialSlot == slot;
+            if (!stale)
+            {
+                ++i;
+                continue;
+            }
+            // Re-queue (the material is fine, the index it captured is not).
+            const WorkKey key{ r.id, r.subject };
+            inFlight.erase(key);
+            ready.erase(ready.begin() + static_cast<std::ptrdiff_t>(i));
+            Push(key);
+        }
+    }
+
     void MaterialPreviewHarvester::Impl::ResetVehicle()
     {
+        // Stop listening BEFORE the context dies: its teardown releases the slots it
+        // minted, which would call back into half-reset state.
+        if (ctx)
+            if (Arcane::BindlessTable* table = ctx->Device().BindlessIfCreated())
+                table->RemoveObserver(this);
         ctx.reset();
         batch.reset();
         meshMats.reset();
@@ -1126,11 +1164,17 @@ namespace Arcane::Editor
         ms.resolveAsset = services.resolveAsset;
         ms.resolveAlbedoSlot = [this](const Arcane::Guid& g) -> std::uint32_t
         {
-            // THIS context's own bindless table -- a slot from another
-            // MeshNode's table names a different texture entirely.
+            // The DEVICE's shared bindless table (one index space for every context
+            // on the device): the slot is valid until the table releases it, at
+            // which point OnAlbedoSlotReleased resets this cache's memo.
             return ctx ? ctx->ResolveMeshAlbedoSlot(g) : 0xFFFFFFFFu;
         };
         meshMats = std::make_unique<Arcane::MeshMaterialCache>(std::move(ms));
+        // Every holder of a device slot index is a released-slot observer: the
+        // device's mapping memo is shared by every context, so a slot this cache
+        // resolved can be released by the viewport's cook or material save.
+        if (Arcane::BindlessTable* table = ctx->Device().Bindless())
+            table->SetObserver(this, [this](std::uint32_t slot) { OnAlbedoSlotReleased(slot); });
         return true;
     }
 

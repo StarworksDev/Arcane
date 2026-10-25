@@ -16,6 +16,7 @@
 // reaches <windows.h> through spdlog, which #defines it away via wingdi.h.
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriDevice.hpp>
+#include <Arcane/Render/Nri/BindlessTable.hpp>   // AdoptTextureBacking (Invalidate)
 #include <Arcane/Render/Nri/Graveyard.hpp>
 
 #include <Arcane/Assets/ArtifactReader.hpp>   // LoadedClientArtifact -- the compiled-texture supply (Task 7)
@@ -131,6 +132,27 @@ namespace Arcane
             const auto it = m_textures.find(Key{ id, space });
             if (it == m_textures.end())
                 continue;
+            // A bindless slot (mapped or pending) may still view this texture from
+            // ANOTHER context's in-flight submit. Its destruction then joins the
+            // slot's retire (spec 3.5: the descriptor and the texture wait on the
+            // last-use record together): descriptors first, then this cache's own
+            // view, then the texture -- never at this context's fence alone.
+            if (it->second.texture && m_device)
+                if (BindlessTable* bindless = m_device->BindlessIfCreated())
+                {
+                    const nri::Texture* texture = it->second.texture;
+                    if (bindless->AdoptTextureBacking(
+                            texture, fence,
+                            [core, d = it->second.view, t = it->second.texture]
+                            {
+                                if (d) core->DestroyDescriptor(d);
+                                core->DestroyTexture(t);
+                            }))
+                    {
+                        m_textures.erase(it);
+                        continue;
+                    }
+                }
             if (it->second.view)
                 graveyard.Bury(fence, [core, d = it->second.view] { core->DestroyDescriptor(d); });
             if (it->second.texture)

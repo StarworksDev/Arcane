@@ -225,10 +225,19 @@ namespace Arcane
         // installed (every CPU test, and a host before its graph context
         // exists), leaves the default materialSlot -- kInvalidSlot's value,
         // mesh.hlsl's flat baseColor path.
+        bool needsReresolve = false;
         if (resolved.albedo.IsValid() && im.services.resolveAlbedoSlot)
+        {
             resolved.materialSlot = im.services.resolveAlbedoSlot(resolved.albedo);
+            // A table at capacity (or a texture not resident yet) answers invalid;
+            // that must NOT be stored flat for the life of the entry -- queue the
+            // material so a later Request re-resolves it once a slot frees.
+            needsReresolve = resolved.materialSlot == 0xFFFFFFFFu;
+        }
 
         im.table.emplace(id, resolved);
+        if (needsReresolve)
+            im.reresolve.insert(id);
     }
 
     void MeshMaterialCache::Invalidate(const Guid& id)

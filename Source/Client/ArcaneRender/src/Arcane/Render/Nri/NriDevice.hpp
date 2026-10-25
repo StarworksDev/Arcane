@@ -28,7 +28,11 @@
 #include <Arcane/Render/Nri/Graveyard.hpp>
 #include <Arcane/Render/Nri/NriDeviceCaps.hpp>
 
+#include <Arcane/Guid.hpp>
+
+#include <functional>
 #include <memory>
+#include <vector>
 
 namespace Arcane
 {
@@ -198,6 +202,25 @@ namespace Arcane
         // NriGraphContext on this device shares it; null only if creation was
         // refused (already logged).
         [[nodiscard]] BindlessTable* Bindless();
+        // The table if it exists yet; never creates it.
+        [[nodiscard]] BindlessTable* BindlessIfCreated() noexcept { return m_bindless.get(); }
+
+        // ---- device-wide texture invalidation (3D-readiness arc spec 3.5) -------
+        // Each NriGraphContext keeps its own NriTextureCache, but the bindless
+        // mapping memo is the device's, so a texture's invalidation has to reach
+        // EVERY context's cache or a stale cache would publish the old view to all.
+        // A context registers a callback that drops a Guid from ITS cache (buried at
+        // its own fence, or joined to the slot retire it backs); contexts unregister
+        // at teardown.
+        using TextureInvalidateFn = std::function<void(const Guid&)>;
+        void RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture);
+        void UnregisterContext(const void* owner);
+        [[nodiscard]] std::size_t RegisteredContextCount() const noexcept { return m_contexts.size(); }
+
+        // The ONE entry point for "the texture behind `id` changed or is gone":
+        // releases every bindless mapping of `id` (both colour spaces, unconditional)
+        // FIRST, then drops `id` from every registered context's texture cache.
+        void InvalidateTexture(const Guid& id);
 
     private:
         NriDevice();
@@ -210,6 +233,8 @@ namespace Arcane
         Graveyard          m_graveyard;
         DeviceResourceLifetime m_life;
         std::unique_ptr<BindlessTable> m_bindless;
+        struct ContextHook { const void* owner; TextureInvalidateFn invalidate; };
+        std::vector<ContextHook> m_contexts;
         nri::CoreInterface m_core{};
         nri::Device*       m_device        = nullptr;
         nri::Queue*        m_graphicsQueue = nullptr;

@@ -1552,7 +1552,8 @@ namespace Arcane
         // A MATERIAL's hold on the slot: Acquire resolves like
         // ResolveMeshAlbedoSlot and counts one live material against the
         // (id, Srgb) key; ReleaseMeshAlbedoRef drops one, and the slot is
-        // released when the count reaches zero. A material that never resolved
+        // released at the next frame boundary (FlushMeshAlbedoReleases) if the count is
+        // still zero -- a re-acquire before then cancels it. A material that never resolved
         // a texture (kInvalidSlot) holds nothing and releases nothing. The
         // preview graph and the harvester use the plain Resolve (no count).
         [[nodiscard]] std::uint32_t AcquireMeshAlbedoSlot(const Guid& id);
@@ -1568,6 +1569,19 @@ namespace Arcane
         // for a guid that was never mapped. Call it BEFORE the texture object is
         // destroyed.
         void InvalidateMeshAlbedoSlot(const Guid& id);
+
+        // The texture behind `id` changed or is gone: the DEVICE-WIDE entry point
+        // (NriDevice::InvalidateTexture). Releases every bindless mapping of `id`
+        // and drops `id` from EVERY context's texture cache on this device (each at
+        // its own fence, or joined to the slot retire it backs). The editor's cook
+        // completion and asset invalidation call this instead of per-graph pairs.
+        void InvalidateTextureOnDevice(const Guid& id);
+
+        // The frame boundary for material references: releases every mapping whose
+        // last material reference dropped and was not re-acquired (acquire-before-
+        // release across a whole-cache Clear). SceneRenderResolver::Refresh calls it
+        // once its mesh sweep has re-resolved.
+        void FlushMeshAlbedoReleases();
 
         // Project switch: releases every mapping on the device table (same
         // semantics as InvalidateMeshAlbedoSlot, for all of them).

@@ -515,6 +515,11 @@ namespace Arcane
                     im.meshMaterials->Request(slot.material);
         });
 
+        // The mesh sweep above re-acquired every slot a still-referenced material
+        // needs; only now is a zero-reference slot really unreferenced.
+        if (im.services.flushMeshAlbedoReleases)
+            im.services.flushMeshAlbedoReleases();
+
         // Census, logged once per distinct outcome. "Nothing draws" has too many
         // indistinguishable causes to debug from a silent log: no SpriteRenderer in
         // the scene, a nil sprite Guid, a Guid that would not resolve, or a
