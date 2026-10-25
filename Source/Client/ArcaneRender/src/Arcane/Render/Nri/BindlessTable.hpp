@@ -189,9 +189,14 @@ namespace Arcane
                                                std::function<void()> destroy);
         [[nodiscard]] std::size_t BackingCount() const noexcept { return m_backings.size(); }
 
-        // Notes, for every live OR pending slot, that `context` samples it in the
-        // submit that signals `fence` on its timeline. A pending (released, not yet
-        // retired) index may still be read by a context that recorded with it.
+        // Notes, for every live slot, that `context` samples it in the submit that
+        // signals `fence` on its timeline. A PENDING (released, not yet retired)
+        // slot is noted by a context only on that context's FIRST record after the
+        // release: the release observers fire synchronously, so holders re-staged
+        // by then and later records do not use the index -- noting it on every
+        // record would push its wait to a fresh fence each frame and it would
+        // never retire. Also runs the retire sweep (ProcessPending), so a slot
+        // retires as soon as its fences complete even when no Add happens.
         void NoteSampledBy(const void* context, std::uint64_t fence);
         // The context's timeline is gone; drop its notes.
         void ForgetContext(const void* context) { m_life->ForgetContext(context); }
@@ -233,6 +238,9 @@ namespace Arcane
             State            state = State::Free;
             bool             mapped = false;
             const nri::Texture* texture = nullptr;   // what the descriptor views (optional)
+            // Pending only: the contexts that already noted this slot since it was
+            // released (a context notes a pending slot ONCE, at its first record).
+            std::vector<const void*> pendingNotedBy;
             Guid             guid{};
             ColorSpace       space = ColorSpace::Srgb;
         };
@@ -266,6 +274,7 @@ namespace Arcane
             nri::DescriptorSet* set   = nullptr;
         };
 
+        void PurgeZeroRef(const MapKey& key);                 // forget a queued zero-ref release
         void DropMapping(std::uint32_t slot);                 // erase memo + notify observers
         void PendIndex(std::uint32_t slot, bool force);       // Live -> Pending, retire now if possible
         bool TryRetire(std::uint32_t slot, bool force);       // Pending -> Free when AllRetired (or forced)

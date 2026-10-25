@@ -438,6 +438,95 @@ TEST_CASE("a pending slot sampled by a context does not retire until that contex
     CHECK(table.Add(MockSrv(3)) == slot);       // now it is
 }
 
+// Round 2 (N1): a mesh pass records every frame. A pending slot is noted by a
+// context only on its FIRST record after the release, and the record also runs
+// the retire sweep -- so the slot retires with no Add in between.
+TEST_CASE("a pending slot retires after repeated records once the first fence completes",
+          "[nri][bindless]")
+{
+    DeviceFixture dev;
+    BindlessTable& table = dev.Table();
+
+    const Arcane::Guid key{ 63, 1 };
+    const std::uint32_t slot = table.AddMapped(key, kSrgb, MockSrv(1), ContextA());
+    REQUIRE(slot != BindlessTable::kInvalidSlot);
+    table.NoteSampledBy(ContextA(), 1);          // live: noted every record
+    table.ReleaseAll(key, kSrgb);
+    REQUIRE(table.PendingCount() == 1u);
+
+    table.NoteSampledBy(ContextA(), 2);          // the first record after the release
+    table.NoteSampledBy(ContextA(), 3);          // later records do not move the wait
+    table.NoteSampledBy(ContextA(), 4);
+    REQUIRE(dev.life.Uses(slot) != nullptr);
+    REQUIRE(dev.life.Uses(slot)->size() == 1u);
+    CHECK(dev.life.Uses(slot)->front().fence == 2u);
+    CHECK(table.PendingCount() == 1u);
+
+    dev.CompleteFence(ContextA(), 2);
+    table.NoteSampledBy(ContextA(), 5);          // no Add: the record's sweep retires it
+    CHECK(table.PendingCount() == 0u);
+    CHECK(table.FreeCount() == 1u);
+    CHECK(table.Add(MockSrv(2)) == slot);
+}
+
+// Round 2 (N1b): a context whose first record comes after the release still
+// blocks the retire until that one fence completes.
+TEST_CASE("a context recording for the first time after the release blocks the retire",
+          "[nri][bindless]")
+{
+    DeviceFixture dev;
+    BindlessTable& table = dev.Table();
+
+    const Arcane::Guid key{ 64, 1 };
+    const std::uint32_t slot = table.AddMapped(key, kSrgb, MockSrv(1), ContextA());
+    REQUIRE(slot != BindlessTable::kInvalidSlot);
+    table.NoteSampledBy(ContextA(), 1);
+    table.ReleaseAll(key, kSrgb);
+
+    table.NoteSampledBy(ContextA(), 2);
+    dev.CompleteFence(ContextA(), 2);
+    table.NoteSampledBy(ContextB(), 9);          // B's first record: noted at 9
+    table.NoteSampledBy(ContextA(), 3);
+    CHECK(table.PendingCount() == 1u);           // A is done, B is not
+
+    table.NoteSampledBy(ContextB(), 10);         // B's later records change nothing
+    dev.CompleteFence(ContextB(), 8);
+    table.NoteSampledBy(ContextA(), 4);
+    CHECK(table.PendingCount() == 1u);
+
+    dev.CompleteFence(ContextB(), 9);
+    table.NoteSampledBy(ContextA(), 5);
+    CHECK(table.PendingCount() == 0u);
+    CHECK(table.FreeCount() == 1u);
+}
+
+// Round 2 (N3): a queued zero-ref key does not outlive an unconditional release.
+TEST_CASE("an unconditional release purges the queued zero-ref keys", "[nri][bindless]")
+{
+    DeviceFixture dev;
+    BindlessTable& table = dev.Table();
+
+    const Arcane::Guid k1{ 65, 1 };
+    const Arcane::Guid k2{ 66, 1 };
+    REQUIRE(table.AddMapped(k1, kSrgb, MockSrv(1), ContextA()) != BindlessTable::kInvalidSlot);
+    REQUIRE(table.AddMapped(k2, kSrgb, MockSrv(2), ContextA()) != BindlessTable::kInvalidSlot);
+    table.AcquireRef(k1, kSrgb);
+    table.AcquireRef(k2, kSrgb);
+    table.Release(k1, kSrgb);                    // both queued at zero
+    table.Release(k2, kSrgb);
+
+    table.ReleaseAll(k1, kSrgb);
+    table.ReleaseEveryMapping();
+    // Re-map both under the same keys: a stale queued key (zero refs) would release them.
+    const std::uint32_t s1 = table.AddMapped(k1, kSrgb, MockSrv(3), ContextA());
+    const std::uint32_t s2 = table.AddMapped(k2, kSrgb, MockSrv(4), ContextA());
+    REQUIRE(s1 != BindlessTable::kInvalidSlot);
+    REQUIRE(s2 != BindlessTable::kInvalidSlot);
+    table.FlushZeroRefs();
+    CHECK(table.Lookup(k1, kSrgb) == s1);
+    CHECK(table.Lookup(k2, kSrgb) == s2);
+}
+
 // I1: texture invalidation is device-wide: every registered context's texture
 // cache drops the guid and the device mapping is released, so no stale cache
 // can publish its old view back to the other contexts.
@@ -478,8 +567,15 @@ TEST_CASE("a device-wide texture invalidation reaches every context's texture ca
     REQUIRE(b.cache->Resolve(id) != nullptr);
     CHECK(a.cache->ResidentCount() == 1u);
     CHECK(b.cache->ResidentCount() == 1u);
-    const std::uint32_t first = table->AddMapped(id, kSrgb, MockSrv(1), &a);
+    // N2: map the cache's REAL texture, so Invalidate's adoption branch runs.
+    // Context A's submit (fence 5 on its timeline) still samples the slot.
+    struct Done { std::uint64_t fence = 0; } done;
+    table->SetCompletionQuery(
+        [](const void*, std::uint64_t f, void* user) { return static_cast<Done*>(user)->fence >= f; }, &done);
+    const nri::Texture* aTexture = a.cache->Resolve(id);
+    const std::uint32_t first = table->AddMapped(id, kSrgb, MockSrv(1), &a, aTexture);
     REQUIRE(first != BindlessTable::kInvalidSlot);
+    table->Lifetime().NoteSample(first, &a, 5);
 
     // The cook for `id` lands: ONE call, however many contexts exist.
     device->InvalidateTexture(id);
@@ -487,6 +583,12 @@ TEST_CASE("a device-wide texture invalidation reaches every context's texture ca
     CHECK(a.cache->ResidentCount() == 0u);   // neither cache returns the old texture
     CHECK(b.cache->ResidentCount() == 0u);
     CHECK(table->Lookup(id, kSrgb) == BindlessTable::kInvalidSlot);   // mapping released
+    CHECK(table->BackingCount() >= 1u);      // the texture waits on the slot's retire (the NONE backend hands every cache the same fake handle, so b's drop may join it too)
+    CHECK(table->PendingCount() == 1u);
+    done.fence = 5;
+    table->ProcessPending();                 // retired: descriptor, then the texture
+    CHECK(table->BackingCount() == 0u);
+    CHECK(table->PendingCount() == 0u);
 
     // The next resolve is a fresh upload in each cache and a fresh mapping.
     REQUIRE(a.cache->Resolve(id) != nullptr);

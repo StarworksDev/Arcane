@@ -519,7 +519,8 @@ namespace Arcane
             m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
             m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
         }
-        // A callback must not (un)register contexts; copy anyway for safety.
+        // A hook must not (un)register contexts, and must not destroy a context;
+        // the copy only protects the iteration.
         const std::vector<ContextHook> hooks = m_contexts;
         for (const ContextHook& h : hooks)
             if (h.invalidate)

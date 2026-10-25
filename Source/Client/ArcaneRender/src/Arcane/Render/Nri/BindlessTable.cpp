@@ -402,6 +402,11 @@ namespace Arcane
         }
     }
 
+    void BindlessTable::PurgeZeroRef(const MapKey& key)
+    {
+        m_zeroRefs.erase(std::remove(m_zeroRefs.begin(), m_zeroRefs.end(), key), m_zeroRefs.end());
+    }
+
     void BindlessTable::DropMapping(std::uint32_t slot)
     {
         Slot& s = m_slots[slot];
@@ -409,6 +414,7 @@ namespace Arcane
             return;
         m_map.erase(MapKey{ s.guid, s.space });
         s.mapped = false;
+        PurgeZeroRef(MapKey{ s.guid, s.space });
         // Resolved materials and GPU rows holding this index fall back to
         // kInvalidSlot (and are re-staged) BEFORE the index can mean anything else.
         const auto observers = m_observers;   // copy: an observer may unregister itself
@@ -441,8 +447,22 @@ namespace Arcane
     void BindlessTable::NoteSampledBy(const void* context, std::uint64_t fence)
     {
         for (std::uint32_t i = 0; i < m_slots.size(); ++i)
-            if (m_slots[i].state == State::Live || m_slots[i].state == State::Pending)
+        {
+            Slot& s = m_slots[i];
+            if (s.state == State::Live)
+            {
                 m_life->NoteSample(i, context, fence);
+            }
+            else if (s.state == State::Pending
+                     && std::find(s.pendingNotedBy.begin(), s.pendingNotedBy.end(), context)
+                            == s.pendingNotedBy.end())
+            {
+                s.pendingNotedBy.push_back(context);
+                m_life->NoteSample(i, context, fence);
+            }
+        }
+        // The per-frame, per-context retire sweep.
+        ProcessPending();
     }
 
     void BindlessTable::SetObserver(const void* key, const Observer& observer)
