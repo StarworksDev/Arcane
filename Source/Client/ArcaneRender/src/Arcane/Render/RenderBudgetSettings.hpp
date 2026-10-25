@@ -16,6 +16,14 @@
 //                       (a hard cap: ad-hoc instances past it are dropped).
 // - render.mesh.*       RenderMeshSettings: NriMeshBufferCache's residency
 //                       budget (the eviction threshold).
+// - render.texture.*    RenderTextureSettings: the texture slice of the device
+//                       residency account (latched at account creation).
+// - render.residency.*  RenderResidencySettings: the reservation percent each
+//                       slice keeps from the other.
+// - render.texture.*    RenderTextureSettings: the texture slice of the device
+//                       residency account (latched at account creation).
+// - render.residency.*  RenderResidencySettings: the reservation percent each
+//                       slice keeps from the other.
 // - render.post.*       RenderPostSettings: PostChainNode's passes, declared
 //                       textures and material CB region size.
 // - render.imgui.*      RenderImguiSettings: ImGuiNri's descriptor-pool chain.
@@ -93,6 +101,31 @@ namespace Arcane
             ARC_REFLECT_ATTR(Range, 67108864.0, 17179869184.0)
             ARC_REFLECT_ATTR(Tooltip, "Memory budget, in bytes, for resident meshes (CPU copy plus GPU buffers). Past it the "
                                       "least recently drawn meshes are evicted and re-upload when next drawn.")
+    ARC_END_REFLECT_TYPE()
+
+    struct RenderTextureSettings
+    {
+        std::uint64_t residencyBudgetBytes = 512ull << 20;
+    };
+
+    ARC_REFLECT_TYPE(RenderTextureSettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.texture", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_FIELD(RenderTextureSettings, residencyBudgetBytes)
+            ARC_REFLECT_ATTR(Range, 67108864.0, 17179869184.0)
+            ARC_REFLECT_ATTR(Tooltip, "Texture slice of the device residency account, in bytes, latched at account creation.")
+    ARC_END_REFLECT_TYPE()
+
+    struct RenderResidencySettings
+    {
+        std::uint32_t reservationPercent = 50;
+    };
+
+    ARC_REFLECT_TYPE(RenderResidencySettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.residency", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_TYPE_ATTR(Flags, CVarFlags::Dev)
+        ARC_REFLECT_FIELD(RenderResidencySettings, reservationPercent)
+            ARC_REFLECT_ATTR(Range, 0.0, 100.0)
+            ARC_REFLECT_ATTR(Tooltip, "Percent of each slice's own cap that the other slice may not borrow.")
     ARC_END_REFLECT_TYPE()
 
     struct RenderPostSettings

@@ -556,10 +556,12 @@ render.outline.supersample
 render.post.materialCbBytes
 render.post.maxPasses
 render.post.maxTextures
+render.residency.reservationPercent
 render.shader.compileDebounceSeconds
 render.shader.debugInfo
 render.shader.optimization
 render.sprite.filter
+render.texture.residencyBudgetBytes
 render.textureAnisotropy
 render.uploadRingBytesPerFrame
 render.vsync
