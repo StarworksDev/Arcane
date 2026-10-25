@@ -129,6 +129,7 @@
 // <windows.h> #defines ERROR via wingdi.h).
 #include <NRI.h>
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/Render/Generated/BindlessCapacity.gen.hpp>   // Arcane::kBindlessCapacity (build/engine-constants.lua)
 #include <Extensions/NRIDeviceCreation.h>   // explicitly: GpuSceneTypes.hpp below reaches <windows.h> (GpuScene.hpp explains)
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
@@ -595,14 +596,13 @@ namespace Arcane
         // chosen well above what any scene in this arc names (the four-cube
         // proof uses four slots) and above the spec's cited eventual high-
         // water mark (T3's 144-entry box-projected cubemap array, spec
-        // section 6). MUST EQUAL mesh.hlsl's own kMeshBindlessCapacity
-        // literal EXACTLY: CreateBindings() sizes the t0/space2 descriptor
-        // range to this number, and the shader declares its Texture2D array
-        // with the matching literal -- HLSL cannot include this header, so
-        // that one comparison has no compiler behind it; this comment (and
-        // its mirror in mesh.hlsl) is the whole of that contract.
-        ARC_CONSTANT("shader contract: must equal kMeshBindlessCapacity in data/shaders/mesh.hlsl")
-        static constexpr std::uint32_t kBindlessCapacity = 256;
+        // section 6). The value is Arcane::kBindlessCapacity, generated from
+        // build/engine-constants.lua (the same lua field generates mesh.hlsl's
+        // kMeshBindlessCapacity, data/shaders/bindless-capacity.hlsli). The
+        // generated files are checked in; a drift test fails if a rerun would
+        // change them. This alias keeps the MeshNode:: spelling compiling.
+        ARC_CONSTANT("alias of the generated Arcane::kBindlessCapacity (build/engine-constants.lua)")
+        static constexpr std::uint32_t kBindlessCapacity = Arcane::kBindlessCapacity;
 
         // The arena's region stride on a device whose
         // deviceDesc.memoryAlignment.constantBufferOffset is

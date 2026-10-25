@@ -2,6 +2,7 @@
 # build.sh <Debug|Release|Dist> [-j N] -- THE Linux/macOS build sequence:
 # .github/workflows/ci.yml and scripts/ci/local.ps1 run exactly this. The
 # Windows twin is scripts/ci/build.ps1 (same steps, same log names).
+#   0. constants generate-engine-constants.sh --check (build/engine-constants.lua vs the checked-in outputs)
 #   1. generate  premake5 --cc=<gcc|clang> gmake      (family from $CC)
 #   2. engine    make -k  ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest
 #      abi       arcane-abi-digest --check (build/abi-digest.txt + kGamePluginABIDigest)
@@ -10,7 +11,7 @@
 #                (their postbuild stages ReferenceProject, Binaries/ included)
 # Stops at the first failing step and exits with its code (make -k inside a
 # step still reports every error of that step). Logs:
-# logs/build-{generate,engine,referencegame,tests}.log; stale ones go first.
+# logs/build-{constants,generate,engine,abi,referencegame,tests}.log; stale ones go first.
 # Jobs: -j N, else $MAKE_JOBS, else the CPU count.
 #
 # Tools: with ARCANE_TOOLS_DIR set (the CI image), premake5 and the Linux DXC
@@ -85,6 +86,7 @@ step() {   # step <name> <log> <command...>
     fi
 }
 
+step constants build-constants.log sh scripts/generate-engine-constants.sh --check
 step generate build-generate.log ThirdParty/premake5/premake5 --cc="$PREMAKE_CC" gmake
 step engine build-engine.log make -k -j"$JOBS" config="$config_lc" \
     ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest

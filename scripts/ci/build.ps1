@@ -1,6 +1,7 @@
 # build.ps1 <Debug|Release|Dist> [-Jobs N] -- THE Windows build sequence:
 # .github/workflows/ci.yml and scripts\ci\local.ps1 run exactly this. The
 # Linux/macOS twin is scripts/ci/build.sh (same steps, same log names).
+#   0. constants generate-engine-constants.ps1 -Check (build/engine-constants.lua vs the checked-in outputs)
 #   1. generate  GenerateProjects.bat (premake vs2026)
 #   2. engine    msbuild Arcane.slnx  (the whole solution)
 #      abi       arcane-abi-digest --check (build/abi-digest.txt + kGamePluginABIDigest)
@@ -8,7 +9,7 @@
 #   4. hosts     msbuild Arcane.slnx again, so every host's postbuild restages
 #                the game module
 # Stops at the first failing step and exits with its code. Logs:
-# logs\build-{generate,engine,abi,referencegame,tests}.log (UTF-8); stale ones go
+# logs\build-{constants,generate,engine,abi,referencegame,tests}.log (UTF-8); stale ones go
 # first. -Jobs N -> msbuild /m:N (default /m). MSBuild comes from PATH (CI's
 # setup-msbuild) or vswhere (the desk).
 param(
@@ -37,6 +38,7 @@ function Step([string]$Name, [string]$Log, [string]$File, [string[]]$Arguments) 
     }
 }
 
+Step 'constants' 'build-constants.log' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\generate-engine-constants.ps1'), '-Check')
 Step 'generate' 'build-generate.log' 'cmd.exe' @('/c', (Join-Path $root 'GenerateProjects.bat'))
 Step 'engine' 'build-engine.log' $msbuild @($solution, "/p:Configuration=$Config", $m, '/nologo', '/v:minimal')
 Step 'abi' 'build-abi.log' (Join-Path $root "Binaries\$Config-windows-x86_64-md\arcane-abi-digest\arcane-abi-digest.exe") `
