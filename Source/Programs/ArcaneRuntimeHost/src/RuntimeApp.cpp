@@ -1952,6 +1952,23 @@ int RuntimeApp::Run()
     if (!boot.ok)
         return boot.quitRequested ? 0 : 1;
 
+    // --print-registry (engine modularization s6, registrar survival): the
+    // booted roster as one JSON line on stdout (logs are on stderr), then the
+    // same teardown as a finished run. scripts/ci/package.sh compares the
+    // modular runtime's line with the packaged game's.
+    if (m_config.printRegistry)
+    {
+        const auto* creg = m_runtime->Registry().GetComponentRegistry();
+        if (creg)
+            std::printf("%s\n", Arcane::HostBoot::RegistryJson(*creg, m_process->SystemFactories().Entries()).c_str());
+        else
+            ARC_ERROR("--print-registry: the runtime has no component registry");
+        std::fflush(stdout);
+        Arcane::Diagnostics::RequestCleanExit();
+        Shutdown();
+        return creg ? 0 : 1;
+    }
+
     MainLoop();
 #if !defined(ARC_BUILD_DIST) && !defined(ARC_MONOLITHIC)
     // An open-ended headless --remote run whose remote surface did not start

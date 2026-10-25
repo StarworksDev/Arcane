@@ -17,6 +17,7 @@
 #include <Arcane/Input/InputActions.hpp>
 #include <Arcane/Input/InputSettings.hpp>
 #include <Arcane/Plugin/PluginABI.hpp>   // kGamePluginABIVersion (engine identity probe)
+#include <Arcane/Plugin/SystemFactory.hpp>   // SystemFactoryEntry (the --print-registry roster)
 #include <Arcane/Project/Project.hpp>
 #include <Arcane/Project/ProjectHost.hpp>   // Core-DLL split Task 6: VerifySharedTypeContext/GameModule/
                                              // PluginModules/BootSceneFile/BootSceneResult/BootScene moved
@@ -33,6 +34,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -108,6 +110,30 @@ namespace Arcane::HostBoot
         // degrade to U+FFFD in the output, never an exception escaping main()
         // into terminate(). ExecutablePathUtf8 already yields well-formed UTF-8;
         // this is the belt for every other caller.
+        return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    }
+
+    // One-line JSON of the booted roster, for `--print-registry` (engine
+    // modularization s6, registrar survival): every component the registry
+    // holds and every system factory, by name, each list sorted: a modular host
+    // and the monolithic package must print the same line (names and counts).
+    inline std::string RegistryJson(const Astra::ComponentRegistry& components,
+                                    std::span<const SystemFactoryEntry> systems)
+    {
+        std::vector<std::string> componentNames;
+        components.ForEachComponent([&](Astra::ComponentID, const Astra::ComponentDescriptor& d)
+        {
+            componentNames.emplace_back(d.name ? d.name : "");
+        });
+        std::vector<std::string> systemNames;
+        systemNames.reserve(systems.size());
+        for (const SystemFactoryEntry& e : systems)
+            systemNames.push_back(e.name);
+        std::ranges::sort(componentNames);
+        std::ranges::sort(systemNames);
+        nlohmann::json j;
+        j["components"] = componentNames;
+        j["systems"]    = systemNames;
         return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     }
 

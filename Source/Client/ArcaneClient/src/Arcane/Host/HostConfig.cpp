@@ -140,6 +140,7 @@ namespace Arcane
         cli.Option("scene",   "", "asset Guid to boot instead of the manifest's bootScene (empty = follow the manifest)");
         cli.Option("screenshot", "", "write the last rendered frame to this PNG before exiting (pairs with --frames)");
         cli.Flag  ("print-engine-info",       "print engine identity JSON to stdout and exit");
+        cli.Flag  ("print-registry",          "boot, print the registered components and systems as JSON to stdout, and exit");
         cli.Flag  ("headless",           "render with no window shown and no swapchain; "
                                          "pairs with --frames/--probe/--report");
         // 17 significant digits round-trip the default step's double exactly.
@@ -258,6 +259,7 @@ namespace Arcane
         cfg.sceneOverride = r.Get("scene");
         cfg.screenshotPath = r.Get("screenshot");
         cfg.printEngineInfo = r.Flag("print-engine-info");
+        cfg.printRegistry   = r.Flag("print-registry");
         cfg.headless       = r.Flag("headless");
         cfg.fixedDtSeconds = r.GetAs<double>("fixed-dt");
         cfg.fixedDtSupplied = r.Supplied("fixed-dt");

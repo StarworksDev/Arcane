@@ -68,6 +68,16 @@ TEST_CASE("HostConfig: every flag maps", "[host]") {
     REQUIRE(o.config->perf);
     REQUIRE(o.config->pluginPath == "Game.dll");
 }
+// --print-registry (modularization s6, registrar survival): boot the project,
+// print its registered components and systems as one JSON line, exit.
+TEST_CASE("HostConfig: --print-registry parses and defaults off", "[host]") {
+    const auto plain = Run({"--project", "P"});
+    REQUIRE(plain.config.has_value());
+    CHECK_FALSE(plain.config->printRegistry);
+    const auto on = Run({"--project", "P", "--print-registry"});
+    REQUIRE(on.config.has_value());
+    CHECK(on.config->printRegistry);
+}
 TEST_CASE("HostConfig: --help exits 0, no config", "[host]") {
     const auto o = Run({"--help"});
     REQUIRE_FALSE(o.config.has_value()); REQUIRE(o.exitCode == 0);
