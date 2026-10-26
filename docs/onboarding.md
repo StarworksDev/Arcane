@@ -117,55 +117,26 @@ PR.
 
 ## 4. Coordination: files to stay out of for now
 
-Two arcs are rewriting these areas: **[fix]** review fix round 1
-(`fix/review-round-1`) and **[3dr]** the 3D-readiness arc
-(`feat/3d-readiness`). Do not edit them without asking first; if your design
-needs a change there, raise it in the spec. Each entry clears when the arc
-it names merges to `main`; an entry tagged with both clears when both have
-merged. Adding a new test file under `Tests/ArcaneTests/src/` is always fine.
+One arc is rewriting these areas: Plan C of the 3D-readiness arc
+(`feat/3d-readiness-c`, GPU resources). Review fix round 1 and Plans A and B
+have merged, so their files are open again. Do not edit the files below
+without asking first; if your design needs a change there, raise it in the
+spec. The list clears when Plan C merges to `main`. Adding a new test file
+under `Tests/ArcaneTests/src/` is always fine.
 
-- **Engine core** [fix, 3dr]: `ArcaneEngine/src/Arcane/Base/Runtime.*` and
-  `ProcessContext.*`, `ArcaneCore/src/Arcane/Jobs/` (`JobSystem.cpp`,
-  `ArcaneWorkScheduler.hpp`), `Scene/EngineRoster.hpp`,
-  `Scene/EngineResourceTypes.cpp`, `Project/ProjectHost.hpp`,
-  `ArcaneEngine.arcmodule`. New: `ArcaneCore/src/Arcane/IO/` and
-  `ArcaneCore/src/Arcane/Sim/SimHook.*`.
-- **Game ABI** [3dr]: `ArcaneCore/src/Arcane/Core/AbiVersion.hpp`, and in
-  `ArcaneEngine/src/Arcane/`: `Plugin/PluginABI.hpp`, `Plugin/Plugin.cpp`,
-  `Plugin/PluginHost.cpp`, `Plugin/GameModule.hpp`,
-  `Project/GameDescriptor.hpp`; the `"abi"` field of every `.arcproj`. A
-  generated ABI digest replaces the hand-bumped integer.
-- **2D physics** [3dr]: all of `ArcanePhysics2D/src/Arcane/Scene/`,
-  `ArcaneSim/src/Arcane/Sim/SystemSchedulers.hpp`, the new `Physics*` headers
-  in `ArcaneScene`, and `ThirdParty/Manifold2D`.
-- **Assets and cooking** [fix, 3dr]: `ArtifactReader.*`, `ArtifactFormat.*`
-  (unified into one `ArtifactCodec`), `Assets.cpp`, and in
-  `ArcaneAssetPipeline`: `MeshImporter.cpp`, `CookSession.cpp`,
-  `ArtifactStore.*`, `SourceHash.hpp`, `ArcaneAssetPipeline.arcmodule`.
-- **Render** [fix, 3dr]: `ArcaneRender/src/Arcane/Render/Nri/` (bindless
-  table, upload ring, mesh and texture caches, residency, render graph,
-  `nodes/MeshNode.*`, `nodes/PickOutlineNodes.cpp`), `ExtractFrame.*`,
-  `PickEmit.hpp`, `PhysicsDebugDraw.*`, `RenderBudgetSettings.*`,
-  `DeviceCreationD3D12.cpp`, `ArcaneRender.arcmodule`,
-  `data/shaders/mesh.hlsl`.
-- **Editor** [fix]: in `ArcaneEditor/src/`: `App/EditorAppFrame.cpp`,
-  `App/EditorAppScene.cpp`, `App/EditorAppProject.cpp`, `App/EditorApp.hpp`,
-  `App/PlayMode.*`, `Project/CookQueue.cpp`, `Project/MeshImportWave.cpp`;
-  `ArcaneEdit/src/Arcane/Edit/CommandStack.*`.
-- **Hosts and Servitor** [fix, 3dr]: `Source/Programs/Servitor`,
-  `Source/Runtime/ArcaneRemote*`, `ArcaneClient/src/Arcane/Host/HostConfig.*`,
-  `ArcaneServer/src/Server{App,Config,Report}.*`,
-  `ArcaneRuntimeHost/src/Runtime{App,Frame}.*`; the Servitor sections of
-  `CLAUDE.md` and `AGENTS.md`, and `.claude/skills/arcane-servitor/`.
-- **Build and CI** [fix, 3dr]: `build/modules.lua` and `premake5.lua`
-  (additions are fine, restructuring is not), `scripts/ci/`,
-  `.github/workflows/ci.yml`, `Jenkinsfile`, `scripts/check-baselines.*`,
-  `scripts/automation-baselines.json`, `scripts/run-tests.sh`.
-- **Shared test guards** [fix, 3dr]: `MacroPrefixGuardTest.cpp`,
-  `ArcaneSpellingGuardTest.cpp`, `NamespaceFacadeTest.cpp`,
-  `ProcessContextTest.cpp`, `RuntimeTest.cpp`, `ServerWitnessTest.cpp`,
-  `Tests/ArcaneTests/src/Remote/`. If a guard needs your new name (an env
-  var, a module), say so in your PR and we add it.
+- **Render resources**, in `ArcaneRender/src/Arcane/Render/`: in `Nri/`:
+  `BindlessTable.*`, `NriGraphContext.*`, `NriUploadRing.*`,
+  `NriTextureCache.*`, `NriMeshBufferCache.*`, `MeshResidencyBudget.hpp`,
+  `RenderGraph.*`, `RenderGraphExec.cpp`, `nodes/MeshNode.*`,
+  `nodes/PickOutlineNodes.cpp`; and `RenderBudgetSettings.*`. New:
+  `Nri/DeviceResourceLifetime.*`, `Nri/ResidencyAccount.*`,
+  `Generated/BindlessCapacity.gen.hpp`.
+- **Shaders**: `data/shaders/mesh.hlsl`, `data/shaders/compile-shaders.bat`
+  and `.sh`. New: `data/shaders/bindless-capacity.hlsli`.
+- **Build and CI**: `scripts/ci/build.ps1`, `scripts/ci/build.sh`,
+  `scripts/ci/tests/test-build-sh.sh`, `scripts/generate.bat`. New:
+  `build/engine-constants.lua`, `scripts/generate.sh`,
+  `scripts/generate-engine-constants.ps1` and `.sh`.
 
 Keep pull requests small and rebase on `main` often.
 
