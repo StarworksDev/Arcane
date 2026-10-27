@@ -462,7 +462,9 @@ namespace Arcane
         // depends on it: a refused game module's freshly mapped dependency
         // (ArcanePhysics2D in a host that does not link it) unmaps with the
         // refused module, and its registrations must be dropped first. So do
-        // PluginHost's dependency pins (PinMapped below), for the unload path.
+        // PluginHost's dependency pins (PinMapped below): on Windows they
+        // disown at the session's end; on ELF they pin for the life of the
+        // process (PinsForProcessLife) and nothing is disowned.
         ::dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* user) -> int
         {
             ElfW(Addr) lo = ~ElfW(Addr){ 0 };

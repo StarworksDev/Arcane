@@ -78,6 +78,9 @@ namespace Arcane
         // it registers under in a host that links it), so the game's name drop
         // never strips a library pinned for the life of the process. PluginHost
         // layers each of these with every module it loads (LayerModuleCVars).
+        // Re-layering applies the new project's keys only: a key that only the
+        // previous project set keeps its value on a pinned dependency, the same
+        // as host-linked engine cvars on a project switch.
         // Process-wide, first-seen order, never shrinks. Empty on Windows.
         [[nodiscard]] static std::vector<std::string> DependencyCVarModules();
 

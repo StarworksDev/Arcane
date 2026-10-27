@@ -281,7 +281,9 @@ namespace Arcane
         // The mapped set before the load (Task 8 fix round 2): a refusal below
         // must also clean every DEPENDENCY image this load newly mapped (an
         // engine module the game imports but the host does not link). Their
-        // statics ran inside Module::Load and they unmap with `module`.
+        // statics ran inside Module::Load; on Windows they unmap with `module`
+        // (ELF and Mach-O pin them for the life of the process,
+        // Module::PinsForProcessLife).
         // Every platform, like MappedModules (macOS: shared-cache images left out).
         //
         // SINGLE LOADER THREAD (PR #20 review M8): "fresh" means "mapped between

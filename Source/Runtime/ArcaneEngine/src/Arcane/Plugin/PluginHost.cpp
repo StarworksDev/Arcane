@@ -267,9 +267,12 @@ namespace Arcane
         std::vector<std::filesystem::path> pluginSources;
         std::vector<PluginImage>           plugins;
 
-        // Dependency images a load mapped (see LoadTracked), pinned for this
-        // host's whole load session -- hot reload included, so a reload never
-        // unmaps and remaps them and re-runs their statics.
+        // Dependency images a load mapped (see LoadTracked). Windows: pinned
+        // for this host's whole load session -- hot reload included, so a
+        // reload never unmaps and remaps them and re-runs their statics -- and
+        // disowned when the session ends. ELF and Mach-O pin for the life of
+        // the process instead (Module::PinsForProcessLife) and never record
+        // an entry here.
         struct PinnedDependency
         {
             Module::ImageSpan image;
@@ -302,8 +305,10 @@ namespace Arcane
         // ApplyLogSettings / settings read jumped into freed code (the S2-13
         // [witness][server] 0xC0000005). The rule is GENERAL, not a name match:
         // every image THIS load newly mapped (before/after diff of the mapped
-        // set, taken around this load alone) is pinned for the session and
-        // disowned when the last session pinning it ends (EndLoadSession).
+        // set, taken around this load alone) is pinned. Windows pins it for the
+        // load session and disowns it when the last session pinning it ends
+        // (EndLoadSession); ELF and Mach-O pin it for the life of the process
+        // and never disown it (Module::PinsForProcessLife).
         std::optional<Plugin> LoadTracked(const std::filesystem::path& dll, const std::string& module,
                                           PluginResolveError* error)
         {
@@ -355,9 +360,9 @@ namespace Arcane
                 // registrations if it unmapped before its own load ran. The
                 // shape needs a game that links a project plugin's library
                 // directly (plugins are meant to be loaded, not linked), so the
-                // limit is documented here rather than handled. The game's own image is never pinned
-                // (`loadingImage` and IsPluginImage above; the sim-hook child's
-                // pluginMappedAfterUnload witness).
+                // limit is documented here rather than handled. The game's own
+                // image is never pinned (`loadingImage` and IsPluginImage above;
+                // the sim-hook child's pluginMappedAfterUnload witness).
                 if constexpr (Module::PinsForProcessLife())
                 {
                     if (!fresh)
@@ -564,9 +569,11 @@ namespace Arcane
             // on this module's name. Layer each here too, at every load, as
             // they were under the game's name -- and as a Windows dependency,
             // re-registered under the loading module's name each session, still
-            // is: a later project, or a different game stem, layers them with
-            // ITS rungs instead of leaving the first game's values. Empty on
-            // Windows.
+            // is: a later project, or a different game stem, applies ITS rungs
+            // to them. Re-layering applies the new project's keys only: a key
+            // that only the previous project set keeps its value on a pinned
+            // dependency, the same as host-linked engine cvars on a project
+            // switch. Empty on Windows.
             for (const std::string& dependency : Plugin::DependencyCVarModules())
                 if (dependency != p.CVarModule())
                     CVarRegistry::Get().ApplyLayersFor(dependency, layers);

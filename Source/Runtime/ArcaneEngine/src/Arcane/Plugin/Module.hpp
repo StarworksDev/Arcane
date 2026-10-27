@@ -102,8 +102,10 @@ namespace Arcane
             ImageSpan             image;
         };
         // Snapshot every image currently mapped in this process. PluginHost
-        // diffs this around each load so dependency DLLs that ran registration
-        // statics can be disowned before the load session releases them.
+        // diffs this around each load so dependency images that ran
+        // registration statics are pinned: on Windows for the load session,
+        // then disowned before the session releases them; on ELF and Mach-O
+        // for the life of the process (PinsForProcessLife), never disowned.
         // Windows, Linux and macOS. Each base equals the same image's
         // Module::Image().base. macOS leaves out dyld shared-cache images
         // (MH_DYLIB_IN_CACHE): their segment union spans the cache's shared
@@ -118,7 +120,9 @@ namespace Arcane
         // that look-up reference forever (dyld's RTLD_NODELETE does not keep
         // an image loaded) -- so the image stays loaded for the life of the
         // process (see PinsForProcessLife), and an image at a different base
-        // is never pinned. Nothing is loaded and no initializer runs. nullopt
+        // is never pinned. Mach-O: each call adds a permanent dyld reference
+        // (dyld's RTLD_NODELETE does not pin, see Module.cpp), so callers pin
+        // each image once. Nothing is loaded and no initializer runs. nullopt
         // when no image is mapped at that base any more.
         [[nodiscard]] static std::optional<Module> PinMapped(const MappedModule& mapped) noexcept;
         // True where a PinMapped pin keeps the image loaded for the life of
