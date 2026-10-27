@@ -579,7 +579,9 @@ TEST_CASE("ProcessContext::Create seals the sim hooks and a later registration i
 
 TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the image", "[physics][hook]")
 {
-#if defined(_WIN32)
+    // Every platform: the ArcaneTests image is found through Module::MappedModules,
+    // which lists ELF objects since PR #20 and dyld's non-cache images since
+    // issue #21 (it was Windows-only when this case was written).
     HookRestore restore;
     const auto addr = reinterpret_cast<std::uintptr_t>(&NoopPrewarm);
     Arcane::Module::ImageSpan self{};
@@ -607,9 +609,6 @@ TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the
     CHECK(Arcane::UnregisterSimHook(mine));
     CHECK_FALSE(Arcane::UnregisterSimHook(mine));
     CHECK(Arcane::SimHooks().size() == restore.saved.size());
-#else
-    SKIP("Module::MappedModules is Windows-only");
-#endif
 }
 
 TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload", "[physics][hook]")
@@ -631,7 +630,8 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     REQUIRE(run.fields.count("physics2dMappedAfterUnload") == 1);
     REQUIRE(run.fields.count("physics2dAttachSecondSession") == 1);
     REQUIRE(run.fields.count("physics2dCVarsSecondSession") == 1);
-#if !defined(__APPLE__)   // the child's witness is Module::MappedModules, empty on macOS (no dependency net there yet)
+    // Every platform since issue #21 (Module::MappedModules lists dyld's
+    // non-cache images on macOS, so the child's witness sees Physics2D there).
     CHECK(run.fields.at("physics2dMappedBefore") == "0");   // the child does not link it
     CHECK(run.fields.at("physics2dMappedAtLoad") == "1");   // the module really imports it
 #if defined(_WIN32)
@@ -640,22 +640,22 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     // below is not vacuous).
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "0");
 #else
-    // Linux: a game load pins its fresh engine dependencies FOR PROCESS LIFE
-    // (Module::PinsForProcessLife, user decision 2026-10-24): engine libraries
-    // are never hot-reloaded, only the game module is. glibc decides on its own
-    // whether a released object unmaps (gcc Debug kept Physics2D mapped with
-    // the reference released, run 40051567104), so it stays mapped by rule and
-    // its registrations are never dropped.
+    // Linux and macOS: a game load pins its fresh engine dependencies FOR
+    // PROCESS LIFE (Module::PinsForProcessLife, user decision 2026-10-24;
+    // macOS since issue #21): engine libraries are never hot-reloaded, only
+    // the game module is. The loader decides on its own whether a released
+    // object unmaps (gcc Debug kept Physics2D mapped with the reference
+    // released, run 40051567104), so it stays mapped by rule and its
+    // registrations are never dropped.
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "1");
 #endif
     // A second load session has Physics2D's registrations EXACTLY once: one
     // module-attach callback (re-registered by a fresh map on Windows, never
-    // dropped on Linux -- a dependency disowned but kept mapped shows 0, a
-    // double registration 2) and its cvars.
+    // dropped on Linux and macOS -- a dependency disowned but kept mapped
+    // shows 0, a double registration 2) and its cvars.
     CHECK(run.fields.at("loadedSecondSession") == "1");
     CHECK(run.fields.at("physics2dAttachSecondSession") == "1");
     CHECK(run.fields.at("physics2dCVarsSecondSession") != "0");
-#endif
     CHECK(run.fields.count("advanced") == 1);   // the fresh Runtime stepped after the unload
 }
 

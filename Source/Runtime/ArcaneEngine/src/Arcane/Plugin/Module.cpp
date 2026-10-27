@@ -24,7 +24,11 @@
 #elif defined(__APPLE__)
     #include <dlfcn.h>
     #include <mach-o/dyld.h>     // the dyld image list: the loaded image's header + slide
+    #include <mach-o/loader.h>   // mach_header::flags, MH_DYLIB_IN_CACHE: the shared-cache filter
     #include <Arcane/Platform/Process.hpp>   // MachImageExtent: its LC_SEGMENT_64 extent
+    #ifndef MH_DYLIB_IN_CACHE
+    #define MH_DYLIB_IN_CACHE 0x80000000   // mach-o/loader.h since the macOS 11 SDK; the value is ABI
+    #endif
 #else
     #include <dlfcn.h>
     #include <link.h>   // dlinfo(RTLD_DI_LINKMAP), dl_iterate_phdr: the loaded image's extent
@@ -178,17 +182,18 @@ namespace Arcane
             const std::filesystem::path besideExe = std::filesystem::path(self).parent_path() / dependency;
             if (!std::filesystem::exists(besideExe, ec))
                 break;
-            // The dependency is an ENGINE library a game module imports. On
-            // ELF it is mapped for the life of the process (RTLD_NODELETE), the
-            // rule PinMapped states: engine libraries are never hot-reloaded,
-            // only the game module is, so its registrations stay valid across
-            // every unload, reload and refused load. The handle is not kept.
-            // macOS keeps it mapped by never closing this reference.
-#if defined(__APPLE__)
-            constexpr int kDependencyFlags = RTLD_NOW | RTLD_LOCAL;
-#else
+            // The dependency is an ENGINE library a game module imports. It is
+            // pinned for the life of the process, the rule PinMapped states:
+            // engine libraries are never hot-reloaded, only the game module
+            // is, so its registrations stay valid across every unload, reload
+            // and refused load. ELF: RTLD_NODELETE is the pin. Mach-O: the
+            // reference this dlopen takes is never closed (the handle is not
+            // kept), and THAT is the pin -- dyld's RTLD_NODELETE only skips the
+            // unmap of an image it has otherwise unloaded (terminators run, it
+            // leaves the image list; see PinMapped), so it is passed on both
+            // for the one spelling, and the leaked reference keeps the image
+            // loaded.
             constexpr int kDependencyFlags = RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE;
-#endif
             if (!::dlopen(besideExe.c_str(), kDependencyFlags))
             {
                 const char* depErr = ::dlerror();
@@ -387,7 +392,70 @@ namespace Arcane
             while (::Module32NextW(snapshot, &entry));
         }
         ::CloseHandle(snapshot);
-#elif !defined(__APPLE__)
+#elif defined(__APPLE__)
+        // Mach-O (issue #21): dyld's image list, each span computed exactly as
+        // ImageFromHandle's Apple branch does -- MachImageExtent over that
+        // index's header and slide -- so a base here compares equal to the same
+        // image's Module::Image().base. Plugin::Load's refusal net and
+        // PluginHost's dependency pins diff on exactly that, as on ELF below.
+        //
+        // dyld SHARED-CACHE images are left out: MH_DYLIB_IN_CACHE in the
+        // header flags (mach-o/loader.h, 0x80000000: "Only for use on dylibs.
+        // When this bit is set, the dylib is part of the dyld shared cache,
+        // rather than loose in the filesystem"). A cache image is not one
+        // contiguous mapping: its __LINKEDIT is the cache's ONE shared
+        // __LINKEDIT region, far from its __TEXT, so MachImageExtent's segment
+        // union spans the other cache images in between, and every cache
+        // image's union overlaps the next. Listed, such a span would let a
+        // range net (DropImageRegistrations, UnregisterModuleRange) disown
+        // registrations of images that never unmap. Nothing is lost by leaving
+        // them out: dyld never unloads a shared-cache image (dlclose(3): "the
+        // dynamic library is in dyld's shared cache"), so a game load can
+        // never leave one dangling, and the engine's own libraries and game
+        // modules are never in the cache. The flag is the whole test: the
+        // cache builder sets it on every dylib it emits, it is read from the
+        // header already in hand, and dyld's one other public query
+        // (_dyld_shared_cache_contains_path) goes by path, not by image.
+        //
+        // The index API is not a snapshot. mach-o/dyld.h: "This is not a
+        // thread safe operation. Another thread can add or remove an image
+        // during the iteration." dyld(3): past the end, _dyld_get_image_header
+        // and _dyld_get_image_name return NULL and _dyld_get_image_vmaddr_slide
+        // zero -- so `count` is only an upper bound and a null is skipped, never
+        // read. The three reads are separate calls, and a removal below index i
+        // shifts every later image down one, so they could describe two
+        // different images: the header is read again after the name is copied,
+        // and an entry whose index no longer names that header is dropped
+        // rather than listed with another image's name or slide. The callers
+        // diff the set around their OWN load, on the loading thread, so the
+        // images that diff is about cannot come or go mid-walk; a concurrent
+        // load elsewhere at worst leaves one unrelated image out of one walk.
+        const std::uint32_t count = ::_dyld_image_count();
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const mach_header* header = ::_dyld_get_image_header(i);
+            const std::intptr_t slide = ::_dyld_get_image_vmaddr_slide(i);
+            const char* name = ::_dyld_get_image_name(i);
+            if (!header || !name || !*name)
+                continue;
+            if ((header->flags & MH_DYLIB_IN_CACHE) != 0)
+                continue;
+            // dyld itself, should the list ever carry it: it can run from the
+            // shared cache too (the flag is documented for dylibs only), and it
+            // is never unloaded either.
+            if (header->filetype == MH_DYLINKER)
+                continue;
+            std::filesystem::path path(name);
+            if (::_dyld_get_image_header(i) != header)
+                continue;   // the list moved between the reads
+            const Arcane::Platform::ImageExtent extent = Arcane::Platform::MachImageExtent(header, slide);
+            if (extent.size == 0)
+                continue;
+            result.push_back(MappedModule{
+                std::move(path),
+                ImageSpan{ reinterpret_cast<const void*>(extent.base), static_cast<std::size_t>(extent.size) } });
+        }
+#else
         // ELF: every loaded object, its span computed exactly as ImageFromHandle
         // does (load bias + the PT_LOAD union), so a base here compares equal to
         // the same image's Module::Image().base. Plugin::Load's refusal net
@@ -434,41 +502,102 @@ namespace Arcane
             return std::nullopt;
         }
         return Module(mapped.path, reinterpret_cast<NativeHandle>(handle));
-#elif defined(__APPLE__)
-        // Mach-O: MappedModules lists nothing here, so there is nothing to pin.
-        (void)mapped;
-        return std::nullopt;
 #else
-        // ELF: PIN FOR PROCESS LIFE (user decision 2026-10-24, PR #20 I1).
-        // RTLD_NOLOAD never maps; RTLD_NODELETE marks the already-loaded object
-        // so no dlclose ever unmaps it. Engine libraries are never
+        // ELF and Mach-O: PIN FOR PROCESS LIFE (user decision 2026-10-24,
+        // PR #20 I1; Mach-O since issue #21). Engine libraries are never
         // hot-reloaded -- only the game module is -- so a dependency image a
-        // game load pulled in stays mapped with every registration it made
-        // (cvars, settings blocks, log setters, module-attach) valid across
-        // game unload, reload and refused loads, and nothing disowns it
-        // (PinsForProcessLife). glibc decides on its own whether a released
-        // object unmaps (a leaked reference, an STB_GNU_UNIQUE symbol or a TLS
-        // destructor keeps it), so "disown, then let go" could leave a later
-        // session with a mapped image whose registrations were dropped and
-        // whose statics never run again. The path is the dl_iterate_phdr name
-        // MappedModules recorded; the base check is the same guard as
-        // Windows': if that path now names an object at a DIFFERENT base, it
-        // is not ours to pin. The returned Module's dlclose drops only the
-        // extra reference; the NODELETE marking stays.
+        // game load pulled in stays mapped AND LOADED with every registration
+        // it made (cvars, settings blocks, log setters, module-attach) valid
+        // across game unload, reload and refused loads, and nothing disowns it
+        // (PinsForProcessLife). The loader decides on its own whether a
+        // released object unmaps (glibc: a leaked reference, an STB_GNU_UNIQUE
+        // symbol or a TLS destructor keeps it; dyld: thread-local variables or
+        // Objective-C classes keep it, dlclose(3)), so "disown, then let go"
+        // could leave a later session with a mapped image whose registrations
+        // were dropped and whose statics never run again. The path is the name
+        // MappedModules recorded (dl_iterate_phdr's, or dyld's image name).
+        //
+        // Three steps, so the "not ours" branch never pins anything (PR #20
+        // re-review M-P4: one NOLOAD|NODELETE open applied the marking BEFORE
+        // the base check, so a rejected object stayed mapped for good):
+        //  1. LOOK UP: RTLD_NOLOAD alone. glibc dlopen(3): "Don't load the
+        //     shared object. This can be used to test if the object is
+        //     already resident"; macOS dlopen(3): "The specified image is not
+        //     loaded. However, a valid handle is returned if the image already
+        //     exists in the process ... The handle returned is ref-counted". A
+        //     reference, nothing more.
+        //  2. CHECK the base: the same guard as Windows'. If the path now names
+        //     an object at a DIFFERENT base (the one listed unmapped and
+        //     something else took the name), it is not ours to pin: drop the
+        //     look-up reference and stop, nothing pinned.
+        //  3. PIN, per loader -- `probe` still holds its reference, so the
+        //     object cannot go in between and the name resolves to the very
+        //     image just checked:
+        //     ELF: PROMOTE with RTLD_NOLOAD | RTLD_NODELETE. RTLD_NOLOAD "can
+        //     also be used to promote the flags on a shared object that is
+        //     already loaded" (glibc dlopen(3)); glibc dl-open.c sets
+        //     l_nodelete_active (or l_nodelete_pending, then
+        //     activate_nodelete) on the NOLOAD hit, and a NODELETE object is
+        //     never unloaded: no destructor runs, it stays in the link map.
+        //     Mach-O: KEEP A REFERENCE, never released. dyld's RTLD_NODELETE
+        //     is not glibc's and cannot do this: dlopen_from returns from its
+        //     RTLD_NOLOAD branch BEFORE the "RTLD_NODELETE ... sets the
+        //     leavedMapped bit" block (dyld DyldAPIs.cpp, dyld-1042 for macOS
+        //     13 through main), so NOLOAD|NODELETE marks nothing; and even a
+        //     marked image is still unloaded at its last dlclose -- the
+        //     reaper runs its __cxa_finalize_ranges terminators and drops it
+        //     from the image list, and only the unmap is skipped
+        //     (DyldRuntimeState.cpp removeLoaders: "don't unmap images
+        //     dlopen()ed with RTLD_NODELETE"). dlopen(3) says as much: "never
+        //     be removed from the address space", nothing more. What keeps an
+        //     image LOADED is a live dlopen count: the reaper marks every
+        //     image with one in use (markDirectlyDlopenedImagesAsUsed), and
+        //     dlclose(3) unloads only when "the reference count drops to 0".
+        //     So `probe`, a counted reference (dlopen(3) above), is
+        //     deliberately never closed: that is the pin.
+        // The returned Module holds one more reference of its own, and its
+        // dlclose drops only that one; the pin stays.
         if (!mapped.image.base || mapped.path.empty())
             return std::nullopt;
-        void* handle = ::dlopen(mapped.path.c_str(), RTLD_LAZY | RTLD_NOLOAD | RTLD_NODELETE);
-        if (!handle)
+        void* probe = ::dlopen(mapped.path.c_str(), RTLD_LAZY | RTLD_NOLOAD);
+        if (!probe)
         {
             (void)::dlerror();   // a miss is an answer, not a pending error
             return std::nullopt;
         }
-        if (ImageFromHandle(handle).base != mapped.image.base)
+        if (ImageFromHandle(probe, mapped.path).base != mapped.image.base)
         {
-            ::dlclose(handle);
+            ::dlclose(probe);
             return std::nullopt;
         }
-        return Module(mapped.path, handle);
+#if defined(__APPLE__)
+        constexpr int kPinFlags = RTLD_LAZY | RTLD_NOLOAD;                   // the Module's own reference
+#else
+        constexpr int kPinFlags = RTLD_LAZY | RTLD_NOLOAD | RTLD_NODELETE;   // the promotion
+#endif
+        void* pinned = ::dlopen(mapped.path.c_str(), kPinFlags);
+        if (!pinned)
+        {
+            (void)::dlerror();
+            ::dlclose(probe);
+            return std::nullopt;
+        }
+        // glibc hands back the link_map and dyld the image's loader (salted,
+        // DyldAPIs.cpp handleFromLoader; the low bit is RTLD_FIRST, never
+        // passed here) for every open of one object, so the two handles
+        // compare equal; should a loader ever encode more in its handle, the
+        // base decides.
+        if (pinned != probe && ImageFromHandle(pinned, mapped.path).base != mapped.image.base)
+        {
+            ::dlclose(pinned);
+            ::dlclose(probe);
+            return std::nullopt;
+        }
+#if !defined(__APPLE__)
+        ::dlclose(probe);   // ELF: the NODELETE marking is the pin; one handle is kept
+#endif
+        // Mach-O: `probe` is never closed -- it IS the pin (step 3 above).
+        return Module(mapped.path, pinned);
 #endif
     }
 

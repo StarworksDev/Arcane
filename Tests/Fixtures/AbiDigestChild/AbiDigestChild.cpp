@@ -23,7 +23,7 @@
 // Physics2D's module-attach callbacks and cvar registrations while loaded
 // (physics2dAttachSecondSession, physics2dCVarsSecondSession): exactly one
 // attach callback and some cvars on every platform -- re-registered by a fresh
-// map on Windows, never dropped on Linux, where a game load pins its fresh
+// map on Windows, never dropped on Linux and macOS, where a game load pins its fresh
 // engine dependencies for the life of the process (Module::PinsForProcessLife).
 //
 // Third form (Task 8 fix round 2): AbiDigestChild <module> <sentinel>
@@ -34,9 +34,13 @@
 // (AttachAllModules), runs ClearSystems, EnsurePhysics and one 1/60 Advance,
 // and walks every module's log-level setter (ApplyLogSettings). Each of those
 // calls a registration the dependency image may have left in Core. Last, when
-// Physics2D is still mapped (Linux: pinned for process life), it prints how
+// Physics2D is still mapped (Linux and macOS: pinned for process life), it prints how
 // many module-attach callbacks it still has registered
 // (physics2dAttachAfterRefusal; 1 = intact, not purged).
+//
+// Fourth form (issue #21): AbiDigestChild <module> <sentinel> --pin. Whether a
+// Module::PinMapped pin keeps an image loaded once every other reference is
+// gone (RunPinMode).
 
 #include <Arcane/Base/ProcessContext.hpp>
 #include <Arcane/Base/Runtime.hpp>
@@ -93,7 +97,7 @@ namespace
             afterLoad = Arcane::SimHooks().size();
             host.Unload();
             afterUnload = Arcane::SimHooks().size();
-            // Windows: unmapped (the session pinned, disowned, let go). Linux:
+            // Windows: unmapped (the session pinned, disowned, let go). Linux and macOS:
             // still mapped, pinned for the life of the process with its
             // registrations intact (Module::PinsForProcessLife).
             mappedAfterUnload = Physics2DMapped();
@@ -161,7 +165,7 @@ namespace
         }
         Arcane::ApplyLogSettings(Arcane::LogSettings{});   // every module's level setter
         std::printf("runtimeAfterRefusal=1\n");
-        // Still mapped (pinned for process life on Linux): its module-attach
+        // Still mapped (pinned for process life on Linux and macOS): its module-attach
         // callback must still be registered, not purged by the refusal net.
         const Arcane::Module::ImageSpan image = Physics2DImage();
         const std::size_t attaches = image.base ? Arcane::UnregisterModuleAttachInRange(image.base, image.size) : 0;
@@ -169,16 +173,62 @@ namespace
         std::fflush(stdout);
         return 0;
     }
+
+    // Fourth form (issue #21): AbiDigestChild <module> <sentinel> --pin, on a
+    // fixture that imports nothing this exe does not link (AbiDigestOldEpoch).
+    // CONTROL: Plugin::Load refuses it (dropping its registrations) and lets it
+    // go; with nothing pinning it the image must unload, so the pin check
+    // below is not vacuous (the fixture is built unloadable: -fno-gnu-unique,
+    // no thread-locals on macOS). PIN: the shape PluginHost and Plugin::Load's
+    // refusal net use -- the image listed by MappedModules at its Image()
+    // base, PinMapped on that entry, the returned Module discarded -- then the
+    // loading reference goes too. Whether it is still loaded is the verdict:
+    // ELF and Mach-O pin for process life, Windows hands back one reference.
+    // Ends with _Exit: on Windows the image has just unmapped under its
+    // header registrars' entries, and no exit-time walk may reach them.
+    int RunPinMode(const char* modulePath)
+    {
+        const std::filesystem::path path(modulePath);
+        {
+            const auto refused = Arcane::Plugin::Load(path);
+            std::printf("controlLoaded=%d\n", refused.has_value() ? 1 : 0);
+        }
+        std::printf("controlMappedAfterRelease=%d\n", Arcane::Module::IsMapped(path) ? 1 : 0);
+        bool listed = false, pinned = false;
+        {
+            const auto module = Arcane::Module::Load(path);
+            if (!module)
+            {
+                std::printf("pinLoadError=%s\n", Arcane::Module::LastLoadError().c_str());
+                std::fflush(stdout);
+                std::_Exit(3);
+            }
+            const Arcane::Module::ImageSpan image = module->Image();
+            for (const Arcane::Module::MappedModule& m : Arcane::Module::MappedModules())
+                if (image.base && m.image.base == image.base)
+                {
+                    listed = true;
+                    pinned = Arcane::Module::PinMapped(m).has_value();   // discarded, as the callers do
+                    break;
+                }
+        }   // the loading reference goes
+        std::printf("pinListed=%d\npinTaken=%d\npinMappedAfterRelease=%d\n",
+                    listed ? 1 : 0, pinned ? 1 : 0, Arcane::Module::IsMapped(path) ? 1 : 0);
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
 }
 
 int main(int argc, char** argv)
 {
     if (argc == 3 && std::strcmp(argv[1], "--sim-hook") == 0)
         return RunSimHookMode(argv[2]);
+    if (argc == 4 && std::strcmp(argv[3], "--pin") == 0)
+        return RunPinMode(argv[1]);
     const bool thenRuntime = argc == 4 && std::strcmp(argv[3], "--then-runtime") == 0;
     if (argc < 3 || (argc > 3 && !thenRuntime))
     {
-        std::fputs("usage: AbiDigestChild <module> <sentinel> [--then-runtime]\n", stderr);
+        std::fputs("usage: AbiDigestChild <module> <sentinel> [--then-runtime | --pin]\n", stderr);
         return 2;
     }
 #if defined(_WIN32)

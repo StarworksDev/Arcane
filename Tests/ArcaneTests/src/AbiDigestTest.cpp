@@ -996,7 +996,11 @@ TEST_CASE("a refused load leaves nothing registered from a dependency image it u
     // dependency for the life of the process instead (Module::PinsForProcessLife),
     // so Physics2D stays mapped with its registrations intact -- exactly one
     // module-attach callback -- and the same Runtime / log walk runs live code.
-#if !defined(__APPLE__)   // MappedModules lists nothing on macOS
+    // macOS the same since issue #21: MappedModules lists dyld's non-cache
+    // images and PinMapped pins (a dlopen reference kept for good), so the
+    // Linux expectations hold there (AbiDigestStale loads in place, so
+    // Physics2D arrives as its load-time dependency and, unpinned, would
+    // unmap with the refused module).
     const DigestChildRun stale = RunDigestChild("AbiDigestStale", "--then-runtime");
     INFO("child output: " << stale.output);
     CHECK(stale.kind == "AbiMismatch");
@@ -1006,16 +1010,45 @@ TEST_CASE("a refused load leaves nothing registered from a dependency image it u
     REQUIRE(stale.fields.count("fixturePhysics2dMapped") == 1);
     CHECK(stale.fields.at("fixturePhysics2dMapped") == "1");        // the load really mapped it
     CHECK(stale.fields.at("physics2dMappedAfterRefusal") == "0");   // and the refusal unmapped it
-#else
+#else   // Linux and macOS: pinned for the life of the process
     CHECK(stale.fields.at("physics2dMappedAfterRefusal") == "1");   // mapped by the load (the child does not link it), pinned
     CHECK(stale.fields.at("physics2dAttachAfterRefusal") == "1");   // its registrations intact, not purged
 #endif
     CHECK(stale.fields.count("runtimeAfterRefusal") == 1);
     CHECK(stale.exitCode == 0);
     CHECK_FALSE(fs::exists(stale.sentinel));
+}
+
+TEST_CASE("a PinMapped pin keeps the image loaded for the life of the process on ELF and Mach-O", "[plugin][abi]")
+{
+    // Issue #21. The tests above pin ArcanePhysics2D, which dyld may never
+    // unload anyway (an engine dylib built without macos_unloadable_module can
+    // carry thread-locals, dlclose(3)), so they need not tell a working pin
+    // from none on macOS. This one pins an
+    // image built to unload (AbiDigestOldEpoch: -fno-gnu-unique, no TLVs) in
+    // the child, the way the callers do, and lets every other reference go.
+    // The control proves the loader does unload it when nothing pins it. On
+    // macOS a pin taken with dyld's RTLD_NODELETE (NOLOAD|NODELETE marks
+    // nothing; a marked image is still unloaded, only left in memory) shows
+    // pinMappedAfterRelease=0 here; the kept reference shows 1.
+    const DigestChildRun run = RunDigestChild("AbiDigestOldEpoch", "--pin");
+    INFO("child output: " << run.output);
+    CHECK(run.exitCode == 0);
+    REQUIRE(run.fields.count("controlLoaded") == 1);
+    REQUIRE(run.fields.count("controlMappedAfterRelease") == 1);
+    REQUIRE(run.fields.count("pinListed") == 1);
+    REQUIRE(run.fields.count("pinTaken") == 1);
+    REQUIRE(run.fields.count("pinMappedAfterRelease") == 1);
+    CHECK(run.fields.at("controlLoaded") == "0");               // refused (old epoch), registrations dropped
+    CHECK(run.fields.at("controlMappedAfterRelease") == "0");   // nothing pinned it: it unloaded
+    CHECK(run.fields.at("pinListed") == "1");                   // MappedModules lists it at its Image() base
+    CHECK(run.fields.at("pinTaken") == "1");
+#if defined(_WIN32)
+    CHECK(run.fields.at("pinMappedAfterRelease") == "0");   // one reference, gone with the returned Module
 #else
-    SKIP("the dependency witness uses Module::MappedModules, which lists nothing on macOS");
+    CHECK(run.fields.at("pinMappedAfterRelease") == "1");   // pinned for the life of the process
 #endif
+    CHECK_FALSE(fs::exists(run.sentinel));
 }
 
 TEST_CASE("an older-epoch module fails at the epoch and a digest-less module at the export", "[plugin][abi]")

@@ -210,7 +210,7 @@ namespace Arcane
         // must also clean every DEPENDENCY image this load newly mapped (an
         // engine module the game imports but the host does not link). Their
         // statics ran inside Module::Load and they unmap with `module`.
-        // Windows and Linux, like MappedModules; on macOS the set is empty.
+        // Every platform, like MappedModules (macOS: shared-cache images left out).
         const std::vector<Module::MappedModule> mappedBefore = Module::MappedModules();
         std::optional<Module> module;
         {
@@ -253,11 +253,12 @@ namespace Arcane
                 });
                 if (!fresh)
                     continue;
-                // ELF: the same rule as PluginHost's -- a fresh dependency is
-                // pinned for the life of the process (Module::PinsForProcessLife),
-                // so it does not unmap with `module` and its registrations stay
-                // valid: dropping them would strip a live engine library. Only
-                // when it cannot be pinned is it treated as unmapping.
+                // ELF and Mach-O: the same rule as PluginHost's -- a fresh
+                // dependency is pinned for the life of the process
+                // (Module::PinsForProcessLife), so it does not unmap with
+                // `module` and its registrations stay valid: dropping them would
+                // strip a live engine library. Only when it cannot be pinned is
+                // it treated as unmapping.
                 if constexpr (Module::PinsForProcessLife())
                     if (Module::PinMapped(mapped))
                         continue;
