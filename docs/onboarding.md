@@ -32,10 +32,6 @@ Servitor. This file does not repeat it; it tells you how to work.
    (`CONTRIBUTING.md`).
 
 **State of `main` you may see on day one:**
-- One known flaky test, `BuildDriverTest.cpp` "PROC_THREAD_ATTRIBUTE_HANDLE_LIST
-  inherits only the pipe write handle" (`CHECK(sawInvalid)`), can fail on
-  Windows: the child process can by chance own a handle with the same number.
-  It is unrelated to your work. Re-run with a different `--rng-seed`.
 - `servitor screenshot` on a headless runtime held at frame 0 shows only the
   HUD until you `step` it. A fix is in flight.
 
@@ -117,21 +113,56 @@ PR.
 
 ## 4. Coordination: files to stay out of for now
 
-Other arcs are rewriting these areas. Do not edit them without asking first;
-if your design needs a change there, raise it in the spec.
+Three arcs are changing these areas: **[3drc]** Plan C of the 3D-readiness
+arc (`feat/3d-readiness-c`, GPU resources), **[text]** the in-editor text
+editor (`feat/text-editor`), and **[astra]** Astra's storage policies, which
+reach Arcane as a re-vendor. Review fix round 1 and Plans A and B have
+merged, so their files are open again. Do not edit the files below without
+asking first; if your design needs a change there, raise it in the spec.
+Each entry clears when the arc it names merges to `main`; an entry tagged
+with both clears when both have merged. Adding a new test file under
+`Tests/ArcaneTests/src/` is always fine.
 
-- `Source/Programs/ArcaneEditor/src/App/EditorAppFrame.cpp`
-- `Source/Runtime/ArcaneEngine/src/Arcane/Base/Runtime.cpp`
-- `Source/Client/ArcaneRender/src/Arcane/Render/Nri/*` and the extract path
-  (`ExtractFrame.*`)
-- The ABI headers: `Source/Runtime/ArcaneCore/src/Arcane/Core/AbiVersion.hpp`
-  and `Source/Runtime/ArcaneEngine/src/Arcane/Plugin/PluginABI.hpp` (being
-  replaced by a generated ABI digest)
-- The artifact codecs: `ArtifactReader.*` and `ArtifactFormat.*` (being
-  unified)
-- 2D physics wiring and `ThirdParty/Manifold2D`
-- `build/modules.lua` and `premake5.lua`: additions are fine, restructuring is not
-- Servitor sources (`Source/Programs/Servitor`, `Source/Runtime/ArcaneRemote*`)
+- **Render resources** [3drc], in `ArcaneRender/src/Arcane/Render/`: in
+  `Nri/`: `BindlessTable.*`, `NriGraphContext.*`, `NriUploadRing.*`,
+  `NriTextureCache.*`, `NriMeshBufferCache.*`, `MeshResidencyBudget.hpp`,
+  `RenderGraph.*`, `RenderGraphExec.cpp`, `nodes/MeshNode.*`,
+  `nodes/PickOutlineNodes.cpp`; and `RenderBudgetSettings.*`. New:
+  `Nri/DeviceResourceLifetime.*`, `Nri/ResidencyAccount.*`,
+  `Generated/BindlessCapacity.gen.hpp`.
+- **Shaders** [3drc]: `data/shaders/mesh.hlsl`,
+  `data/shaders/compile-shaders.bat` and `.sh`. New:
+  `data/shaders/bindless-capacity.hlsli`.
+- **Build and CI** [3drc, text]: `scripts/ci/build.ps1`,
+  `scripts/ci/build.sh`, `scripts/ci/tests/test-build-sh.sh`,
+  `scripts/generate.bat`, `scripts/check-baselines.ps1`,
+  `scripts/golden-gate.ps1`, `scripts/automation-baselines.json`,
+  `scripts/settings-frozen-names.txt`;
+  `premake5.lua`, `NOTICE.md` and `ThirdParty/README.md` take additions
+  only. New: `build/engine-constants.lua`, `scripts/generate.sh`,
+  `scripts/generate-engine-constants.ps1` and `.sh`.
+- **Editor shell** [text], in `ArcaneEditor/src/`: `App/EditorApp.*`,
+  `App/EditorAppFrame.cpp`, `App/EditorAppProject.cpp`,
+  `App/EditorAppAssetOps.cpp`, all of `Documents/`, `Input/EditorAction*`,
+  `Settings/` (shortcuts, theme, console and viewport pages),
+  `Widgets/EditorFonts.*`, `Project/IdeLaunch.*`,
+  `Project/ContentDiscovery.cpp`, `Panels/InspectorKinds.hpp`,
+  `Viewport/ViewportActions.cpp`; `ArcaneEdit/src/Arcane/Edit/CommandStack.*`
+  and `data/EditorThemes/`. New: `Source/Editor/ArcaneText/`,
+  `ArcaneEditor/src/TextEditor/`, `Project/Openers/`, `data/Syntaxes/`,
+  `ThirdParty/pcre2/`.
+- **Engine and hosts** [text]: `ArcaneClient/src/Arcane/Host/HostConfig.hpp`,
+  `ArcaneWindow/src/Arcane/Platform/Window.cpp`,
+  `ArcaneEngine/src/Arcane/Project/AssetRegistry.cpp`,
+  `ArcaneAssetPipeline/src/Arcane/AssetPipeline/CookSession.cpp`,
+  `ArcaneRuntime/src/main.cpp`.
+- **Shared tests** [text]: `EditorActionTableTest.cpp`,
+  `EditorInspectorKindsTest.cpp`, `EditorWitnessTest.cpp`,
+  `HostConfigTest.cpp`, `ShortcutsPageTest.cpp`, `SweepCoverageTest.cpp`,
+  `VerifyReportTest.cpp`, and `Tests/Fixtures/arcbuild-process-fixture/`.
+- **Astra** [astra]: `ThirdParty/Astra/`. Never edit it in place in any
+  case: Astra changes land upstream first, then `scripts/sync-astra.ps1`
+  re-vendors them.
 
 Keep pull requests small and rebase on `main` often.
 
