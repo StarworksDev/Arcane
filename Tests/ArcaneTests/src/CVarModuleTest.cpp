@@ -139,6 +139,39 @@ namespace
     }
 }
 
+TEST_CASE("ReattributeModuleRange leaves a registration outside the range under its old module", "[cvar]")
+{
+    // Issue #21 Task 2 review (c): modelled on the UnregisterModuleRange case
+    // above. Two GameA callbacks; a one-byte span around one of them moves
+    // only that one to "Dep".
+    CVarRegistry reg;
+    const CVarHandle knob = reg.Register(Test::Desc("reattr.rangeKnob", CVarValue::Int32(0)));
+    int firesA = 0;
+    int firesB = 0;
+    CVarRegistry::ChangeFn fnA = [](CVarHandle, void* u) { ++*static_cast<int*>(u); };
+    CVarRegistry::ChangeFn fnB = [](CVarHandle, void* u) { *static_cast<int*>(u) += 10; };
+    REQUIRE(fnA != fnB);
+    {
+        const CVarModuleScope scope("GameA");
+        reg.AddCallback(knob, fnA, &firesA);
+        reg.AddCallback(knob, fnB, &firesB);
+    }
+    CHECK(reg.ReattributeModuleRange(reinterpret_cast<const void*>(fnA), 1, "GameA", "Dep") >= 1);
+
+    // fnB lies outside the span: it is still GameA's, so dropping "Dep" leaves
+    // it and dropping "GameA" then takes it.
+    reg.UnregisterModule("Dep");
+    REQUIRE(reg.Set(knob, CVarValue::Int32(1), SetBy::Code) == SetResult::Applied);
+    reg.Publish();
+    CHECK(firesA == 0);
+    CHECK(firesB == 10);
+
+    reg.UnregisterModule("GameA");
+    REQUIRE(reg.Set(knob, CVarValue::Int32(2), SetBy::Code) == SetResult::Applied);
+    reg.Publish();
+    CHECK(firesB == 10);
+}
+
 TEST_CASE("ReattributeModuleRange re-names what an image registered under another module's scope", "[cvar]")
 {
     // Issue #21 M-P1/M-P2: a dependency a game load maps runs its statics

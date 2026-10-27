@@ -56,6 +56,9 @@
 //     --set physics.ground.minNormalY=0.25 (the dependency is layered);
 //   physics2dCVarAfterFailedLoad (M-P1): whether that cvar survives a FAILED
 //     Plugin::Load under the first module's scope name (its name drop);
+//   physics2dSecondSessionBranch (M-R3): which branch the second session's
+//     leftover count ran on: same-base (pinned, Linux and macOS), remapped
+//     (fresh map, Windows) or unmapped (nothing was counted);
 //   physics2dLayeredSecondSession (M-P2): that cvar after the second module
 //     loaded with --set ...=0.75.
 
@@ -72,6 +75,7 @@
 #include <Astra/Core/TypeContext.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -158,6 +162,7 @@ namespace
         bool loaded = false, mappedAtLoad = false, mappedAfterUnload = true;
         bool pluginMappedAtLoad = false, pluginMappedAfterUnload = true;
         std::string cvarModule, layeredAtLoad;
+        std::uintptr_t firstSessionBase = 0;   // Physics2D's image base in the first load session
         {
             Arcane::Runtime rt(*process);
             rt.SetCVarCommandLine({ std::string(kPhysics2DCVar) + "=0.25" }, Arcane::CVarContext::Editor);
@@ -167,6 +172,7 @@ namespace
             const std::vector<Arcane::Module::MappedModule> imagesBefore = Arcane::Module::MappedModules();
             loaded = host.Load();
             mappedAtLoad = Physics2DMapped();
+            firstSessionBase = reinterpret_cast<std::uintptr_t>(Physics2DImage().base);
             const std::vector<std::string> pluginImages = FreshImageNames(imagesBefore, stem + "_");
             pluginMappedAtLoad = !pluginImages.empty();
             cvarModule = Physics2DCVarModule();
@@ -213,6 +219,13 @@ namespace
         std::size_t attachSecondSession = 0, cvarsSecondSession = 0;
         bool loadedSecond = false;
         std::string layeredSecondSession;
+        // Which branch the leftover count below ran on (issue #21 M-R3), so a
+        // vacuous pass is visible: "same-base" = the first session's mapping
+        // (pinned for process life: Linux and macOS), "remapped" = a fresh
+        // map (Windows; the loader may hand back the same address, so the
+        // test accepts either of these two there), "unmapped" = Physics2D not
+        // mapped after the load, so the counts below are 0 uncounted.
+        const char* secondSessionBranch = "unmapped";
         {
             Arcane::Runtime rt(*process);
             rt.SetCVarCommandLine({ std::string(kPhysics2DCVar) + "=0.75" }, Arcane::CVarContext::Editor);
@@ -224,6 +237,8 @@ namespace
             const Arcane::Module::ImageSpan image = Physics2DImage();
             if (image.base)
             {
+                secondSessionBranch = reinterpret_cast<std::uintptr_t>(image.base) == firstSessionBase
+                    ? "same-base" : "remapped";
                 attachSecondSession = Arcane::UnregisterModuleAttachInRange(image.base, image.size);
                 cvarsSecondSession = Arcane::CVarRegistry::Get().UnregisterModuleRange(image.base, image.size);
             }
@@ -231,8 +246,9 @@ namespace
             host.DetachRuntime(rt);
         }
         std::printf("loadedSecondSession=%d\nphysics2dLayeredSecondSession=%s\nphysics2dAttachSecondSession=%zu\n"
-                    "physics2dCVarsSecondSession=%zu\n",
-                    loadedSecond ? 1 : 0, layeredSecondSession.c_str(), attachSecondSession, cvarsSecondSession);
+                    "physics2dCVarsSecondSession=%zu\nphysics2dSecondSessionBranch=%s\n",
+                    loadedSecond ? 1 : 0, layeredSecondSession.c_str(), attachSecondSession, cvarsSecondSession,
+                    secondSessionBranch);
         std::fflush(stdout);
         // A fresh world after the unload: nothing the module left may run.
         {
@@ -322,19 +338,22 @@ int main(int argc, char** argv)
 {
     if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--sim-hook") == 0)
         return RunSimHookMode(argv[2], argc == 4 ? argv[3] : argv[2]);
-    if (argc == 4 && std::strcmp(argv[3], "--pin") == 0)
-        return RunPinMode(argv[1]);
+    const bool pinMode = argc == 4 && std::strcmp(argv[3], "--pin") == 0;
     const bool thenRuntime = argc == 4 && std::strcmp(argv[3], "--then-runtime") == 0;
-    if (argc < 3 || (argc > 3 && !thenRuntime))
+    if (argc < 3 || (argc > 3 && !thenRuntime && !pinMode))
     {
         std::fputs("usage: AbiDigestChild <module> <sentinel> [--then-runtime | --pin]\n", stderr);
         return 2;
     }
+    // Set before ANY dispatch below (issue #21 Task 1 review (a)): the --pin
+    // mode's "no Init ran" check on the sentinel is vacuous otherwise.
 #if defined(_WIN32)
     _putenv_s("ARC_ABI_DIGEST_SENTINEL", argv[2]);
 #else
     setenv("ARC_ABI_DIGEST_SENTINEL", argv[2], 1);
 #endif
+    if (pinMode)
+        return RunPinMode(argv[1]);
     Arcane::PluginResolveError error{};
     auto plugin = Arcane::Plugin::Load(std::filesystem::path(argv[1]), &error);
 

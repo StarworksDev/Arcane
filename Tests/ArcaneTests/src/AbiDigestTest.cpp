@@ -1001,6 +1001,10 @@ TEST_CASE("a refused load leaves nothing registered from a dependency image it u
     // Linux expectations hold there (AbiDigestStale loads in place, so
     // Physics2D arrives as its load-time dependency and, unpinned, would
     // unmap with the refused module).
+    // Unmap branch (issue #21 M-R2): Windows witnesses it below. On Linux and
+    // macOS it is reachable only when PinMapped FAILS (Plugin::Load then
+    // WARNs and drops the registrations), which a healthy loader never does
+    // for these fixtures; the pin check in the next case is its stand-in.
     const DigestChildRun stale = RunDigestChild("AbiDigestStale", "--then-runtime");
     INFO("child output: " << stale.output);
     CHECK(stale.kind == "AbiMismatch");
@@ -1021,16 +1025,15 @@ TEST_CASE("a refused load leaves nothing registered from a dependency image it u
 
 TEST_CASE("a PinMapped pin keeps the image loaded for the life of the process on ELF and Mach-O", "[plugin][abi]")
 {
-    // Issue #21. The tests above pin ArcanePhysics2D, which dyld may never
-    // unload anyway (an engine dylib built without macos_unloadable_module can
-    // carry thread-locals, dlclose(3)), so they need not tell a working pin
-    // from none on macOS. This one pins an
-    // image built to unload (AbiDigestOldEpoch: -fno-gnu-unique, no TLVs) in
-    // the child, the way the callers do, and lets every other reference go.
-    // The control proves the loader does unload it when nothing pins it. On
-    // macOS a pin taken with dyld's RTLD_NODELETE (NOLOAD|NODELETE marks
-    // nothing; a marked image is still unloaded, only left in memory) shows
-    // pinMappedAfterRelease=0 here; the kept reference shows 1.
+    // Issue #21. ArcanePhysics2D is kept mapped by Module::Load's beside-exe
+    // retry reference as well as by the pin, so the tests above cannot tell
+    // a working pin from none. This one pins an image built to unload
+    // (AbiDigestOldEpoch: -fno-gnu-unique, no thread-locals on macOS) in the
+    // child, the way the callers do, and lets every other reference go. The
+    // control proves the loader does unload it when nothing pins it. The pin
+    // is pin-for-process-life: RTLD_NODELETE on ELF, a kept dlopen reference
+    // on Mach-O (a NOLOAD|NODELETE mark alone would still let dyld unload the
+    // image, showing pinMappedAfterRelease=0 here; the kept reference shows 1).
     const DigestChildRun run = RunDigestChild("AbiDigestOldEpoch", "--pin");
     INFO("child output: " << run.output);
     CHECK(run.exitCode == 0);
