@@ -1,7 +1,8 @@
 #pragma once
 
-// Render budgets (settings arc S6-18; inventory Part 2 "Render graph context
-// and budgets", "Batch2D", "Mesh pass", "Post chain", "ImGui NRI backend").
+// Render budgets (settings arc S6-18; 3D-readiness Plan C Task 3; inventory Part 2
+// "Render graph context and budgets", "Batch2D", "Mesh pass", "Post chain",
+// "ImGui NRI backend", "Texture and mesh caches").
 // Every field sizes a pool, a ring, a buffer or a budget that is fixed when
 // its owner is created, so every one is Restart: the owner LATCHES its caps
 // once, at creation, and a value published later never resizes a live pool.
@@ -20,17 +21,13 @@
 //                       residency account (latched at account creation).
 // - render.residency.*  RenderResidencySettings: the reservation percent each
 //                       slice keeps from the other.
-// - render.texture.*    RenderTextureSettings: the texture slice of the device
-//                       residency account (latched at account creation).
-// - render.residency.*  RenderResidencySettings: the reservation percent each
-//                       slice keeps from the other.
 // - render.post.*       RenderPostSettings: PostChainNode's passes, declared
 //                       textures and material CB region size.
 // - render.imgui.*      RenderImguiSettings: ImGuiNri's descriptor-pool chain.
 //
-// Every field is Game Dev, Project, Restart, except the two a content author
-// can plausibly outgrow: render.batch2d.maxSpriteTextures and
-// render.mesh.residencyBudgetBytes (Game).
+// Every field is Game Dev, Project, Restart, except the three a content author
+// can plausibly outgrow: render.batch2d.maxSpriteTextures,
+// render.mesh.residencyBudgetBytes and render.texture.residencyBudgetBytes (Game).
 
 #include <Arcane/Config/Settings.hpp>
 #include <Arcane/Render/RenderDeviceSettings.hpp>   // RenderSettings (render.uploadRingBytesPerFrame)

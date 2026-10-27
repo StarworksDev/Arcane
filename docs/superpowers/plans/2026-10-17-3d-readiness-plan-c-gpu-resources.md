@@ -1207,3 +1207,4 @@ Drift ledger. Each row is ruled; none needed the user.
 
 Unchanged and re-confirmed: no epoch bump; the digest stays put (no Plan C type is in any of the three manifest groups); no `ThirdParty/NRI` edit; no golden bless; `MacroPrefixGuardTest` needs no new name (the plan adds no `ARCANE_*` token; A's two names are already in `kEnvNames`); `ConstantGuardTest` treats the `MeshNode::kBindlessCapacity` alias as unmarked-safe (its initializer holds no numeric literal, `ConstantScan.hpp` `kNumber`).
 
+**Rev 4 addendum (Task 3 review).** A Dev-flagged cvar is checked with `Test::InThisBuild(name)` (Helpers/SettingsSweep.hpp), never `Find(name).IsStale()`: Dist compiles Dev cvars out, so the `IsStale()` check fails there. The Task 3 Step 1 snippet (line ~546) had that bug for `render.residency.reservationPercent`; Task 4 must not repeat the pattern.

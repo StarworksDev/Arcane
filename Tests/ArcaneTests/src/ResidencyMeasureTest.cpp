@@ -8,6 +8,8 @@
 #include <Arcane/Mesh/MeshBuilder.hpp>
 #include <Arcane/Render/Nri/MeshResidencyBudget.hpp>
 
+#include "Helpers/SettingsSweep.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -56,8 +58,12 @@ TEST_CASE("residency measurement: texture chains and primitive meshes", "[.][res
 TEST_CASE("texture and residency settings are registered", "[cvar][residency]")
 {
     CHECK_FALSE(Arcane::CVarRegistry::Get().Find("render.texture.residencyBudgetBytes").IsStale());
-    CHECK_FALSE(Arcane::CVarRegistry::Get().Find("render.residency.reservationPercent").IsStale());
+    // render.residency.reservationPercent is Dev: compiled out of Dist, so it is checked build-aware.
+    (void)Arcane::Test::InThisBuild("render.residency.reservationPercent");
     CHECK(Arcane::Settings<Arcane::RenderTextureSettings>().residencyBudgetBytes >= (64ull << 20));
     CHECK(Arcane::Settings<Arcane::RenderTextureSettings>().residencyBudgetBytes <= (16ull << 30));
     CHECK(Arcane::Settings<Arcane::RenderResidencySettings>().reservationPercent <= 100u);
+    // The defaults the residency measurement priced (Task 4 assumes them).
+    CHECK(Arcane::RenderTextureSettings{}.residencyBudgetBytes == (512ull << 20));
+    CHECK(Arcane::RenderResidencySettings{}.reservationPercent == 50u);
 }
