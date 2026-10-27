@@ -6,9 +6,13 @@
 #include <Arcane/Config/CVarDecl.hpp>
 #include <Arcane/Config/CVarModule.hpp>
 #include <Arcane/Config/CVarRegistry.hpp>
+#include <Arcane/Config/Settings.hpp>
+#include <Arcane/Plugin/Module.hpp>   // MappedModules: this test binary's own image span
 
 #include "Helpers/CVarTestDesc.hpp"
+#include "Helpers/SettingsProbe.hpp"
 
+#include <cstdint>
 #include <string_view>
 
 using namespace Arcane;
@@ -116,4 +120,81 @@ TEST_CASE("UnregisterModuleRange does not drop another image's same-named regist
     reg.Publish();
     CHECK(firesA == 0);
     CHECK(firesB == 10);
+}
+
+namespace
+{
+    // The mapped image holding this test's code: the stand-in for a dependency
+    // image whose statics ran inside a game load's CVarModuleScope.
+    Module::ImageSpan ThisImage()
+    {
+        const auto* self = reinterpret_cast<const unsigned char*>(&ThisImage);
+        for (const Module::MappedModule& m : Module::MappedModules())
+        {
+            const auto* base = static_cast<const unsigned char*>(m.image.base);
+            if (base && self >= base && self < base + m.image.size)
+                return m.image;
+        }
+        return {};
+    }
+}
+
+TEST_CASE("ReattributeModuleRange re-names what an image registered under another module's scope", "[cvar]")
+{
+    // Issue #21 M-P1/M-P2: a dependency a game load maps runs its statics
+    // inside the game's CVarModuleScope. Plugin::Load re-attributes them to the
+    // dependency, so the game's name drop (a failed load) leaves them and the
+    // dependency's own name layers them.
+    const Module::ImageSpan self = ThisImage();
+    REQUIRE(self.base != nullptr);
+
+    CVarRegistry reg;
+    int fires = 0;
+    CVarHandle dep, other;
+    {
+        const CVarModuleScope scope("GameA");
+        dep = reg.Register(Test::Desc("reattr.dep", CVarValue::Int32(0), Audience::Game, CVarFlags::None, {}));
+        REQUIRE(RegisterSettings<SettingsProbe::ProbeSettings>(reg));   // CallerModule(): the scope, "GameA"
+        reg.AddCallback(dep, [](CVarHandle, void* u) { ++*static_cast<int*>(u); }, &fires);
+        REQUIRE(reg.RegisterCommand("reattr.cmd", CVarFlags::None, "Reattribute probe (CVarModuleTest).", "GameA",
+                                    [](std::string_view, void*) { return CommandResult{ true, {} }; }, nullptr));
+    }
+    {
+        const CVarModuleScope scope("GameB");
+        other = reg.Register(Test::Desc("reattr.other", CVarValue::Int32(0), Audience::Game, CVarFlags::None, {}));
+    }
+    const CVarHandle field = reg.Find("tests.settingsProbe.count");
+    REQUIRE(reg.ModuleOf(dep) == "GameA");
+    REQUIRE(reg.ModuleOf(field) == "GameA");
+
+    // Outside the range, or another name: nothing moves.
+    CHECK(reg.ReattributeModuleRange(self.base, 0, "GameA", "Dep") == 0);
+    CHECK(reg.ReattributeModuleRange(self.base, self.size, "GameA", "GameA") == 0);
+    CHECK(reg.ReattributeModuleRange(self.base, self.size, "NoSuchModule", "Dep") == 0);
+    CHECK(reg.ModuleOf(dep) == "GameA");
+
+    // The cvar, the settings struct AND its field cvars (Register'ed from
+    // ArcaneCore, so they follow the struct's factory), the callback, the command.
+    CHECK(reg.ReattributeModuleRange(self.base, self.size, "GameA", "Dep") >= 5);
+    CHECK(reg.ModuleOf(dep) == "Dep");
+    CHECK(reg.ModuleOf(field) == "Dep");
+    CHECK(reg.ModuleOf(other) == "GameB");
+
+    // The game's name drop leaves every one of them.
+    reg.UnregisterModule("GameA");
+    CHECK_FALSE(reg.Find("reattr.dep").IsStale());
+    CHECK_FALSE(reg.Find("tests.settingsProbe.count").IsStale());
+    reg.Publish();
+    CHECK(reg.SettingsBlock(Astra::TypeID<SettingsProbe::ProbeSettings>::Hash()) != nullptr);
+    CHECK(reg.Execute("reattr.cmd", CVarContext::Editor).ok);
+    REQUIRE(reg.Set(dep, CVarValue::Int32(1), SetBy::Code) == SetResult::Applied);
+    reg.Publish();
+    CHECK(fires == 1);
+
+    // ...and the dependency's own name takes them.
+    reg.UnregisterModule("Dep");
+    CHECK(reg.Find("reattr.dep").IsStale());
+    CHECK(reg.Find("tests.settingsProbe.count").IsStale());
+    CHECK_FALSE(reg.Execute("reattr.cmd", CVarContext::Editor).ok);
+    CHECK_FALSE(reg.Find("reattr.other").IsStale());
 }

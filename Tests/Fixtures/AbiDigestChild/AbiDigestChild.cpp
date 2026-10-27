@@ -41,6 +41,23 @@
 // Fourth form (issue #21): AbiDigestChild <module> <sentinel> --pin. Whether a
 // Module::PinMapped pin keeps an image loaded once every other reference is
 // gone (RunPinMode).
+//
+// The --sim-hook mode also takes an optional SECOND module (issue #21: what
+// the second session loads, a different stem that also imports
+// ArcanePhysics2D) and prints, for the PR #20 re-review minors:
+//   pluginMappedAtLoad / pluginMappedAfterUnload (M-P5): the game's own temp
+//     copy, matched by its file name, is mapped while loaded and gone after
+//     Unload on every platform -- the dependency rule never pins the game;
+//   physics2dCVarModule: the module Physics2D's settings cvar is declared by
+//     after the first load (ArcanePhysics2D on Linux and macOS, where
+//     Plugin::Load re-attributes a dependency's registrations; the loading
+//     module's name on Windows);
+//   physics2dLayeredAtLoad: that cvar after the first load, which layered
+//     --set physics.ground.minNormalY=0.25 (the dependency is layered);
+//   physics2dCVarAfterFailedLoad (M-P1): whether that cvar survives a FAILED
+//     Plugin::Load under the first module's scope name (its name drop);
+//   physics2dLayeredSecondSession (M-P2): that cvar after the second module
+//     loaded with --set ...=0.75.
 
 #include <Arcane/Base/ProcessContext.hpp>
 #include <Arcane/Base/Runtime.hpp>
@@ -59,6 +76,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -75,8 +94,58 @@ namespace
 
     bool Physics2DMapped() { return Physics2DImage().base != nullptr; }
 
-    int RunSimHookMode(const char* module)
+    // A Physics2D settings cvar (PhysicsQuerySettings.hpp, ARC_SETTINGS): its
+    // declaring module and its published value.
+    constexpr const char* kPhysics2DCVar = "physics.ground.minNormalY";
+
+    std::string Physics2DCVarModule()
     {
+        return Arcane::CVarRegistry::Get().ModuleOf(Arcane::CVarRegistry::Get().Find(kPhysics2DCVar));
+    }
+
+    std::string Physics2DCVarValue()
+    {
+        const auto value = Arcane::CVarRegistry::Get().Get(Arcane::CVarRegistry::Get().Find(kPhysics2DCVar));
+        if (!value || value->type != Arcane::CVarType::Float32)
+            return "none";
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(value->AsFloat32()));
+        return buf;
+    }
+
+    // The file names of the images mapped now that were not in `before` and
+    // whose name starts with `prefix`: the host's temp copy of a module
+    // (PluginHost's CopyVersioned, "<stem>_<gen>.dll").
+    std::vector<std::string> FreshImageNames(const std::vector<Arcane::Module::MappedModule>& before,
+                                             const std::string& prefix)
+    {
+        std::vector<std::string> names;
+        for (const Arcane::Module::MappedModule& m : Arcane::Module::MappedModules())
+        {
+            const std::string name = m.path.filename().string();
+            if (name.rfind(prefix, 0) != 0)
+                continue;
+            bool old = false;
+            for (const Arcane::Module::MappedModule& b : before)
+                old = old || b.image.base == m.image.base;
+            if (!old)
+                names.push_back(name);
+        }
+        return names;
+    }
+
+    bool AnyImageNamed(const std::vector<std::string>& names)
+    {
+        for (const Arcane::Module::MappedModule& m : Arcane::Module::MappedModules())
+            for (const std::string& name : names)
+                if (m.path.filename().string() == name)
+                    return true;
+        return false;
+    }
+
+    int RunSimHookMode(const char* module, const char* secondModule)
+    {
+        const std::string stem = std::filesystem::path(module).stem().string();
         auto process = Arcane::ProcessContext::Create({});
         if (!process)
             return 10;
@@ -87,13 +156,21 @@ namespace
         const bool mappedBefore = Physics2DMapped();
         std::size_t afterLoad = 0, afterUnload = 0;
         bool loaded = false, mappedAtLoad = false, mappedAfterUnload = true;
+        bool pluginMappedAtLoad = false, pluginMappedAfterUnload = true;
+        std::string cvarModule, layeredAtLoad;
         {
             Arcane::Runtime rt(*process);
+            rt.SetCVarCommandLine({ std::string(kPhysics2DCVar) + "=0.25" }, Arcane::CVarContext::Editor);
             Arcane::PluginHost host(*process, std::filesystem::path(module));
             if (!host.AttachRuntime(rt))
                 return 11;
+            const std::vector<Arcane::Module::MappedModule> imagesBefore = Arcane::Module::MappedModules();
             loaded = host.Load();
             mappedAtLoad = Physics2DMapped();
+            const std::vector<std::string> pluginImages = FreshImageNames(imagesBefore, stem + "_");
+            pluginMappedAtLoad = !pluginImages.empty();
+            cvarModule = Physics2DCVarModule();
+            layeredAtLoad = Physics2DCVarValue();
             afterLoad = Arcane::SimHooks().size();
             host.Unload();
             afterUnload = Arcane::SimHooks().size();
@@ -101,13 +178,31 @@ namespace
             // still mapped, pinned for the life of the process with its
             // registrations intact (Module::PinsForProcessLife).
             mappedAfterUnload = Physics2DMapped();
+            // The game's OWN image is never pinned (PR #20 re-review M-P5):
+            // its temp copy is gone with its last reference on every platform.
+            pluginMappedAfterUnload = AnyImageNamed(pluginImages);
             host.DetachRuntime(rt);
         }
         std::printf("loaded=%d\nsealed=%d\nphysics2dMappedBefore=%d\nphysics2dMappedAtLoad=%d\n"
-                    "physics2dMappedAfterUnload=%d\nhooksBefore=%zu\nhooksAfterLoad=%zu\nhooksAfterUnload=%zu\n",
+                    "physics2dMappedAfterUnload=%d\nhooksBefore=%zu\nhooksAfterLoad=%zu\nhooksAfterUnload=%zu\n"
+                    "pluginMappedAtLoad=%d\npluginMappedAfterUnload=%d\nphysics2dCVarModule=%s\n"
+                    "physics2dLayeredAtLoad=%s\n",
                     loaded ? 1 : 0, Arcane::SimHooksSealed() ? 1 : 0, mappedBefore ? 1 : 0, mappedAtLoad ? 1 : 0,
-                    mappedAfterUnload ? 1 : 0, before, afterLoad, afterUnload);
+                    mappedAfterUnload ? 1 : 0, before, afterLoad, afterUnload, pluginMappedAtLoad ? 1 : 0,
+                    pluginMappedAfterUnload ? 1 : 0, cvarModule.c_str(), layeredAtLoad.c_str());
         std::fflush(stdout);
+        // A FAILED load under the first module's name (M-P1): a hot reload of
+        // a broken build ends the same way, in Plugin::Load's name drop. It
+        // must not strip a dependency that stays mapped.
+        {
+            const Arcane::CVarModuleScope scope(stem);
+            const std::filesystem::path missing = std::filesystem::path(module).parent_path() /
+                (stem + "_missing" + std::filesystem::path(module).extension().string());
+            const bool failed = !Arcane::Plugin::Load(missing).has_value();
+            std::printf("failedLoadFailed=%d\nphysics2dCVarAfterFailedLoad=%d\n", failed ? 1 : 0,
+                        Arcane::CVarRegistry::Get().Find(kPhysics2DCVar).IsStale() ? 0 : 1);
+            std::fflush(stdout);
+        }
         // A SECOND load session in the same process (re-review I-R1): the
         // dependency must have its registrations, exactly once. A dependency
         // that stayed mapped after its registrations were dropped would be
@@ -117,12 +212,15 @@ namespace
         // while the second session still holds it.
         std::size_t attachSecondSession = 0, cvarsSecondSession = 0;
         bool loadedSecond = false;
+        std::string layeredSecondSession;
         {
             Arcane::Runtime rt(*process);
-            Arcane::PluginHost host(*process, std::filesystem::path(module));
+            rt.SetCVarCommandLine({ std::string(kPhysics2DCVar) + "=0.75" }, Arcane::CVarContext::Editor);
+            Arcane::PluginHost host(*process, std::filesystem::path(secondModule));
             if (!host.AttachRuntime(rt))
                 return 12;
             loadedSecond = host.Load();
+            layeredSecondSession = Physics2DCVarValue();   // before the destructive count below
             const Arcane::Module::ImageSpan image = Physics2DImage();
             if (image.base)
             {
@@ -132,8 +230,9 @@ namespace
             host.Unload();
             host.DetachRuntime(rt);
         }
-        std::printf("loadedSecondSession=%d\nphysics2dAttachSecondSession=%zu\nphysics2dCVarsSecondSession=%zu\n",
-                    loadedSecond ? 1 : 0, attachSecondSession, cvarsSecondSession);
+        std::printf("loadedSecondSession=%d\nphysics2dLayeredSecondSession=%s\nphysics2dAttachSecondSession=%zu\n"
+                    "physics2dCVarsSecondSession=%zu\n",
+                    loadedSecond ? 1 : 0, layeredSecondSession.c_str(), attachSecondSession, cvarsSecondSession);
         std::fflush(stdout);
         // A fresh world after the unload: nothing the module left may run.
         {
@@ -221,8 +320,8 @@ namespace
 
 int main(int argc, char** argv)
 {
-    if (argc == 3 && std::strcmp(argv[1], "--sim-hook") == 0)
-        return RunSimHookMode(argv[2]);
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--sim-hook") == 0)
+        return RunSimHookMode(argv[2], argc == 4 ? argv[3] : argv[2]);
     if (argc == 4 && std::strcmp(argv[3], "--pin") == 0)
         return RunPinMode(argv[1]);
     const bool thenRuntime = argc == 4 && std::strcmp(argv[3], "--then-runtime") == 0;

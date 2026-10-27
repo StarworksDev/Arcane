@@ -405,6 +405,15 @@ namespace Arcane
         // to `module` instead of left tagged "". Teardown unpublishes.
         void RegisterModuleImage(std::string_view module, const void* base, std::size_t size);
         void UnregisterModuleImage(const void* base, std::size_t size);
+        // Re-name to `to` what code in `[base, base+size)` registered under
+        // `from`: cvars (by declaring address; a settings field by its
+        // struct's factory), settings structs, commands and callbacks. For an
+        // image whose statics ran inside ANOTHER module's CVarModuleScope -- a
+        // dependency a game load mapped -- so a later UnregisterModule(from)
+        // leaves it and ApplyLayersFor(to) layers it (issue #21, M-P1/M-P2).
+        // History records keep their tag. Returns how many entries changed.
+        std::size_t ReattributeModuleRange(const void* base, std::size_t size, std::string_view from,
+                                           std::string_view to);
 
         // Re-apply every rung in `layers` (directories, then the --set items) to
         // the cvars `module` declared, and nothing else; then Publish. Defined

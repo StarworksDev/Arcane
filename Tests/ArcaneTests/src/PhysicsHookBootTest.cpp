@@ -117,17 +117,18 @@ namespace
         std::map<std::string, std::string> fields;
     };
 
-    SimHookChildRun RunSimHookChild(const std::string& module)
+    SimHookChildRun RunSimHookChild(const std::string& module, const std::string& secondModule)
     {
         SimHookChildRun run;
         const std::filesystem::path exeDir = std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path();
 #if defined(_WIN32)
         const std::filesystem::path child = exeDir.parent_path() / "AbiDigestChild" / "AbiDigestChild.exe";
-        const std::string line = "\"\"" + child.string() + "\" --sim-hook \"" + module + "\" 2>NUL\"";
+        const std::string line = "\"\"" + child.string() + "\" --sim-hook \"" + module + "\" \"" + secondModule +
+                                 "\" 2>NUL\"";
         FILE* pipe = _popen(line.c_str(), "r");
 #else
         const std::filesystem::path child = exeDir.parent_path() / "AbiDigestChild" / "AbiDigestChild";
-        const std::string line = "'" + child.string() + "' --sim-hook '" + module + "' 2>/dev/null";
+        const std::string line = "'" + child.string() + "' --sim-hook '" + module + "' '" + secondModule + "' 2>/dev/null";
         FILE* pipe = popen(line.c_str(), "r");
 #endif
         if (!pipe) return run;
@@ -619,7 +620,12 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     const std::string module = (std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path().parent_path()
                                 / "HotReloadPluginV1" / Arcane::Test::ModuleFile("HotReloadPluginV1")).string();
     REQUIRE(std::filesystem::exists(module));
-    const SimHookChildRun run = RunSimHookChild(module);
+    // The second session loads HotReloadPluginV2: a DIFFERENT stem (issue #21
+    // M-P2) that imports ArcanePhysics2D too.
+    const std::string secondModule = (std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path().parent_path()
+                                      / "HotReloadPluginV2" / Arcane::Test::ModuleFile("HotReloadPluginV2")).string();
+    REQUIRE(std::filesystem::exists(secondModule));
+    const SimHookChildRun run = RunSimHookChild(module, secondModule);
     INFO("child output: " << run.output);
     CHECK(run.exitCode == 0);
     REQUIRE(run.fields.count("loaded") == 1);
@@ -630,6 +636,9 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     REQUIRE(run.fields.count("physics2dMappedAfterUnload") == 1);
     REQUIRE(run.fields.count("physics2dAttachSecondSession") == 1);
     REQUIRE(run.fields.count("physics2dCVarsSecondSession") == 1);
+    REQUIRE(run.fields.count("pluginMappedAfterUnload") == 1);
+    REQUIRE(run.fields.count("physics2dCVarAfterFailedLoad") == 1);
+    REQUIRE(run.fields.count("physics2dLayeredSecondSession") == 1);
     // Every platform since issue #21 (Module::MappedModules lists dyld's
     // non-cache images on macOS, so the child's witness sees Physics2D there).
     CHECK(run.fields.at("physics2dMappedBefore") == "0");   // the child does not link it
@@ -649,6 +658,33 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     // registrations are never dropped.
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "1");
 #endif
+    // The game's OWN image is never pinned, on any platform (PR #20 re-review
+    // M-P5): its temp copy is mapped while loaded and gone after Unload. A
+    // regression that pinned it would stay green everywhere else, since every
+    // load uses a fresh temp path.
+    CHECK(run.fields.at("pluginMappedAtLoad") == "1");
+    CHECK(run.fields.at("pluginMappedAfterUnload") == "0");
+    // Physics2D's settings are layered at the load (--set ...=0.25), whatever
+    // name they are registered under.
+    CHECK(run.fields.at("physics2dLayeredAtLoad") == "0.25");
+#if defined(_WIN32)
+    // Windows: a dependency's statics run inside the game's LoadLibrary, under
+    // its CVarModuleScope, and leave with the load session (EndLoadSession).
+    CHECK(run.fields.at("physics2dCVarModule") == "HotReloadPluginV1");
+#else
+    // Linux and macOS (issue #21 M-P1/M-P2): the dependency is pinned for the
+    // life of the process, and Plugin::Load re-attributes what its statics
+    // registered under the game's scope to its own module, the name it has in
+    // a host that links it...
+    CHECK(run.fields.at("physics2dCVarModule") == "ArcanePhysics2D");
+    // ...so a FAILED load of the game's stem (its name drop) leaves it (M-P1:
+    // it stays mapped and its statics never run again)...
+    CHECK(run.fields.at("failedLoadFailed") == "1");
+    CHECK(run.fields.at("physics2dCVarAfterFailedLoad") == "1");
+#endif
+    // ...and a second session that loads a DIFFERENT stem layers it with ITS
+    // rungs (--set ...=0.75), not the first game's (M-P2).
+    CHECK(run.fields.at("physics2dLayeredSecondSession") == "0.75");
     // A second load session has Physics2D's registrations EXACTLY once: one
     // module-attach callback (re-registered by a fresh map on Windows, never
     // dropped on Linux and macOS -- a dependency disowned but kept mapped

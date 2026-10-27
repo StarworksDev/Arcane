@@ -16,6 +16,7 @@
 #include <Arcane/Plugin/ClientHooks.hpp>
 #include <Arcane/Plugin/PluginSettings.hpp>
 #include <Arcane/Plugin/SystemFactory.hpp>
+#include <Arcane/Scene/PhysicsQuery.hpp>   // ClearPhysicsQueryFns2DInRange: an unpinnable dependency's drop (M-P3)
 #include <Arcane/Sim/NetDriver.hpp>
 #include <Arcane/Sim/SimHook.hpp>
 
@@ -306,6 +307,9 @@ namespace Arcane
         std::optional<Plugin> LoadTracked(const std::filesystem::path& dll, const std::string& module,
                                           PluginResolveError* error)
         {
+            // The diff assumes the SINGLE LOADER THREAD: an image another
+            // thread maps while this load runs counts as fresh. Contract and
+            // evidence at Plugin::Load's snapshot (PR #20 review M8).
             const std::vector<Module::MappedModule> before = Module::MappedModules();
             std::optional<Plugin> loaded = LoadScoped(dll, module, error);
             if (loaded)
@@ -333,11 +337,57 @@ namespace Arcane
                 // its registrations stay valid for every later session. No
                 // session bookkeeping: the image cannot unmap, so
                 // EndLoadSession has nothing to drop for it.
+                //
+                // The rule's LIMIT (PR #20 re-review M-P5): it pins every fresh
+                // image that is not a plugin image of this host, whatever it
+                // is -- an engine library, a third-party library a game vendors
+                // with an rpath (build/modules.lua), or a project plugin the
+                // primary happens to link (DT_NEEDED / LC_LOAD_DYLIB) and that
+                // LoadInitPlugins has not loaded yet. Pinning the first two is
+                // the point. The third is pinned too: its own later load (in
+                // place) gets the same image back, its Unload drops its cvars by
+                // range while the image stays mapped, so a later session runs it
+                // without them, and a rebuilt copy is picked up only after a
+                // restart. Not narrowed: excluding it (by path, against
+                // pluginSources or the project's plugin folders) would hand that
+                // image back to the loader's own unload decision -- the I1/I-R1
+                // hazard this rule exists to remove -- with nothing to drop its
+                // registrations if it unmapped before its own load ran. The
+                // shape needs a game that links a project plugin's library
+                // directly (plugins are meant to be loaded, not linked), so the
+                // limit is documented here rather than handled. The game's own image is never pinned
+                // (`loadingImage` and IsPluginImage above; the sim-hook child's
+                // pluginMappedAfterUnload witness).
                 if constexpr (Module::PinsForProcessLife())
                 {
-                    if (fresh && Module::PinMapped(mapped))
+                    if (!fresh)
+                        continue;
+                    if (Module::PinMapped(mapped))
+                    {
                         ARC_TRACE("plugin: pinned dependency image '{}' for the life of the process",
                                   mapped.path.generic_string());
+                        continue;
+                    }
+                    // Not pinnable (M-P3): PinMapped's NOLOAD look-up missed the
+                    // name MappedModules recorded, or the base moved. The game
+                    // image holds it now, but it may unmap with the game, under
+                    // whatever it registered -- the I1 crash a session later.
+                    // Practically unreachable (dl_iterate_phdr's and dyld's name
+                    // IS the loader's own, so NOLOAD finds it), and there is no
+                    // reference to take for a Windows-style session pin either,
+                    // so take the refusal net's rule (Plugin::Load): an image
+                    // that cannot be pinned is treated as unmapping, and its
+                    // registrations go NOW, while it is certainly mapped. The
+                    // cost is that library's cvars and settings for this
+                    // process; the alternative is a dangling call.
+                    const std::size_t cvars = CVarRegistry::Get().UnregisterModuleRange(base, mapped.image.size);
+                    const std::size_t attaches = UnregisterModuleAttachInRange(base, mapped.image.size);
+                    const std::size_t hooks = UnregisterSimHooksInRange(base, mapped.image.size);
+                    const bool query = ClearPhysicsQueryFns2DInRange(base, mapped.image.size);
+                    ARC_WARN("plugin: dependency image '{}' could not be pinned for the life of the process; dropped "
+                             "{} cvar slot(s), {} module-attach callback(s), {} sim hook(s){} it registered, so "
+                             "nothing is left pointing into it if it unmaps with the game module",
+                             mapped.path.generic_string(), cvars, attaches, hooks, query ? " and the 2D query pair" : "");
                     continue;
                 }
 
@@ -508,6 +558,18 @@ namespace Arcane
             if (runtimes.empty() || p.CVarModule().empty()) return;
             const LayerSources layers = Primary().CVarLayerSources();
             CVarRegistry::Get().ApplyLayersFor(p.CVarModule(), layers);
+            // ELF and Mach-O: the dependency images game loads mapped keep their
+            // registrations under their OWN module names (Plugin::Load
+            // re-attributes them; issue #21 M-P1/M-P2), so they no longer ride
+            // on this module's name. Layer each here too, at every load, as
+            // they were under the game's name -- and as a Windows dependency,
+            // re-registered under the loading module's name each session, still
+            // is: a later project, or a different game stem, layers them with
+            // ITS rungs instead of leaving the first game's values. Empty on
+            // Windows.
+            for (const std::string& dependency : Plugin::DependencyCVarModules())
+                if (dependency != p.CVarModule())
+                    CVarRegistry::Get().ApplyLayersFor(dependency, layers);
             // The module's keys are known now: republish the whole set, and log
             // (once per surviving issue -- OpenProject deferred its log to here).
             PublishCVarConfigDiagnostics(ValidateCVarLayers(CVarRegistry::Get(), layers), CVarConfigLog::Now);
