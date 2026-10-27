@@ -151,12 +151,22 @@ TEST_CASE("ReattributeModuleRange leaves a registration outside the range under 
     CVarRegistry::ChangeFn fnA = [](CVarHandle, void* u) { ++*static_cast<int*>(u); };
     CVarRegistry::ChangeFn fnB = [](CVarHandle, void* u) { *static_cast<int*>(u) += 10; };
     REQUIRE(fnA != fnB);
+    // Distinct bodies so the two functions cannot be folded into one address.
+    static const auto cmdA = +[](std::string_view, void*) { return CommandResult{ true, {} }; };
+    static const auto cmdB = +[](std::string_view, void*) { return CommandResult{ true, "b" }; };
+    REQUIRE(cmdA != cmdB);
     {
         const CVarModuleScope scope("GameA");
         reg.AddCallback(knob, fnA, &firesA);
         reg.AddCallback(knob, fnB, &firesB);
+        // Two commands too: the command loop is separate from the callback loop.
+        REQUIRE(reg.RegisterCommand("reattr.cmdA", CVarFlags::None, "Range probe A (CVarModuleTest).", "GameA",
+                                    cmdA, nullptr));
+        REQUIRE(reg.RegisterCommand("reattr.cmdB", CVarFlags::None, "Range probe B (CVarModuleTest).", "GameA",
+                                    cmdB, nullptr));
     }
-    CHECK(reg.ReattributeModuleRange(reinterpret_cast<const void*>(fnA), 1, "GameA", "Dep") >= 1);
+    CHECK(reg.ReattributeModuleRange(reinterpret_cast<const void*>(fnA), 1, "GameA", "Dep") == 1);
+    CHECK(reg.ReattributeModuleRange(reinterpret_cast<const void*>(cmdA), 1, "GameA", "Dep") == 1);
 
     // fnB lies outside the span: it is still GameA's, so dropping "Dep" leaves
     // it and dropping "GameA" then takes it.
@@ -165,11 +175,14 @@ TEST_CASE("ReattributeModuleRange leaves a registration outside the range under 
     reg.Publish();
     CHECK(firesA == 0);
     CHECK(firesB == 10);
+    CHECK_FALSE(reg.Execute("reattr.cmdA", CVarContext::Editor).ok);   // moved to "Dep", dropped with it
+    CHECK(reg.Execute("reattr.cmdB", CVarContext::Editor).ok);         // outside the span: still GameA's
 
     reg.UnregisterModule("GameA");
     REQUIRE(reg.Set(knob, CVarValue::Int32(2), SetBy::Code) == SetResult::Applied);
     reg.Publish();
     CHECK(firesB == 10);
+    CHECK_FALSE(reg.Execute("reattr.cmdB", CVarContext::Editor).ok);
 }
 
 TEST_CASE("ReattributeModuleRange re-names what an image registered under another module's scope", "[cvar]")
@@ -201,10 +214,12 @@ TEST_CASE("ReattributeModuleRange re-names what an image registered under anothe
     REQUIRE(reg.ModuleOf(field) == "GameA");
 
     // Outside the range, or another name: nothing moves.
+    const std::uint64_t revBefore = reg.Revision();
     CHECK(reg.ReattributeModuleRange(self.base, 0, "GameA", "Dep") == 0);
     CHECK(reg.ReattributeModuleRange(self.base, self.size, "GameA", "GameA") == 0);
     CHECK(reg.ReattributeModuleRange(self.base, self.size, "NoSuchModule", "Dep") == 0);
     CHECK(reg.ModuleOf(dep) == "GameA");
+    CHECK(reg.Revision() == revBefore);   // a no-op rename leaves the Settings window's cache alone
 
     // The cvar, the settings struct AND its field cvars (Register'ed from
     // ArcaneCore, so they follow the struct's factory), the callback, the command.
@@ -212,6 +227,7 @@ TEST_CASE("ReattributeModuleRange re-names what an image registered under anothe
     CHECK(reg.ModuleOf(dep) == "Dep");
     CHECK(reg.ModuleOf(field) == "Dep");
     CHECK(reg.ModuleOf(other) == "GameB");
+    CHECK(reg.Revision() > revBefore);    // a real rename must invalidate the editor's by-module filing
 
     // The game's name drop leaves every one of them.
     reg.UnregisterModule("GameA");

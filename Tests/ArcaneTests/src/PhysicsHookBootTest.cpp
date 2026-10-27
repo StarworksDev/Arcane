@@ -608,15 +608,12 @@ TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the
     REQUIRE(Arcane::SimHooks().size() == restore.saved.size() + 1);
 
     CHECK(Arcane::UnregisterSimHooksInRange(nullptr, 0) == 0);
-#if !defined(ARC_MONOLITHIC)
     // One image per module: the saved hooks (Physics2D's) live in their own
-    // images, so this exe's image holds exactly the one hook added above. A
-    // monolithic exe carries the engine hooks in the same image.
+    // images, so this exe's image holds exactly the one hook added above.
+    // (No ARC_MONOLITHIC branch: premake5.lua returns before the test
+    // projects in the monolithic layout, so it never compiled.)
     CHECK(Arcane::UnregisterSimHooksInRange(self.base, self.size) == 1);
     CHECK(Arcane::SimHooks().size() == restore.saved.size());   // the Physics2D hook lives in its own image
-#else
-    CHECK(Arcane::UnregisterSimHooksInRange(self.base, self.size) >= 1);
-#endif
     for (const Arcane::SimHook& h : Arcane::SimHooks())
         CHECK(h.Prewarm != &NoopPrewarm);
 
@@ -690,6 +687,7 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     // Physics2D's settings are layered at the load (--set ...=0.25), whatever
     // name they are registered under.
     CHECK(run.fields.at("physics2dLayeredAtLoad") == "0.25");
+    CHECK(run.fields.at("failedLoadFailed") == "1");
 #if defined(_WIN32)
     // Windows: a dependency's statics run inside the game's LoadLibrary, under
     // its CVarModuleScope, and leave with the load session (EndLoadSession).
@@ -697,12 +695,10 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     // ...and a FAILED load of the game's stem finds Physics2D already unmapped
     // and its registrations dropped, so the cvar is stale (issue #21 Task 2
     // review (d)).
-    CHECK(run.fields.at("failedLoadFailed") == "1");
     CHECK(run.fields.at("physics2dCVarAfterFailedLoad") == "0");
-    // The second session maps it afresh (the loader may reuse the address, so
-    // same-base is accepted too); "unmapped" would mean nothing was counted.
-    CHECK((run.fields.at("physics2dSecondSessionBranch") == "remapped" ||
-           run.fields.at("physics2dSecondSessionBranch") == "same-base"));
+    // Physics2D unmapped with the first session, so the second maps it afresh
+    // (the label comes from the unmap, not from the base address).
+    CHECK(run.fields.at("physics2dSecondSessionBranch") == "remapped");
 #else
     // Linux and macOS (issue #21 M-P1/M-P2): the dependency is pinned for the
     // life of the process, and Plugin::Load re-attributes what its statics
@@ -711,7 +707,6 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     CHECK(run.fields.at("physics2dCVarModule") == "ArcanePhysics2D");
     // ...so a FAILED load of the game's stem (its name drop) leaves it (M-P1:
     // it stays mapped and its statics never run again)...
-    CHECK(run.fields.at("failedLoadFailed") == "1");
     CHECK(run.fields.at("physics2dCVarAfterFailedLoad") == "1");
     // The leftover count ran against the pinned first-session mapping.
     CHECK(run.fields.at("physics2dSecondSessionBranch") == "same-base");

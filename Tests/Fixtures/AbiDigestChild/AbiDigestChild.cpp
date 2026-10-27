@@ -57,8 +57,12 @@
 //   physics2dCVarAfterFailedLoad (M-P1): whether that cvar survives a FAILED
 //     Plugin::Load under the first module's scope name (its name drop);
 //   physics2dSecondSessionBranch (M-R3): which branch the second session's
-//     leftover count ran on: same-base (pinned, Linux and macOS), remapped
-//     (fresh map, Windows) or unmapped (nothing was counted);
+//     leftover count ran on, derived from whether Physics2D stayed mapped
+//     after the first Unload: same-base (stayed mapped and the second session
+//     sees the same base: pinned, Linux and macOS), remapped (unmapped with
+//     the first session, mapped again in the second: Windows), rebased
+//     (stayed mapped yet at another base: a pin that did not hold), or
+//     unmapped (not mapped in the second session: nothing was counted);
 //   physics2dLayeredSecondSession (M-P2): that cvar after the second module
 //     loaded with --set ...=0.75.
 
@@ -220,11 +224,13 @@ namespace
         bool loadedSecond = false;
         std::string layeredSecondSession;
         // Which branch the leftover count below ran on (issue #21 M-R3), so a
-        // vacuous pass is visible: "same-base" = the first session's mapping
-        // (pinned for process life: Linux and macOS), "remapped" = a fresh
-        // map (Windows; the loader may hand back the same address, so the
-        // test accepts either of these two there), "unmapped" = Physics2D not
-        // mapped after the load, so the counts below are 0 uncounted.
+        // vacuous pass is visible. Derived from whether the image stayed
+        // mapped across the first Unload (mappedAfterUnload), never from base
+        // address coincidence (a Windows remap may land on the same base):
+        // "same-base" = stayed mapped, same base (pinned for process life:
+        // Linux and macOS), "remapped" = unmapped then mapped again (Windows),
+        // "rebased" = stayed mapped at another base, "unmapped" = Physics2D
+        // not mapped after the load, so the counts below are 0 uncounted.
         const char* secondSessionBranch = "unmapped";
         {
             Arcane::Runtime rt(*process);
@@ -237,8 +243,11 @@ namespace
             const Arcane::Module::ImageSpan image = Physics2DImage();
             if (image.base)
             {
-                secondSessionBranch = reinterpret_cast<std::uintptr_t>(image.base) == firstSessionBase
-                    ? "same-base" : "remapped";
+                if (!mappedAfterUnload)
+                    secondSessionBranch = "remapped";
+                else
+                    secondSessionBranch = reinterpret_cast<std::uintptr_t>(image.base) == firstSessionBase
+                        ? "same-base" : "rebased";
                 attachSecondSession = Arcane::UnregisterModuleAttachInRange(image.base, image.size);
                 cvarsSecondSession = Arcane::CVarRegistry::Get().UnregisterModuleRange(image.base, image.size);
             }

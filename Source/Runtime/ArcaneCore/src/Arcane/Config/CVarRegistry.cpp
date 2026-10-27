@@ -1102,6 +1102,9 @@ namespace Arcane
             command.module = std::string(to);
             ++changed;
         }
+        // The editor Settings window files cvars by module and rebuilds on a
+        // revision change.
+        if (changed != 0) ++m->revision;
         return changed;
     }
 
