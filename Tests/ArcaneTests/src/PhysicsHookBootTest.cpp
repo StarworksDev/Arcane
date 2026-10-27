@@ -54,7 +54,15 @@ namespace
 #if !defined(_WIN32)
     // POSIX pclose returns the wait status, not the exit code (Catch2's 42
     // arrives as 42 << 8); _pclose on Windows already returns the exit code.
-    int ExitCodeOf(int status) { return status != -1 && WIFEXITED(status) ? WEXITSTATUS(status) : status; }
+    // A signalled child maps to 128 + signal like HostWitness.cpp's ExitCodeOf (its
+    // copy is private to that file's anonymous namespace); -1 stays -1 (pclose failed).
+    int ExitCodeOf(int status)
+    {
+        if (status == -1) return -1;
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+        return -1;
+    }
 #endif
 
     struct NoHookChildRun { int exitCode = -1; std::string output; };
@@ -117,17 +125,18 @@ namespace
         std::map<std::string, std::string> fields;
     };
 
-    SimHookChildRun RunSimHookChild(const std::string& module)
+    SimHookChildRun RunSimHookChild(const std::string& module, const std::string& secondModule)
     {
         SimHookChildRun run;
         const std::filesystem::path exeDir = std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path();
 #if defined(_WIN32)
         const std::filesystem::path child = exeDir.parent_path() / "AbiDigestChild" / "AbiDigestChild.exe";
-        const std::string line = "\"\"" + child.string() + "\" --sim-hook \"" + module + "\" 2>NUL\"";
+        const std::string line = "\"\"" + child.string() + "\" --sim-hook \"" + module + "\" \"" + secondModule +
+                                 "\" 2>NUL\"";
         FILE* pipe = _popen(line.c_str(), "r");
 #else
         const std::filesystem::path child = exeDir.parent_path() / "AbiDigestChild" / "AbiDigestChild";
-        const std::string line = "'" + child.string() + "' --sim-hook '" + module + "' 2>/dev/null";
+        const std::string line = "'" + child.string() + "' --sim-hook '" + module + "' '" + secondModule + "' 2>/dev/null";
         FILE* pipe = popen(line.c_str(), "r");
 #endif
         if (!pipe) return run;
@@ -579,7 +588,9 @@ TEST_CASE("ProcessContext::Create seals the sim hooks and a later registration i
 
 TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the image", "[physics][hook]")
 {
-#if defined(_WIN32)
+    // Every platform: the ArcaneTests image is found through Module::MappedModules,
+    // which lists ELF objects since PR #20 and dyld's non-cache images since
+    // issue #21 (it was Windows-only when this case was written).
     HookRestore restore;
     const auto addr = reinterpret_cast<std::uintptr_t>(&NoopPrewarm);
     Arcane::Module::ImageSpan self{};
@@ -597,6 +608,10 @@ TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the
     REQUIRE(Arcane::SimHooks().size() == restore.saved.size() + 1);
 
     CHECK(Arcane::UnregisterSimHooksInRange(nullptr, 0) == 0);
+    // One image per module: the saved hooks (Physics2D's) live in their own
+    // images, so this exe's image holds exactly the one hook added above.
+    // (No ARC_MONOLITHIC branch: premake5.lua returns before the test
+    // projects in the monolithic layout, so it never compiled.)
     CHECK(Arcane::UnregisterSimHooksInRange(self.base, self.size) == 1);
     CHECK(Arcane::SimHooks().size() == restore.saved.size());   // the Physics2D hook lives in its own image
     for (const Arcane::SimHook& h : Arcane::SimHooks())
@@ -607,20 +622,29 @@ TEST_CASE("UnregisterSimHooksInRange drops a hook whose function lies inside the
     CHECK(Arcane::UnregisterSimHook(mine));
     CHECK_FALSE(Arcane::UnregisterSimHook(mine));
     CHECK(Arcane::SimHooks().size() == restore.saved.size());
-#else
-    SKIP("Module::MappedModules is Windows-only");
-#endif
 }
 
 TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload", "[physics][hook]")
 {
+    // This one child run also carries the PR #20 re-review witnesses: M-P1
+    // (a failed load keeps a pinned dependency's cvars), M-P2 (a second stem
+    // layers its own rungs), M-P5 (the game's image unmaps, never pinned) and,
+    // since issue #21, which branch the leftover count ran on (M-R3). Every
+    // platform runs them; the unmap branch of a DEPENDENCY is reachable on
+    // Linux and macOS only when PinMapped fails (pin-for-process-life), which
+    // a healthy loader never does, so only Windows witnesses it here.
     // HotReloadPluginV1 imports ArcanePhysics2D (its descriptor names it); the
     // child links ArcaneEngine only, so the module maps Physics2D after the seal.
     // Addressed from the exe, not the cwd (another case may move the cwd).
     const std::string module = (std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path().parent_path()
                                 / "HotReloadPluginV1" / Arcane::Test::ModuleFile("HotReloadPluginV1")).string();
     REQUIRE(std::filesystem::exists(module));
-    const SimHookChildRun run = RunSimHookChild(module);
+    // The second session loads HotReloadPluginV2: a DIFFERENT stem (issue #21
+    // M-P2) that imports ArcanePhysics2D too.
+    const std::string secondModule = (std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path().parent_path()
+                                      / "HotReloadPluginV2" / Arcane::Test::ModuleFile("HotReloadPluginV2")).string();
+    REQUIRE(std::filesystem::exists(secondModule));
+    const SimHookChildRun run = RunSimHookChild(module, secondModule);
     INFO("child output: " << run.output);
     CHECK(run.exitCode == 0);
     REQUIRE(run.fields.count("loaded") == 1);
@@ -631,7 +655,12 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     REQUIRE(run.fields.count("physics2dMappedAfterUnload") == 1);
     REQUIRE(run.fields.count("physics2dAttachSecondSession") == 1);
     REQUIRE(run.fields.count("physics2dCVarsSecondSession") == 1);
-#if !defined(__APPLE__)   // the child's witness is Module::MappedModules, empty on macOS (no dependency net there yet)
+    REQUIRE(run.fields.count("pluginMappedAfterUnload") == 1);
+    REQUIRE(run.fields.count("physics2dCVarAfterFailedLoad") == 1);
+    REQUIRE(run.fields.count("physics2dLayeredSecondSession") == 1);
+    REQUIRE(run.fields.count("physics2dSecondSessionBranch") == 1);
+    // Every platform since issue #21 (Module::MappedModules lists dyld's
+    // non-cache images on macOS, so the child's witness sees Physics2D there).
     CHECK(run.fields.at("physics2dMappedBefore") == "0");   // the child does not link it
     CHECK(run.fields.at("physics2dMappedAtLoad") == "1");   // the module really imports it
 #if defined(_WIN32)
@@ -640,22 +669,58 @@ TEST_CASE("a plugin-loaded SimHook is refused and nothing dangles after unload",
     // below is not vacuous).
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "0");
 #else
-    // Linux: a game load pins its fresh engine dependencies FOR PROCESS LIFE
-    // (Module::PinsForProcessLife, user decision 2026-10-24): engine libraries
-    // are never hot-reloaded, only the game module is. glibc decides on its own
-    // whether a released object unmaps (gcc Debug kept Physics2D mapped with
-    // the reference released, run 40051567104), so it stays mapped by rule and
-    // its registrations are never dropped.
+    // Linux and macOS: a game load pins its fresh engine dependencies FOR
+    // PROCESS LIFE (Module::PinsForProcessLife, user decision 2026-10-24;
+    // macOS since issue #21): engine libraries are never hot-reloaded, only
+    // the game module is. It stays mapped by rule (RTLD_NODELETE on ELF, a
+    // kept dlopen reference on Mach-O, plus Module::Load's beside-exe retry
+    // reference), not by what the loader happens to do with a released
+    // object, and its registrations are never dropped.
     CHECK(run.fields.at("physics2dMappedAfterUnload") == "1");
 #endif
+    // The game's OWN image is never pinned, on any platform (PR #20 re-review
+    // M-P5): its temp copy is mapped while loaded and gone after Unload. A
+    // regression that pinned it would stay green everywhere else, since every
+    // load uses a fresh temp path.
+    CHECK(run.fields.at("pluginMappedAtLoad") == "1");
+    CHECK(run.fields.at("pluginMappedAfterUnload") == "0");
+    // Physics2D's settings are layered at the load (--set ...=0.25), whatever
+    // name they are registered under.
+    CHECK(run.fields.at("physics2dLayeredAtLoad") == "0.25");
+    CHECK(run.fields.at("failedLoadFailed") == "1");
+#if defined(_WIN32)
+    // Windows: a dependency's statics run inside the game's LoadLibrary, under
+    // its CVarModuleScope, and leave with the load session (EndLoadSession).
+    CHECK(run.fields.at("physics2dCVarModule") == "HotReloadPluginV1");
+    // ...and a FAILED load of the game's stem finds Physics2D already unmapped
+    // and its registrations dropped, so the cvar is stale (issue #21 Task 2
+    // review (d)).
+    CHECK(run.fields.at("physics2dCVarAfterFailedLoad") == "0");
+    // Physics2D unmapped with the first session, so the second maps it afresh
+    // (the label comes from the unmap, not from the base address).
+    CHECK(run.fields.at("physics2dSecondSessionBranch") == "remapped");
+#else
+    // Linux and macOS (issue #21 M-P1/M-P2): the dependency is pinned for the
+    // life of the process, and Plugin::Load re-attributes what its statics
+    // registered under the game's scope to its own module, the name it has in
+    // a host that links it...
+    CHECK(run.fields.at("physics2dCVarModule") == "ArcanePhysics2D");
+    // ...so a FAILED load of the game's stem (its name drop) leaves it (M-P1:
+    // it stays mapped and its statics never run again)...
+    CHECK(run.fields.at("physics2dCVarAfterFailedLoad") == "1");
+    // The leftover count ran against the pinned first-session mapping.
+    CHECK(run.fields.at("physics2dSecondSessionBranch") == "same-base");
+#endif
+    // ...and a second session that loads a DIFFERENT stem layers it with ITS
+    // rungs (--set ...=0.75), not the first game's (M-P2).
+    CHECK(run.fields.at("physics2dLayeredSecondSession") == "0.75");
     // A second load session has Physics2D's registrations EXACTLY once: one
     // module-attach callback (re-registered by a fresh map on Windows, never
-    // dropped on Linux -- a dependency disowned but kept mapped shows 0, a
-    // double registration 2) and its cvars.
+    // dropped on Linux and macOS -- a dependency disowned but kept mapped
+    // shows 0, a double registration 2) and its cvars.
     CHECK(run.fields.at("loadedSecondSession") == "1");
     CHECK(run.fields.at("physics2dAttachSecondSession") == "1");
     CHECK(run.fields.at("physics2dCVarsSecondSession") != "0");
-#endif
     CHECK(run.fields.count("advanced") == 1);   // the fresh Runtime stepped after the unload
 }
 
@@ -675,7 +740,7 @@ TEST_CASE("UnregisterModuleAttach and the range net drop exactly the callback th
     CHECK(Arcane::UnregisterModuleAttach(&AttachProbe));
     CHECK_FALSE(Arcane::UnregisterModuleAttach(&AttachProbe));   // exactly one registration left
     CHECK_FALSE(Arcane::UnregisterModuleAttach(nullptr));
-#if defined(_WIN32) && !defined(ARC_MONOLITHIC)   // one image per module: the probe is alone in this one
+#if !defined(ARC_MONOLITHIC)   // one image per module: the probe is alone in this one (every platform since issue #21 M5)
     const auto addr = reinterpret_cast<std::uintptr_t>(&AttachProbe);
     Arcane::Module::ImageSpan self{};
     for (const auto& m : Arcane::Module::MappedModules())

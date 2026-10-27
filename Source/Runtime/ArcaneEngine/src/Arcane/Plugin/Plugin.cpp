@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -107,6 +108,71 @@ namespace
             ARC_TRACE("plugin: refused load dropped {} cvar slot(s), {} module-attach callback(s), {} sim hook(s){} of '{}'",
                       cvars, attaches, hooks, query ? " and the 2D query pair" : "", image.generic_string());
     }
+
+    // Plugin::DependencyCVarModules: the re-attributed dependencies' names.
+    std::mutex               g_dependencyModulesMutex;
+    std::vector<std::string> g_dependencyModules;
+
+    // The module a shared library's own code names itself (ARC_MODULE_NAME,
+    // the premake project name its file is named after): the file name with
+    // every extension off ("libArcanePhysics2D.so" and ".dylib" ->
+    // "ArcanePhysics2D", "libfoo.so.1" -> "foo") and the ELF/Mach-O "lib"
+    // prefix. A game module or project plugin has no prefix ("Foo.so" -> "Foo",
+    // the stem PluginHost loads it under).
+    std::string OwnModuleName(const std::filesystem::path& image)
+    {
+        std::string name = image.filename().string();
+        if (name.size() > 3 && name.starts_with("lib"))
+            name.erase(0, 3);
+        if (const std::size_t dot = name.find('.'); dot != std::string::npos)
+            name.erase(dot);
+        return name;
+    }
+
+    // ELF and Mach-O (issue #21 M-P1/M-P2). Every image this load newly mapped
+    // besides the module itself is a DEPENDENCY -- the beside-exe retry's
+    // (Module::Load), or one the loader found on its own (RUNPATH, dyld's rpath
+    // chain) -- and its statics ran inside this load's CVarModuleScope, so its
+    // cvars, settings, commands and callbacks carry the GAME's name. Such an
+    // image is pinned for the life of the process (Module::PinsForProcessLife:
+    // PluginHost's PinNewDependencies, the refusal net below; the retry's
+    // RTLD_NODELETE even when the load then fails), and by the game's name its
+    // registrations would be (1) stripped by the name drop of a FAILED load of
+    // that stem -- this one or any later one -- leaving the library mapped
+    // with no cvars, its statics never to run again (M-P1), and (2) layered
+    // only with that one stem, so a host that later loads a different game
+    // stem keeps the first project's values on them (M-P2). Re-name them to
+    // the image's own module instead, BEFORE any drop below: exactly the name
+    // they carry in a host that links the library, and PluginHost layers it
+    // (DependencyCVarModules). Matched by address, so the module's own and any
+    // older registrations under the name are untouched. Windows keeps the
+    // game's name: its dependencies leave with the load session
+    // (PluginHost::EndLoadSession) and re-register under the next one.
+    // The diff assumes the single loader thread (see Plugin::Load).
+    void AdoptDependencyRegistrations(const std::vector<Arcane::Module::MappedModule>& before,
+                                      const void* loadedBase, const std::string& cvarModule)
+    {
+        for (const Arcane::Module::MappedModule& mapped : Arcane::Module::MappedModules())
+        {
+            const void* const base = mapped.image.base;
+            if (!base || mapped.image.size == 0 || base == loadedBase)
+                continue;
+            if (std::ranges::any_of(before, [base](const Arcane::Module::MappedModule& m) { return m.image.base == base; }))
+                continue;
+            const std::string own = OwnModuleName(mapped.path);
+            if (own.empty() || own == cvarModule)
+                continue;
+            const std::size_t moved =
+                Arcane::CVarRegistry::Get().ReattributeModuleRange(base, mapped.image.size, cvarModule, own);
+            if (moved == 0)
+                continue;
+            ARC_TRACE("plugin: re-attributed {} registration(s) of dependency image '{}' from '{}' to '{}'",
+                      moved, mapped.path.generic_string(), cvarModule, own);
+            const std::lock_guard lock(g_dependencyModulesMutex);
+            if (std::ranges::find(g_dependencyModules, own) == g_dependencyModules.end())
+                g_dependencyModules.push_back(own);
+        }
+    }
 }
 
 namespace Arcane
@@ -147,6 +213,12 @@ namespace Arcane
         if (!AcceptPluginAbi(table, error)) return false;
         if (out) out->emplace(Plugin::FromStatic(table, std::move(cvarModule)));
         return true;
+    }
+
+    std::vector<std::string> Plugin::DependencyCVarModules()
+    {
+        const std::lock_guard lock(g_dependencyModulesMutex);
+        return g_dependencyModules;
     }
 
     Plugin Plugin::FromStatic(const PluginVTable& table, std::string cvarModule)
@@ -209,18 +281,44 @@ namespace Arcane
         // The mapped set before the load (Task 8 fix round 2): a refusal below
         // must also clean every DEPENDENCY image this load newly mapped (an
         // engine module the game imports but the host does not link). Their
-        // statics ran inside Module::Load and they unmap with `module`.
-        // Windows and Linux, like MappedModules; on macOS the set is empty.
+        // statics ran inside Module::Load; on Windows they unmap with `module`
+        // (ELF and Mach-O pin them for the life of the process,
+        // Module::PinsForProcessLife).
+        // Every platform, like MappedModules (macOS: shared-cache images left out).
+        //
+        // SINGLE LOADER THREAD (PR #20 review M8): "fresh" means "mapped between
+        // this snapshot and the walk after the load", so an image ANOTHER thread
+        // maps in that window counts as this load's. That is benign today, and
+        // the contract is that it stays so: every engine load of a module that
+        // registers into Core (game modules, project plugins, the engine
+        // libraries they import) goes through Plugin::Load / Module::Load on the
+        // host's main thread, and nothing else in the engine maps one -- the
+        // only off-thread maps are system and toolchain libraries that register
+        // nothing (glibc's NSS modules under a worker's getaddrinfo, libgcc_s at
+        // a first unwind, driver libraries). Such an image is at worst pinned
+        // for the life of the process on ELF and Mach-O (a leak, no strip:
+        // there is nothing in its range to drop or re-name), and on Windows a
+        // refusal or a load session's end drops nothing from it. A future
+        // loader of an Arcane module on another thread must serialize with
+        // this one; it would otherwise have its registrations re-named, pinned
+        // or (Windows) dropped as this load's.
         const std::vector<Module::MappedModule> mappedBefore = Module::MappedModules();
         std::optional<Module> module;
         {
             const CVarModuleScope scope(cvarModule);
             module = Module::Load(std::move(path));
         }
+        // Before the name drop just below: a dependency the load mapped keeps
+        // its registrations under its own name (AdoptDependencyRegistrations).
+        if constexpr (Module::PinsForProcessLife())
+            AdoptDependencyRegistrations(mappedBefore, module ? module->Image().base : nullptr, cvarModule);
         if (!module)
         {
             // Load failed with no handle: statics may have run then the OS
             // unmapped. Name-drop only when this path was not already mapped.
+            // A dependency the beside-exe retry mapped stays (RTLD_NODELETE /
+            // a kept reference on ELF and Mach-O) and was re-named above, so
+            // the drop does not reach it (M-P1).
             if (!already.base)
                 CVarRegistry::Get().UnregisterModule(cvarModule);
             return std::nullopt;   // Kind::None; caller reads Module::LastLoadError()
@@ -253,11 +351,12 @@ namespace Arcane
                 });
                 if (!fresh)
                     continue;
-                // ELF: the same rule as PluginHost's -- a fresh dependency is
-                // pinned for the life of the process (Module::PinsForProcessLife),
-                // so it does not unmap with `module` and its registrations stay
-                // valid: dropping them would strip a live engine library. Only
-                // when it cannot be pinned is it treated as unmapping.
+                // ELF and Mach-O: the same rule as PluginHost's -- a fresh
+                // dependency is pinned for the life of the process
+                // (Module::PinsForProcessLife), so it does not unmap with
+                // `module` and its registrations stay valid: dropping them would
+                // strip a live engine library. Only when it cannot be pinned is
+                // it treated as unmapping.
                 if constexpr (Module::PinsForProcessLife())
                     if (Module::PinMapped(mapped))
                         continue;
