@@ -137,7 +137,7 @@ namespace Arcane::DeterministicTrig
             }
 
             // acc (five 32-bit limbs, least significant first) * 2^-s == v * 2/pi
-            // mod 4, with s = 32(k0 + 4) - e in [95, 154]: bits s and s+1 are the
+            // mod 4, with s = 32(k0 + 4) - e in [95, 152]: bits s and s+1 are the
             // quarter turn, the s bits below are the fraction. The dropped words
             // contribute < m * 2^-s < 2^-71 of a quarter turn.
             const int s = 32 * (k0 + 4) - e;
