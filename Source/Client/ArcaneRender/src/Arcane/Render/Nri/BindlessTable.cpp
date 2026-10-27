@@ -12,6 +12,7 @@
 #include <Arcane/Render/Nri/Graveyard.hpp>
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriDevice.hpp>
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #include <Arcane/Base/Log.hpp>
 
@@ -446,12 +447,20 @@ namespace Arcane
 
     void BindlessTable::NoteSampledBy(const void* context, std::uint64_t fence)
     {
+        // A mapped texture sampled through a bindless slot is DRAWN, though no cache
+        // Resolve ran for it this frame: stamp it on the device residency account so
+        // a texture a live mesh material samples is never the account's oldest.
+        ResidencyAccount* account = m_device ? m_device->ResidencyIfCreated() : nullptr;
         for (std::uint32_t i = 0; i < m_slots.size(); ++i)
         {
             Slot& s = m_slots[i];
             if (s.state == State::Live)
             {
                 m_life->NoteSample(i, context, fence);
+                if (account && s.mapped)
+                    account->Stamp(s.guid, ResidencySlice::Texture,
+                                   s.space == ColorSpace::Display ? NriTextureCache::ColorSpace::Display
+                                                                  : NriTextureCache::ColorSpace::Srgb);
             }
             else if (s.state == State::Pending
                      && std::find(s.pendingNotedBy.begin(), s.pendingNotedBy.end(), context)

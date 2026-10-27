@@ -18,6 +18,7 @@
 
 #include "NriCommon.hpp"
 #include "BindlessTable.hpp"
+#include "ResidencyAccount.hpp"
 #include <Arcane/Render/Generated/BindlessCapacity.gen.hpp>
 
 #include <Arcane/Base/ForeignModules.hpp>   // ForeignModules::Report -- the injected-overlay scan, once, after the native device exists
@@ -490,6 +491,13 @@ namespace Arcane
         if (!m_bindless)
             m_bindless = BindlessTable::Create(*this, Arcane::kBindlessCapacity, m_life);
         return m_bindless.get();
+    }
+
+    ResidencyAccount& NriDevice::Residency()
+    {
+        if (!m_residency)
+            m_residency = std::make_unique<ResidencyAccount>(ResidencyAccount::LatchCaps());
+        return *m_residency;
     }
 
     void NriDevice::RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture)

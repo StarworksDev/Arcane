@@ -2078,6 +2078,10 @@ namespace Arcane
         if (m_meshBuffers)
             m_meshBuffers->EvictToBudget(m_frameIndex, m_graves,
                                          m_graph ? m_graph->DebugSubmitCount() : 0);
+        // The same boundary for the texture cache: it carries out the evictions the
+        // device account queued for it, on this lane, and ends its frame.
+        if (m_textures)
+            m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
         // The GPU scene's retirements (a grown instance buffer, a grown slot
         // buffer), stamped at declaration with the value this submit just
         // signalled -- see NriGraphContext::CurrentFence for why they wait
@@ -2238,6 +2242,10 @@ namespace Arcane
         if (m_meshBuffers)
             m_meshBuffers->EvictToBudget(m_frameIndex, m_graves,
                                          m_graph ? m_graph->DebugSubmitCount() : 0);
+        // The same boundary for the texture cache: it carries out the evictions the
+        // device account queued for it, on this lane, and ends its frame.
+        if (m_textures)
+            m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
         if (m_scene)
             m_scene->FlushGraves(m_graves);   // same contract as RenderFrame() above
 #if !defined(ARC_BUILD_DIST)

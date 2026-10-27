@@ -64,6 +64,7 @@ namespace Arcane
 {
     class Graveyard;
     class NriDevice;
+    class ResidencyAccount;
 
     class ARC_RENDER_API NriMeshBufferCache
     {
@@ -126,25 +127,29 @@ namespace Arcane
         // can be named by a command buffer still being built. Buries evicted buffers at
         // `fence`, so an ALREADY-RECORDED frame still reading them is never invalidated
         // out from under it -- the same discipline NriTextureCache::Invalidate keeps.
-        // Reports ONCE, at WARN, when the protected set alone exceeds the budget.
+        //
+        // THE THREE-ARGUMENT FORM CARRIES OUT THE DEVICE ACCOUNT'S EVICTIONS for this
+        // cache (ResidencyAccount.hpp): Resolve charges the account at upload, the
+        // account decides who goes (it sees every vehicle's meshes and textures), and
+        // this call drops the entries it queued for THIS cache, on this cache's own
+        // lane. It also ends this cache's frame on the device clock. The budget is the
+        // device account, not a per-cache number.
         //
         // ERASES the evicted entries outright, CPU copy included -- see the banner and
         // MeshResidencyBudget.hpp. The next Resolve of an evicted guid is therefore a
         // full MISS: the supply is asked again (an in-memory MeshTable lookup in
         // production, not a disk read) and the mesh re-uploads.
         //
-        // The three-argument form evicts against Budget() -- render.mesh.residencyBudgetBytes,
-        // latched by Create. Tests pass a smaller `budget` so a handful of cubes can
-        // exercise the LRU without filling 512 MiB.
-        void EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard, std::uint64_t fence)
-        {
-            EvictToBudget(frameCounter, graveyard, fence, m_budget);
-        }
+        // The four-argument form evicts this cache ALONE against an explicit `budget`
+        // (SelectEvictions); tests use it so a handful of cubes can exercise the LRU
+        // without filling the account.
+        void EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard, std::uint64_t fence);
         void EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,
                            std::uint64_t fence, std::uint64_t budget);
 
-        // The residency budget this cache latched at Create (Restart).
-        [[nodiscard]] std::uint64_t Budget() const noexcept { return m_budget; }
+        // The mesh cap of the device account this cache charges (latched when the
+        // account was created, Restart).
+        [[nodiscard]] std::uint64_t Budget() const noexcept;
 
         // Drops residency for `id` so the NEXT Resolve treats it as brand new --
         // Resident, Pending or Refused, whichever it lands in. The escape hatch a
@@ -189,6 +194,9 @@ namespace Arcane
         NriMeshBufferCache() = default;
 
         void Bury(Resident& r, Graveyard& graveyard, std::uint64_t fence);
+        // Uncharges the account, buries, and erases the map node -- the one drop path.
+        void Discard(std::unordered_map<Guid, Resident>::iterator it, Graveyard& graveyard, std::uint64_t fence);
+        void NoteDraw(const Guid& id, const Resident& r);
         bool Upload(Resident& r, const Guid& id);
 
         [[nodiscard]] static std::size_t SectionBytes(const MeshData& mesh) noexcept;
@@ -197,7 +205,7 @@ namespace Arcane
         nri::HelperInterface m_helper{};
         MeshSupplyFn         m_supply;
         std::unordered_map<Guid, Resident> m_entries;
-        std::uint64_t        m_budget = 0;   // render.mesh.residencyBudgetBytes, latched by Create
+        ResidencyAccount*    m_account = nullptr;   // the device's account (NriDevice::Residency()); not owned
         bool m_warnedOverBudget = false;
         bool m_warnedMiss       = false;
         // DebugFailNextUpload's own latch -- see that method's comment. Never read

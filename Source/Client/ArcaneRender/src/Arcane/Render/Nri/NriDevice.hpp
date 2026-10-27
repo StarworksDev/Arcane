@@ -44,6 +44,7 @@ namespace Arcane
     struct VulkanDeviceCreation;
     struct D3D12DeviceCreation;
     class BindlessTable;
+    class ResidencyAccount;
 
     // -------------------------------------------------------------------
     // NativeDeviceOwner -- the caller-owns half of the ownership contract.
@@ -205,6 +206,14 @@ namespace Arcane
         // The table if it exists yet; never creates it.
         [[nodiscard]] BindlessTable* BindlessIfCreated() noexcept { return m_bindless.get(); }
 
+        // THE DEVICE'S RESIDENCY ACCOUNT (3D-readiness arc Plan C Task 4): one per
+        // NriDevice, created on first use and latched from render.mesh.*,
+        // render.texture.* and render.residency.* at that moment (Restart). Every
+        // mesh and texture cache on this device charges it. Device-less: it touches
+        // no NRI, so a NONE device works.
+        [[nodiscard]] ResidencyAccount& Residency();
+        [[nodiscard]] ResidencyAccount* ResidencyIfCreated() noexcept { return m_residency.get(); }
+
         // ---- device-wide texture invalidation (3D-readiness arc spec 3.5) -------
         // Each NriGraphContext keeps its own NriTextureCache, but the bindless
         // mapping memo is the device's, so a texture's invalidation has to reach
@@ -233,6 +242,7 @@ namespace Arcane
         Graveyard          m_graveyard;
         DeviceResourceLifetime m_life;
         std::unique_ptr<BindlessTable> m_bindless;
+        std::unique_ptr<ResidencyAccount> m_residency;
         struct ContextHook { const void* owner; TextureInvalidateFn invalidate; };
         std::vector<ContextHook> m_contexts;
         nri::CoreInterface m_core{};

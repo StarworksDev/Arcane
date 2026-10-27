@@ -14,9 +14,9 @@
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriDevice.hpp>
 #include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #include <Arcane/Base/Log.hpp>
-#include <Arcane/Render/RenderBudgetSettings.hpp>   // RenderMeshSettings -- the budget Create latches
 
 #undef ERROR
 
@@ -29,7 +29,7 @@ namespace Arcane
     {
         std::unique_ptr<NriMeshBufferCache> cache(new NriMeshBufferCache());
         cache->m_device = &device;
-        cache->m_budget = Settings<RenderMeshSettings>().residencyBudgetBytes;
+        cache->m_account = &device.Residency();   // one account per device; created (and latched) by the first cache
 
         if (!ARC_NRI_CHECK(nriGetInterface(device.Device(), NRI_INTERFACE(nri::HelperInterface),
                                             &cache->m_helper)))
@@ -43,6 +43,8 @@ namespace Arcane
 
     NriMeshBufferCache::~NriMeshBufferCache()
     {
+        if (m_account)
+            m_account->UnchargeOwner(this);
         if (!m_device || m_entries.empty())
             return;
 
@@ -94,6 +96,8 @@ namespace Arcane
         for (auto& [id, r] : m_entries)
             Bury(r, graveyard, fence);
         m_entries.clear();
+        if (m_account)
+            m_account->UnchargeOwner(this);
         // The warn latch stays SET across a release: a run that could not
         // resolve a mesh before a resize should not re-announce it after one.
     }
@@ -103,8 +107,21 @@ namespace Arcane
         const auto it = m_entries.find(id);
         if (it == m_entries.end())
             return;
+        Discard(it, graveyard, fence);
+    }
+
+    void NriMeshBufferCache::Discard(std::unordered_map<Guid, Resident>::iterator it,
+                                     Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (m_account)
+            m_account->Uncharge(this, it->first, ResidencySlice::Mesh, NriTextureCache::ColorSpace::Srgb);
         Bury(it->second, graveyard, fence);
         m_entries.erase(it);
+    }
+
+    std::uint64_t NriMeshBufferCache::Budget() const noexcept
+    {
+        return m_account ? m_account->Caps().meshCap : 0u;
     }
 
     std::size_t NriMeshBufferCache::ResidentCount() const noexcept
@@ -243,6 +260,7 @@ namespace Arcane
             if (r.ready)
             {
                 r.lastDrawnFrame = frameCounter;
+                NoteDraw(id, r);
                 return &r;
             }
             // NOT READY AND PRESENT == MEMOIZED, with no third case: a supply that
@@ -313,7 +331,39 @@ namespace Arcane
             return nullptr;
         }
         resident.lastDrawnFrame = frameCounter;
+        if (m_account)
+            (void)m_account->Charge(this, ResidencyEntry{ id, ResidencySlice::Mesh,
+                                                         NriTextureCache::ColorSpace::Srgb, resident.bytes, 0 });
         return &resident;
+    }
+
+    // A draw on the device clock. A key the account no longer holds for this cache (it
+    // queued the entry for eviction, and the drop has not run yet) is charged again:
+    // it was just drawn, so it is hot after all.
+    void NriMeshBufferCache::NoteDraw(const Guid& id, const Resident& r)
+    {
+        if (!m_account)
+            return;
+        if (!m_account->Touch(this, id, ResidencySlice::Mesh, NriTextureCache::ColorSpace::Srgb))
+            (void)m_account->Charge(this, ResidencyEntry{ id, ResidencySlice::Mesh,
+                                                         NriTextureCache::ColorSpace::Srgb, r.bytes, 0 });
+    }
+
+    void NriMeshBufferCache::EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,
+                                           std::uint64_t fence)
+    {
+        (void)frameCounter;   // the device account keeps its own clock (R2); see ResidencyAccount.hpp
+        if (!m_account)
+            return;
+        for (const ResidencyEviction& ev : m_account->TakePending(this))
+        {
+            if (ev.slice != ResidencySlice::Mesh)
+                continue;
+            const auto it = m_entries.find(ev.id);
+            if (it != m_entries.end())
+                Discard(it, graveyard, fence);
+        }
+        m_account->EndFrame(this);
     }
 
     void NriMeshBufferCache::EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,
@@ -340,8 +390,7 @@ namespace Arcane
             // would report a number the process was not honouring. The next Resolve
             // of this guid is a clean miss that re-asks the supply, which in
             // production is SceneRenderResolver's in-memory MeshTable.
-            Bury(it->second, graveyard, fence);
-            m_entries.erase(it);
+            Discard(it, graveyard, fence);
         }
 
         if (ResidentBytes() > budget && !m_warnedOverBudget)

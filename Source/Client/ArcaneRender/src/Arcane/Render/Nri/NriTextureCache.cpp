@@ -18,6 +18,7 @@
 #include <Arcane/Render/Nri/NriDevice.hpp>
 #include <Arcane/Render/Nri/BindlessTable.hpp>   // AdoptTextureBacking (Invalidate)
 #include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #include <Arcane/Assets/ArtifactReader.hpp>   // LoadedClientArtifact -- the compiled-texture supply (Task 7)
 #include <Arcane/Assets/ImageIo.hpp>   // PixelData -- the device-free decode (Task 1)
@@ -38,6 +39,7 @@ namespace Arcane
     {
         std::unique_ptr<NriTextureCache> cache(new NriTextureCache());
         cache->m_device = &device;
+        cache->m_account = &device.Residency();   // one account per device; created (and latched) by the first cache
 
         // Resolved ONCE, here, rather than per upload: nriGetInterface is a
         // table copy, and doing it inside Resolve would repeat it for every
@@ -54,6 +56,8 @@ namespace Arcane
 
     NriTextureCache::~NriTextureCache()
     {
+        if (m_account)
+            m_account->UnchargeOwner(this);
         bool anyPlaceholders = false;
         for (const Resident& ph : m_placeholders)
             anyPlaceholders = anyPlaceholders || ph.texture || ph.view;
@@ -96,6 +100,8 @@ namespace Arcane
                 graveyard.Bury(fence, [core, t = resident.texture] { core->DestroyTexture(t); });
         }
         m_textures.clear();
+        if (m_account)
+            m_account->UnchargeOwner(this);
 
         // The checkerboard placeholder(s) -- ONCE each, never once per
         // PendingCook key (which never owned the object; see
@@ -118,8 +124,6 @@ namespace Arcane
     {
         if (!m_device)
             return;
-        const nri::CoreInterface* core = &m_device->Core();
-
         // Both colour spaces -- content is always Srgb, but sweeping Display
         // too costs one extra unordered_map lookup (almost always a miss)
         // and keeps this method correct even if a future caller ever DID
@@ -128,37 +132,87 @@ namespace Arcane
         // texture/view are always null (ResolveArtifactKey's own contract),
         // so only a genuinely RESIDENT key's own object is ever buried here.
         for (const ColorSpace space : { ColorSpace::Srgb, ColorSpace::Display })
-        {
-            const auto it = m_textures.find(Key{ id, space });
-            if (it == m_textures.end())
-                continue;
-            // A bindless slot (mapped or pending) may still view this texture from
-            // ANOTHER context's in-flight submit. Its destruction then joins the
-            // slot's retire (spec 3.5: the descriptor and the texture wait on the
-            // last-use record together): descriptors first, then this cache's own
-            // view, then the texture -- never at this context's fence alone.
-            if (it->second.texture && m_device)
-                if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            DropKey(id, space, graveyard, fence);
+    }
+
+    // THE ONE DROP PATH for a key (Invalidate calls it per space; an account
+    // eviction calls it for the one space).
+    void NriTextureCache::DropKey(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_device)
+            return;
+        const nri::CoreInterface* core = &m_device->Core();
+
+        const auto it = m_textures.find(Key{ id, space });
+        if (it == m_textures.end())
+            return;
+        if (m_account)
+            m_account->Uncharge(this, id, ResidencySlice::Texture, space);
+        // A bindless slot (mapped or pending) may still view this texture from
+        // ANOTHER context's in-flight submit. Its destruction then joins the
+        // slot's retire (spec 3.5: the descriptor and the texture wait on the
+        // last-use record together): descriptors first, then this cache's own
+        // view, then the texture -- never at this context's fence alone.
+        if (it->second.texture)
+            if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            {
+                const nri::Texture* texture = it->second.texture;
+                if (bindless->AdoptTextureBacking(
+                        texture, fence,
+                        [core, d = it->second.view, t = it->second.texture]
+                        {
+                            if (d) core->DestroyDescriptor(d);
+                            core->DestroyTexture(t);
+                        }))
                 {
-                    const nri::Texture* texture = it->second.texture;
-                    if (bindless->AdoptTextureBacking(
-                            texture, fence,
-                            [core, d = it->second.view, t = it->second.texture]
-                            {
-                                if (d) core->DestroyDescriptor(d);
-                                core->DestroyTexture(t);
-                            }))
-                    {
-                        m_textures.erase(it);
-                        continue;
-                    }
+                    m_textures.erase(it);
+                    return;
                 }
-            if (it->second.view)
-                graveyard.Bury(fence, [core, d = it->second.view] { core->DestroyDescriptor(d); });
-            if (it->second.texture)
-                graveyard.Bury(fence, [core, t = it->second.texture] { core->DestroyTexture(t); });
-            m_textures.erase(it);
-        }
+            }
+        if (it->second.view)
+            graveyard.Bury(fence, [core, d = it->second.view] { core->DestroyDescriptor(d); });
+        if (it->second.texture)
+            graveyard.Bury(fence, [core, t = it->second.texture] { core->DestroyTexture(t); });
+        m_textures.erase(it);
+    }
+
+    void NriTextureCache::Evict(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_device || m_textures.find(Key{ id, space }) == m_textures.end())
+            return;
+        // The mapping first, so the slot goes pending (or retires at once) and the
+        // drop below finds it and joins its retire. Per colour space, unconditional.
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            bindless->ReleaseAll(id, space == ColorSpace::Display ? BindlessTable::ColorSpace::Display
+                                                                  : BindlessTable::ColorSpace::Srgb);
+        DropKey(id, space, graveyard, fence);
+    }
+
+    void NriTextureCache::EvictPending(Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_account)
+            return;
+        for (const ResidencyEviction& ev : m_account->TakePending(this))
+            if (ev.slice == ResidencySlice::Texture)
+                Evict(ev.id, ev.space, graveyard, fence);
+        m_account->EndFrame(this);
+    }
+
+    void NriTextureCache::ChargeResident(const Key& key, const Resident& resident)
+    {
+        if (!m_account || resident.bytes == 0)
+            return;
+        (void)m_account->Charge(this, ResidencyEntry{ key.id, ResidencySlice::Texture, key.space, resident.bytes, 0 });
+    }
+
+    // A draw on the device clock; a key the account no longer holds for this cache
+    // (queued for eviction, drop not run yet) is charged again -- it was just drawn.
+    void NriTextureCache::NoteDraw(const Key& key, const Resident& resident)
+    {
+        if (!m_account || resident.bytes == 0)
+            return;
+        if (!m_account->Touch(this, key.id, ResidencySlice::Texture, key.space))
+            ChargeResident(key, resident);
     }
 
     std::size_t NriTextureCache::ResidentCount() const noexcept
@@ -258,6 +312,8 @@ namespace Arcane
             // what the hit is gated on. The texture object itself stays owned
             // and is destroyed by Release()/ClearImmediate like any other, so
             // this leaks nothing; it just stops lying about what is resident.
+            if (cached->second.view)
+                NoteDraw(key, cached->second);
             return cached->second.view ? cached->second.texture : nullptr;
         }
 
@@ -380,6 +436,8 @@ namespace Arcane
         ARC_DEBUG("[nri-graph] NriTextureCache: image {} ({}x{}, {}) is resident on the graph device",
                   id.ToString(), pixels->width, pixels->height,
                   space == ColorSpace::Display ? "display-referred" : "sRGB");
+        resident.bytes = static_cast<std::uint64_t>(pixels->width) * pixels->height * 4u;   // mip 0, RGBA8
+        ChargeResident(key, resident);
         return resident.texture;
     }
 
@@ -620,6 +678,13 @@ namespace Arcane
             return false;
         }
 
+        // What this key costs the device account: every mip, BC7 by blocks, RGBA8 by texels.
+        resident.bytes = 0;
+        for (const MipView& mip : artifact.mips)
+            resident.bytes += artifact.format == ArtifactPixelFormatValue::BC7
+                ? static_cast<std::uint64_t>(Bc7SlicePitch(mip.width, mip.height))
+                : static_cast<std::uint64_t>(mip.width) * mip.height * 4u;
+
         ARC_DEBUG("[nri-graph] NriTextureCache: content artifact ({}x{}, {} mip(s), {}) is resident "
                   "on the graph device",
                   artifact.info.width, artifact.info.height, artifact.mips.size(),
@@ -674,8 +739,11 @@ namespace Arcane
         // must not inherit a previous, unrelated attempt's partial state).
         resident.texture = nullptr;
         resident.view    = nullptr;
+        resident.bytes = 0;
         const bool ok = UploadArtifact(*artifact, resident);
         resident.state = ok ? ResidentState::Resident : ResidentState::Refused;
+        if (ok)
+            ChargeResident(key, resident);
         return resident.view ? resident.texture : nullptr;
     }
 }

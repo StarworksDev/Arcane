@@ -59,6 +59,7 @@ namespace Arcane
 {
     class Graveyard;
     class NriDevice;
+    class ResidencyAccount;
     struct PixelData;
     struct LoadedClientArtifact;
 
@@ -245,6 +246,21 @@ namespace Arcane
         // cache has never resolved.
         void Invalidate(const Guid& id, Graveyard& graveyard, std::uint64_t fence);
 
+        // An ACCOUNT EVICTION of ONE (id, space) entry (Plan C Task 4): releases that
+        // space's bindless mappings unconditionally (BindlessTable::ReleaseAll -- an
+        // eviction ends residency regardless of holders, so never the refcount
+        // Release), then drops ONLY that key through the same drop path Invalidate
+        // uses (a texture a bindless slot views is destroyed through the slot
+        // backing, never directly). The other space's entry, slot and texture stay.
+        // A no-op when this cache does not hold the key.
+        void Evict(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence);
+
+        // The frame-boundary half of the device residency account for THIS cache:
+        // carries out the evictions the account queued for it (Evict, on this cache's
+        // own lane and fence) and ends its frame on the device clock. The vehicle
+        // calls it where it calls NriMeshBufferCache::EvictToBudget.
+        void EvictPending(Graveyard& graveyard, std::uint64_t fence);
+
         // How many images are actually RESIDENT (uploaded and viewable) --
         // i.e. in the Resident state. PendingCook keys (a real, viewable
         // checkerboard, just not the real asset) and Refused/memoized
@@ -318,6 +334,9 @@ namespace Arcane
             // happens (whether it lands on PendingCook again or promotes/
             // refuses); meaningless -- and untouched -- in every other state.
             std::uint32_t    pendingAsksSincePoll = 0;
+            // The GPU bytes this key charges the device residency account (Resident
+            // state only; 0 for PendingCook / Refused, which hold no object of their own).
+            std::uint64_t    bytes = 0;
         };
 
         // (asset, colour space) -- see ColorSpace. The SPACE is part of the
@@ -352,6 +371,13 @@ namespace Arcane
         // resolved exactly once.
         nri::Texture* ResolveArtifactKey(const Key& key, Resident& resident);
 
+        // The one drop path for a resident key: a slot-backed destroy when a bindless
+        // slot views the texture, otherwise the graveyard; uncharges the account.
+        void DropKey(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence);
+        // Charge the account for a freshly resident key / note a draw of a hit.
+        void ChargeResident(const Key& key, const Resident& resident);
+        void NoteDraw(const Key& key, const Resident& resident);
+
         // The upload half of ResolveArtifactKey's Resident/Refused branch:
         // format+srgb -> nri::Format, textureDesc sized to the artifact's OWN
         // mip table, one TextureSubresourceUploadDesc per mip (BC7's via
@@ -379,6 +405,7 @@ namespace Arcane
         void ReportIssue(const std::string& why);
 
         NriDevice*          m_device = nullptr;
+        ResidencyAccount*   m_account = nullptr;   // the device's account (NriDevice::Residency()); not owned
         nri::HelperInterface m_helper{};
         PixelSupplyFn       m_supply;
         ArtifactSupplyFn    m_artifactSupply;
