@@ -80,6 +80,22 @@ namespace Arcane
             ~PacketBindingReset() { packet = nullptr; }
         };
 
+        // Closes a context's residency clock frames on every exit of a RenderFrame /
+        // RenderFrameOffscreen that did not reach the boundary drain. `done` is set on
+        // the path that did (the caches' own EndFrame already ran there).
+        template <class F>
+        struct ResidencyFrameGuard
+        {
+            F close;
+            bool done = false;
+            ~ResidencyFrameGuard()
+            {
+                if (!done)
+                    close();
+            }
+        };
+        template <class F> ResidencyFrameGuard(F) -> ResidencyFrameGuard<F>;
+
         // Where the offline shader artifacts live, relative to the
         // executable. Resolved through ShaderPaths::ResolveFlavorDir, so a
         // desk user pointing ARCANE_SHADER_DIR at a live recompile moves
@@ -445,7 +461,8 @@ namespace Arcane
 
         // Device-wide texture invalidation reaches THIS context's cache through
         // this hook (NriDevice::InvalidateTexture); the dtor unregisters it.
-        m_device->RegisterContext(this, [this](const Guid& id) { InvalidateContentTexture(id); });
+        m_device->RegisterContext(this, [this](const Guid& id) { InvalidateContentTexture(id); },
+                                  [this] { DrainResidency(); });
 
         m_meshBuffers = NriMeshBufferCache::Create(*m_device);
         if (!m_meshBuffers)
@@ -1936,6 +1953,11 @@ namespace Arcane
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrame(const FrameDesc& frame)
     {
         const PacketBindingReset packetReset{ m_packet };
+        // A frame that returns Skipped/Failed never reaches the boundary below; the
+        // resolver may already have opened this context's clock frame, which would pin
+        // every entry stamped since and freeze eviction device-wide. Closes it on every
+        // such exit (clock only, nothing is evicted).
+        ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };
 
         // HOST-WINDOW ONLY. An offscreen context has no swapchain, so every
         // line below would dereference null; the twin is RenderFrameOffscreen.
@@ -2082,6 +2104,11 @@ namespace Arcane
         // device account queued for it, on this lane, and ends its frame.
         if (m_textures)
             m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
+        // Both caches ended their frames above; and the holders that did NOT tick (an idle
+        // preview) get their queued evictions carried out on their own lanes now, so an
+        // evicted copy does not stay in VRAM while the account counts it free.
+        residencyGuard.done = true;
+        m_device->DrainOtherContexts(this);
         // The GPU scene's retirements (a grown instance buffer, a grown slot
         // buffer), stamped at declaration with the value this submit just
         // signalled -- see NriGraphContext::CurrentFence for why they wait
@@ -2112,6 +2139,7 @@ namespace Arcane
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrameOffscreen(const FrameDesc& frame)
     {
         const PacketBindingReset packetReset{ m_packet };
+        ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };   // see RenderFrame
 
         if (m_mode != Mode::Offscreen)
         {
@@ -2246,6 +2274,11 @@ namespace Arcane
         // device account queued for it, on this lane, and ends its frame.
         if (m_textures)
             m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
+        // Both caches ended their frames above; and the holders that did NOT tick (an idle
+        // preview) get their queued evictions carried out on their own lanes now, so an
+        // evicted copy does not stay in VRAM while the account counts it free.
+        residencyGuard.done = true;
+        m_device->DrainOtherContexts(this);
         if (m_scene)
             m_scene->FlushGraves(m_graves);   // same contract as RenderFrame() above
 #if !defined(ARC_BUILD_DIST)

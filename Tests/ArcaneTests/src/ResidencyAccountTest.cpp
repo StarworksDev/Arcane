@@ -182,7 +182,7 @@ TEST_CASE("a second vehicle charges the same account", "[residency][account]")
     lane.Reap(1);
 }
 
-TEST_CASE("a texture admit borrows mesh surplus and does not evict a mesh inside the reservation",
+TEST_CASE("a texture admit borrows mesh surplus; an over texture slice pays from textures first",
           "[residency][account]")
 {
     std::vector<ResidencyEntry> entries;
@@ -325,7 +325,13 @@ TEST_CASE("an evicted object waits on the sampling context", "[residency][accoun
 
     // Context A sampled the texture through a bindless slot and its submit (fence 5 on
     // A's timeline) is still in flight.
-    const std::uint32_t slot = table->AddMapped(id, Arcane::BindlessTable::ColorSpace::Srgb, MockSrv(1), &a, aTexture);
+    // The slot views B's copy, the production topology: B's DropKey must ADOPT the
+    // texture backing (the slot views it), never bury it in B's own lane. On NONE every
+    // CreateTexture returns one DummyObject, so bTexture aliases aTexture; the mapping
+    // still goes over bTexture so the cache that evicts is the one whose copy is viewed.
+    const nri::Texture* bTexture = b.cache->Resolve(id);
+    REQUIRE(bTexture != nullptr);
+    const std::uint32_t slot = table->AddMapped(id, Arcane::BindlessTable::ColorSpace::Srgb, MockSrv(1), &b, bTexture);
     REQUIRE(slot != Arcane::BindlessTable::kInvalidSlot);
     table->Lifetime().NoteSample(slot, &a, 5);
 
@@ -389,4 +395,259 @@ TEST_CASE("one guid in Srgb and Display is two entries", "[residency][account]")
     account.Uncharge(&owner, Guid{ 1, 0 }, ResidencySlice::Texture, Space::Srgb);
     CHECK(account.EntryCount() == 1u);
     CHECK(account.Holds(&owner, Guid{ 1, 0 }, ResidencySlice::Texture, Space::Display));
+}
+
+// ---- Task 4 fix round 1 -------------------------------------------------------------
+
+TEST_CASE("arm 2 never takes a mesh at or under its reservation, and takes one above it",
+          "[residency][account]")
+{
+    // Arm 1 finds nothing (every texture is hot or the incoming), so only arm 2 can pick
+    // a victim. M1 (100 MiB, frame 1) is cold but inside the 256 MiB mesh reservation:
+    // the shield `used > reserve` must refuse it. Textures: 500 hot + 300 incoming = 800,
+    // over the borrowable 768. Without the shield M1 would be evicted.
+    std::vector<ResidencyEntry> entries;
+    entries.push_back(Mesh(1, 100, 1));
+    entries.push_back(Tex(2, 500, 10));   // hot: drawn this frame
+
+    const std::vector<ResidencyEviction> shielded =
+        Admit(entries, Tex(3, 300, 0), ResidencySlice::Texture, LockedCaps(), 10);
+    CHECK(shielded.empty());
+    CHECK(Has(entries, 1, ResidencySlice::Mesh));
+    CHECK(Used(entries, ResidencySlice::Texture) == MiB(800));   // the frame renders over budget
+
+    // A mesh ABOVE its reservation (300 > 256) is no longer shielded: arm 2 takes it.
+    std::vector<ResidencyEntry> above;
+    above.push_back(Mesh(1, 300, 1));
+    above.push_back(Tex(2, 500, 10));
+    const std::vector<ResidencyEviction> taken =
+        Admit(above, Tex(3, 300, 0), ResidencySlice::Texture, LockedCaps(), 10);
+    REQUIRE(taken.size() == 1);
+    CHECK(taken[0].id == Guid{ 1, 0 });
+    CHECK(taken[0].slice == ResidencySlice::Mesh);
+    CHECK_FALSE(Has(above, 1, ResidencySlice::Mesh));
+}
+
+namespace
+{
+    // One context's cache + its own lane, on a shared NONE device. Resident 16x16 RGBA8
+    // is 1 KiB, so KiB caps exercise the production eviction glue.
+    struct TexCtx
+    {
+        std::unique_ptr<Arcane::NriTextureCache> cache;
+        Arcane::Graveyard graves;
+        std::uint64_t fence = 1;
+    };
+
+    ResidencyCaps KiBCaps(std::uint64_t textureKiB)
+    {
+        ResidencyCaps caps;
+        caps.meshCap = 0;
+        caps.textureCap = textureKiB << 10;
+        caps.reservationPercent = 0;
+        return caps;
+    }
+
+    struct Pixels1K
+    {
+        Arcane::PixelData pixels;
+        Pixels1K()
+        {
+            pixels.width = 16;
+            pixels.height = 16;
+            pixels.rgba.assign(16u * 16u * 4u, 0xCD);
+        }
+    };
+
+    void Wire(TexCtx& c, Arcane::NriDevice& device, Pixels1K& px)
+    {
+        c.cache = Arcane::NriTextureCache::Create(device);
+        REQUIRE(c.cache != nullptr);
+        c.cache->SetPixelSupply([&px](const Guid&) -> const Arcane::PixelData* { return &px.pixels; });
+    }
+}
+
+TEST_CASE("production eviction glue drops only the queued key and ends the frame",
+          "[residency][account][nri][bindless]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    ResidencyAccount& account = device->ResidencyForTests(KiBCaps(2));
+    CHECK(account.Caps().textureCap == 2048u);
+
+    Pixels1K px;
+    TexCtx a, b;
+    Wire(a, *device, px);
+    Wire(b, *device, px);
+    Arcane::BindlessTable* table = device->Bindless();
+    REQUIRE(table != nullptr);
+    struct Done { std::uint64_t fence = 0; } done;
+    table->SetCompletionQuery(
+        [](const void*, std::uint64_t f, void* user) { return static_cast<Done*>(user)->fence >= f; }, &done);
+
+    const Guid x{ 100, 0 };
+    const nri::Texture* xSrgb = a.cache->Resolve(x, Space::Srgb);
+    const nri::Texture* xDisplay = a.cache->Resolve(x, Space::Display);
+    REQUIRE(xSrgb != nullptr);
+    REQUIRE(xDisplay != nullptr);
+    CHECK(account.EntryCount() == 2u);
+    const std::uint32_t srgbSlot = table->AddMapped(x, Arcane::BindlessTable::ColorSpace::Srgb, MockSrv(1), &a, xSrgb);
+    const std::uint32_t displaySlot = table->AddMapped(x, Arcane::BindlessTable::ColorSpace::Display, MockSrv(2), &a, xDisplay);
+    REQUIRE(srgbSlot != Arcane::BindlessTable::kInvalidSlot);
+    REQUIRE(displaySlot != Arcane::BindlessTable::kInvalidSlot);
+
+    a.cache->EvictPending(a.graves, a.fence);   // A's frame ends: its entries are cold from here on
+    const std::uint64_t before = account.Now();
+
+    // B charges one more KiB: 3 KiB against a 2 KiB cap. Srgb and Display are equally
+    // old and the smaller colour space goes first: A's queue holds ONLY the Srgb key.
+    REQUIRE(b.cache->Resolve(Guid{ 200, 0 }) != nullptr);
+    CHECK(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Display));
+    CHECK_FALSE(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Srgb));
+
+    a.cache->EvictPending(a.graves, a.fence);
+    CHECK(a.cache->ResidentCount() == 1u);   // the Display copy stays
+    CHECK(table->Lookup(x, Arcane::BindlessTable::ColorSpace::Srgb) == Arcane::BindlessTable::kInvalidSlot);
+    CHECK(table->Lookup(x, Arcane::BindlessTable::ColorSpace::Display) == displaySlot);   // its mapping stays
+    CHECK(table->IsLive(displaySlot));
+    CHECK(account.Now() > before);           // EvictPending ended A's frame
+
+    // NoteSampledBy on a mapped slot stamps its entry. B ends its frame, so its fresh key
+    // (200) and the Display key are both cold; sampling the Display slot makes it the
+    // newer one, so the next admit that must evict takes key 200, not the sampled key.
+    b.cache->EvictPending(b.graves, b.fence);
+    table->NoteSampledBy(a.cache.get(), 9);
+    REQUIRE(a.cache->Resolve(Guid{ 300, 0 }) != nullptr);   // 3 KiB again: one victim
+    CHECK(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Display));   // stamped: survives
+    CHECK_FALSE(account.Holds(b.cache.get(), Guid{ 200, 0 }, ResidencySlice::Texture, Space::Srgb));
+
+    done.fence = 100;
+    for (TexCtx* c : { &a, &b })
+    {
+        c->cache->Release(c->graves, c->fence + 1);
+        c->graves.Reap(c->fence + 1);
+    }
+    table->ProcessPending();
+    table->DestroyAllNow(true);
+}
+
+TEST_CASE("an idle holder's queued eviction is drained at another context's boundary",
+          "[residency][account][nri]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    ResidencyAccount& account = device->ResidencyForTests(KiBCaps(2));
+
+    Pixels1K px;
+    TexCtx a, b;
+    a.fence = 7;   // A's own last-submitted fence
+    b.fence = 3;   // a different timeline: B's fence must never bury A's objects
+    Wire(a, *device, px);
+    Wire(b, *device, px);
+    // The hooks a real NriGraphContext registers: drain its queue on ITS graveyard at
+    // ITS last-submitted fence.
+    device->RegisterContext(&a, [](const Guid&) {}, [&] { a.cache->DrainPending(a.graves, a.fence); });
+    device->RegisterContext(&b, [](const Guid&) {}, [&] { b.cache->DrainPending(b.graves, b.fence); });
+
+    const Guid x{ 100, 0 };
+    REQUIRE(a.cache->Resolve(x) != nullptr);
+    a.cache->EvictPending(a.graves, a.fence);   // A's frame ends; A now goes idle and never ticks again
+
+    // B admits past the cap: X is evicted from the ACCOUNT now (counted free) ...
+    REQUIRE(b.cache->Resolve(Guid{ 200, 0 }) != nullptr);
+    REQUIRE(b.cache->Resolve(Guid{ 300, 0 }) != nullptr);
+    CHECK_FALSE(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Srgb));
+    // ... but A's GPU copy is still resident: A never reached a boundary.
+    CHECK(a.cache->ResidentCount() == 1u);
+    CHECK(a.graves.Pending() == 0u);
+
+    // B's boundary carries out its own queue, then drains every OTHER context's.
+    b.cache->EvictPending(b.graves, b.fence);
+    device->DrainOtherContexts(&b);
+    CHECK(a.cache->ResidentCount() == 0u);
+    CHECK(a.graves.Pending() > 0u);          // on A's OWN graveyard
+    CHECK(b.graves.Pending() == 0u);         // never B's lane
+    a.graves.Reap(6);                        // A's fence is 7: not yet
+    CHECK(a.graves.Pending() > 0u);
+    a.graves.Reap(7);
+    CHECK(a.graves.Pending() == 0u);
+    CHECK(account.TakePending(a.cache.get()).empty());
+
+    // The admitting context is not drained by its own call.
+    device->DrainOtherContexts(&a);
+    CHECK(b.cache->ResidentCount() == 2u);
+
+    device->UnregisterContext(&a);
+    device->UnregisterContext(&b);
+    for (TexCtx* c : { &a, &b })
+    {
+        c->cache->Release(c->graves, c->fence + 1);
+        c->graves.Reap(c->fence + 1);
+    }
+}
+
+TEST_CASE("a skipped frame still closes its clock frame so another context can evict",
+          "[residency][account][nri]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    ResidencyAccount& account = device->ResidencyForTests(KiBCaps(2));
+
+    Pixels1K px;
+    TexCtx a, b;
+    Wire(a, *device, px);
+    Wire(b, *device, px);
+
+    const Guid x{ 100, 0 };
+    REQUIRE(a.cache->Resolve(x) != nullptr);   // A's frame is open (the resolver ran)
+    REQUIRE(a.cache->Resolve(Guid{ 101, 0 }) != nullptr);
+
+    // Frame skipped (OUT_OF_DATE, minimized, ...): no boundary drain, but the context's
+    // scope guard closes the clock frame on every exit path.
+    const std::uint64_t before = account.Now();
+    a.cache->CloseFrame();
+    CHECK(account.Now() > before);
+
+    // B admits: A's entries were stamped before B's frame, so they are evictable. Had A's
+    // frame stayed open, both would be protected and eviction would freeze device-wide.
+    REQUIRE(b.cache->Resolve(Guid{ 200, 0 }) != nullptr);
+    CHECK_FALSE(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Srgb));
+    CHECK(account.Holds(b.cache.get(), Guid{ 200, 0 }, ResidencySlice::Texture, Space::Srgb));
+    // CloseFrame is clock-only: A's queued eviction is untouched until A's own boundary.
+    CHECK(a.cache->ResidentCount() == 2u);
+
+    for (TexCtx* c : { &a, &b })
+    {
+        c->cache->Release(c->graves, c->fence + 1);
+        c->graves.Reap(c->fence + 1);
+    }
+}
+
+TEST_CASE("an eviction leaves a mapping that views another holder's copy",
+          "[residency][account][nri][bindless]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    Pixels1K px;
+    TexCtx a;
+    Wire(a, *device, px);
+    Arcane::BindlessTable* table = device->Bindless();
+    REQUIRE(table != nullptr);
+
+    const Guid id{ 55, 0 };
+    REQUIRE(a.cache->Resolve(id) != nullptr);
+    // The mapping was re-created over ANOTHER holder's fresh copy (a pointer that is not
+    // this cache's texture): this cache's late eviction must not release it.
+    const nri::Texture* other = reinterpret_cast<const nri::Texture*>(0x7000u);
+    const std::uint32_t slot = table->AddMapped(id, Arcane::BindlessTable::ColorSpace::Srgb, MockSrv(3), &a, other);
+    REQUIRE(slot != Arcane::BindlessTable::kInvalidSlot);
+
+    a.cache->Evict(id, Space::Srgb, a.graves, a.fence);
+    CHECK(a.cache->ResidentCount() == 0u);                                                  // own copy dropped
+    CHECK(table->Lookup(id, Arcane::BindlessTable::ColorSpace::Srgb) == slot);             // the other copy's mapping stays
+    CHECK(table->IsLive(slot));
+
+    a.cache->Release(a.graves, a.fence + 1);
+    a.graves.Reap(a.fence + 1);
+    table->DestroyAllNow(true);
 }

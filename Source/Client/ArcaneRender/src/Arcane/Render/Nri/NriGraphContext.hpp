@@ -1473,6 +1473,32 @@ namespace Arcane
                 m_textures->Invalidate(id, m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
         }
 
+        // The residency drain hook NriDevice::DrainOtherContexts runs from ANOTHER
+        // context's frame boundary: carries out the evictions the device account queued
+        // for THIS context's caches, on THIS context's own graveyard at ITS OWN
+        // last-submitted fence (never the admitting context's, never Graves()). No clock
+        // movement: this context's own boundary owns that. Sequential recording, same
+        // assumption as InvalidateTexture.
+        void DrainResidency()
+        {
+            const std::uint64_t fence = m_graph ? m_graph->DebugSubmitCount() : 0;
+            if (m_meshBuffers)
+                m_meshBuffers->DrainPending(m_graves, fence);
+            if (m_textures)
+                m_textures->DrainPending(m_graves, fence);
+        }
+
+        // Closes both caches' open clock frames without evicting anything: the scope
+        // guard on every RenderFrame / RenderFrameOffscreen exit that did not reach the
+        // boundary drain (Skipped, Failed).
+        void CloseResidencyFrames()
+        {
+            if (m_meshBuffers)
+                m_meshBuffers->CloseFrame();
+            if (m_textures)
+                m_textures->CloseFrame();
+        }
+
         // THE SHARED image residency cache -- one per vehicle, consumed by
         // BOTH the batch node (a span's own t0 texture and a registered
         // material's declared params) and the post chain (its declared

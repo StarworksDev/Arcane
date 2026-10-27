@@ -178,24 +178,46 @@ namespace Arcane
 
     void NriTextureCache::Evict(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence)
     {
-        if (!m_device || m_textures.find(Key{ id, space }) == m_textures.end())
+        const auto resident = m_textures.find(Key{ id, space });
+        if (!m_device || resident == m_textures.end())
             return;
         // The mapping first, so the slot goes pending (or retires at once) and the
-        // drop below finds it and joins its retire. Per colour space, unconditional.
+        // drop below finds it and joins its retire. Per colour space, unconditional --
+        // EXCEPT when the mapped slot views a texture that is not THIS cache's copy:
+        // another holder re-created the mapping over its own fresh copy after this
+        // eviction was queued, and releasing it would only cost that holder a re-resolve.
         if (BindlessTable* bindless = m_device->BindlessIfCreated())
-            bindless->ReleaseAll(id, space == ColorSpace::Display ? BindlessTable::ColorSpace::Display
-                                                                  : BindlessTable::ColorSpace::Srgb);
+        {
+            const BindlessTable::ColorSpace bspace = space == ColorSpace::Display ? BindlessTable::ColorSpace::Display
+                                                                                  : BindlessTable::ColorSpace::Srgb;
+            const nri::Texture* mapped = bindless->MappedTexture(id, bspace);
+            if (!mapped || mapped == resident->second.texture)
+                bindless->ReleaseAll(id, bspace);
+        }
         DropKey(id, space, graveyard, fence);
     }
 
-    void NriTextureCache::EvictPending(Graveyard& graveyard, std::uint64_t fence)
+    void NriTextureCache::DrainPending(Graveyard& graveyard, std::uint64_t fence)
     {
         if (!m_account)
             return;
         for (const ResidencyEviction& ev : m_account->TakePending(this))
             if (ev.slice == ResidencySlice::Texture)
                 Evict(ev.id, ev.space, graveyard, fence);
+    }
+
+    void NriTextureCache::EvictPending(Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_account)
+            return;
+        DrainPending(graveyard, fence);
         m_account->EndFrame(this);
+    }
+
+    void NriTextureCache::CloseFrame()
+    {
+        if (m_account)
+            m_account->EndFrame(this);
     }
 
     void NriTextureCache::ChargeResident(const Key& key, const Resident& resident)

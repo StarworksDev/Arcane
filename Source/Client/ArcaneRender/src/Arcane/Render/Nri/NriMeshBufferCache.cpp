@@ -349,10 +349,24 @@ namespace Arcane
                                                          NriTextureCache::ColorSpace::Srgb, r.bytes, 0 });
     }
 
+    void NriMeshBufferCache::CloseFrame()
+    {
+        if (m_account)
+            m_account->EndFrame(this);
+    }
+
     void NriMeshBufferCache::EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,
                                            std::uint64_t fence)
     {
         (void)frameCounter;   // the device account keeps its own clock (R2); see ResidencyAccount.hpp
+        if (!m_account)
+            return;
+        DrainPending(graveyard, fence);
+        m_account->EndFrame(this);
+    }
+
+    void NriMeshBufferCache::DrainPending(Graveyard& graveyard, std::uint64_t fence)
+    {
         if (!m_account)
             return;
         for (const ResidencyEviction& ev : m_account->TakePending(this))
@@ -363,7 +377,6 @@ namespace Arcane
             if (it != m_entries.end())
                 Discard(it, graveyard, fence);
         }
-        m_account->EndFrame(this);
     }
 
     void NriMeshBufferCache::EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,

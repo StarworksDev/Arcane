@@ -144,6 +144,15 @@ namespace Arcane
         // (SelectEvictions); tests use it so a handful of cubes can exercise the LRU
         // without filling the account.
         void EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard, std::uint64_t fence);
+
+        // Just the queue half of the three-argument EvictToBudget (no EndFrame): what
+        // another context's boundary runs for THIS cache through
+        // NriDevice::DrainOtherContexts, on this cache's own graveyard and fence.
+        void DrainPending(Graveyard& graveyard, std::uint64_t fence);
+
+        // Just the clock half: closes this cache's open frame without evicting anything.
+        // The context's scope guard calls it on a Skipped/Failed frame.
+        void CloseFrame();
         void EvictToBudget(std::uint64_t frameCounter, Graveyard& graveyard,
                            std::uint64_t fence, std::uint64_t budget);
 

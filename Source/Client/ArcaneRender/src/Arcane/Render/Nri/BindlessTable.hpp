@@ -149,6 +149,10 @@ namespace Arcane
         // The memoized slot for (guid, space), or kInvalidSlot.
         [[nodiscard]] std::uint32_t Lookup(const Guid& guid, ColorSpace space) const;
 
+        // The texture object the mapped slot's descriptor views (as recorded by
+        // AddMapped), or null when the key is unmapped or recorded no texture.
+        [[nodiscard]] const nri::Texture* MappedTexture(const Guid& guid, ColorSpace space) const;
+
         // AddAndWrite + memoize under (guid, space). If the key is already mapped
         // the existing slot is returned and `srv` is NOT consumed (the caller keeps
         // ownership of it).

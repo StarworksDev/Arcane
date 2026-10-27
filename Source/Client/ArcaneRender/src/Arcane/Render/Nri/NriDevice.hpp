@@ -45,6 +45,7 @@ namespace Arcane
     struct D3D12DeviceCreation;
     class BindlessTable;
     class ResidencyAccount;
+    struct ResidencyCaps;
 
     // -------------------------------------------------------------------
     // NativeDeviceOwner -- the caller-owns half of the ownership contract.
@@ -213,6 +214,11 @@ namespace Arcane
         // no NRI, so a NONE device works.
         [[nodiscard]] ResidencyAccount& Residency();
         [[nodiscard]] ResidencyAccount* ResidencyIfCreated() noexcept { return m_residency.get(); }
+        // TEST SEAM (by name): create-if-absent with explicit caps instead of the latched
+        // settings, so a NONE device can reach the eviction glue with KiB caps. Returns
+        // the existing account unchanged when one was already created. Production code
+        // calls Residency().
+        [[nodiscard]] ResidencyAccount& ResidencyForTests(const ResidencyCaps& caps);
 
         // ---- device-wide texture invalidation (3D-readiness arc spec 3.5) -------
         // Each NriGraphContext keeps its own NriTextureCache, but the bindless
@@ -222,7 +228,15 @@ namespace Arcane
         // its own fence, or joined to the slot retire it backs); contexts unregister
         // at teardown.
         using TextureInvalidateFn = std::function<void(const Guid&)>;
-        void RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture);
+        //
+        // `drainResidency` (optional) carries out the evictions the device residency
+        // account queued for THIS context's caches, on THIS context's own graveyard at
+        // its OWN last-submitted fence (never another context's fence, never Graves()).
+        // It exists so a holder that stops ticking cannot keep evicted GPU copies alive
+        // while the account counts them free: see DrainOtherContexts.
+        using ResidencyDrainFn = std::function<void()>;
+        void RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture,
+                             ResidencyDrainFn drainResidency = {});
         void UnregisterContext(const void* owner);
         [[nodiscard]] std::size_t RegisteredContextCount() const noexcept { return m_contexts.size(); }
 
@@ -230,6 +244,16 @@ namespace Arcane
         // releases every bindless mapping of `id` (both colour spaces, unconditional)
         // FIRST, then drops `id` from every registered context's texture cache.
         void InvalidateTexture(const Guid& id);
+
+        // The admitting context's frame boundary calls this AFTER draining its own
+        // queue: runs every OTHER registered context's drain hook, each draining its own
+        // queue on its own graveyard at its own fence. Same sequential-recording
+        // assumption as InvalidateTexture: the device's contexts record and submit one
+        // after another on the thread that calls this, so no other context is mid-record
+        // and its last-submitted fence covers everything it recorded. A texture a bindless
+        // slot views still goes through AdoptTextureBacking inside the cache drop. A hook
+        // must not (un)register contexts or destroy a context.
+        void DrainOtherContexts(const void* admitting);
 
     private:
         NriDevice();
@@ -243,7 +267,7 @@ namespace Arcane
         DeviceResourceLifetime m_life;
         std::unique_ptr<BindlessTable> m_bindless;
         std::unique_ptr<ResidencyAccount> m_residency;
-        struct ContextHook { const void* owner; TextureInvalidateFn invalidate; };
+        struct ContextHook { const void* owner; TextureInvalidateFn invalidate; ResidencyDrainFn drain; };
         std::vector<ContextHook> m_contexts;
         nri::CoreInterface m_core{};
         nri::Device*       m_device        = nullptr;

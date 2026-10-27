@@ -261,6 +261,15 @@ namespace Arcane
         // calls it where it calls NriMeshBufferCache::EvictToBudget.
         void EvictPending(Graveyard& graveyard, std::uint64_t fence);
 
+        // Just the queue half of EvictPending (no EndFrame): what another context's
+        // boundary runs for THIS cache through NriDevice::DrainOtherContexts, on this
+        // cache's own graveyard at its own last-submitted fence.
+        void DrainPending(Graveyard& graveyard, std::uint64_t fence);
+
+        // Just the clock half: closes this cache's open frame on the device clock without
+        // evicting anything. The context's scope guard calls it on a Skipped/Failed frame.
+        void CloseFrame();
+
         // How many images are actually RESIDENT (uploaded and viewable) --
         // i.e. in the Resident state. PendingCook keys (a real, viewable
         // checkerboard, just not the real asset) and Refused/memoized

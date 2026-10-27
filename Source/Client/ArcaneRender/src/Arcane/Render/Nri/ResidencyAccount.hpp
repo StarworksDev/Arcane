@@ -38,7 +38,12 @@
 // entries stamped with the current tick: an entry drawn by ANY context in its
 // current, not-yet-finished frame is never a victim, whichever context admits.
 // A holder with no open frame (it drew nothing since its last boundary) pins
-// nothing, so an idle preview cannot freeze eviction forever.
+// nothing. A holder whose frame is SKIPPED or FAILED never reaches the boundary
+// drain, so NriGraphContext closes the clock frame (EndFrame, clock only -- no
+// eviction runs) on EVERY RenderFrame / RenderFrameOffscreen exit path through a
+// scope guard; a stalled context therefore cannot freeze eviction device-wide.
+// Evictions themselves are still carried out only at a successful boundary (or by
+// another context's drain hook, see NriDevice::DrainOtherContexts).
 //
 // Not thread-safe: one account per device, driven by the thread that records.
 

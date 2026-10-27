@@ -332,6 +332,12 @@ namespace Arcane
         return it == m_map.end() ? kInvalidSlot : it->second.slot;
     }
 
+    const nri::Texture* BindlessTable::MappedTexture(const Guid& guid, ColorSpace space) const
+    {
+        const std::uint32_t slot = Lookup(guid, space);
+        return slot == kInvalidSlot || slot >= m_slots.size() ? nullptr : m_slots[slot].texture;
+    }
+
     std::uint32_t BindlessTable::AddMapped(const Guid& guid, ColorSpace space, nri::Descriptor* srv,
                                            const void* owner, const nri::Texture* texture)
     {
@@ -450,6 +456,8 @@ namespace Arcane
         // A mapped texture sampled through a bindless slot is DRAWN, though no cache
         // Resolve ran for it this frame: stamp it on the device residency account so
         // a texture a live mesh material samples is never the account's oldest.
+        // (An orphaned mapping with no material ref is stamped every record too, so it
+        // does not age: accepted, Task 4 review Q5.)
         ResidencyAccount* account = m_device ? m_device->ResidencyIfCreated() : nullptr;
         for (std::uint32_t i = 0; i < m_slots.size(); ++i)
         {

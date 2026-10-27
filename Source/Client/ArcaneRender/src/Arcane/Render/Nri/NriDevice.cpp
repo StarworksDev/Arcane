@@ -500,15 +500,24 @@ namespace Arcane
         return *m_residency;
     }
 
-    void NriDevice::RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture)
+    ResidencyAccount& NriDevice::ResidencyForTests(const ResidencyCaps& caps)
+    {
+        if (!m_residency)
+            m_residency = std::make_unique<ResidencyAccount>(caps);
+        return *m_residency;
+    }
+
+    void NriDevice::RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture,
+                                    ResidencyDrainFn drainResidency)
     {
         for (ContextHook& h : m_contexts)
             if (h.owner == owner)
             {
                 h.invalidate = std::move(invalidateTexture);
+                h.drain = std::move(drainResidency);
                 return;
             }
-        m_contexts.push_back(ContextHook{ owner, std::move(invalidateTexture) });
+        m_contexts.push_back(ContextHook{ owner, std::move(invalidateTexture), std::move(drainResidency) });
     }
 
     void NriDevice::UnregisterContext(const void* owner)
@@ -533,6 +542,16 @@ namespace Arcane
         for (const ContextHook& h : hooks)
             if (h.invalidate)
                 h.invalidate(id);
+    }
+
+    void NriDevice::DrainOtherContexts(const void* admitting)
+    {
+        // Iterate a copy (a hook must not (un)register contexts); the sequential
+        // recording assumption is documented at the declaration.
+        const std::vector<ContextHook> hooks = m_contexts;
+        for (const ContextHook& h : hooks)
+            if (h.owner != admitting && h.drain)
+                h.drain();
     }
 
     NriDevice::~NriDevice()
