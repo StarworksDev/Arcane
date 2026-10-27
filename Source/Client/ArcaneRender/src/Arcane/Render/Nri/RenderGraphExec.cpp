@@ -1095,6 +1095,12 @@ namespace Arcane
         return m_device->Core().GetFenceValue(*m_fence);
     }
 
+    void RenderGraph::ReapCompleted()
+    {
+        if (m_graves)
+            m_graves->Reap(CompletedFence());
+    }
+
     bool RenderGraph::Execute(const RgExecuteDesc& desc, const RgCompiled& compiled)
     {
         if (m_device == nullptr)
@@ -1168,7 +1174,7 @@ namespace Arcane
         // submission was still in flight. m_fence is private to this graph and
         // m_graves is private to its context, so the two can only ever describe
         // each other.
-        m_graves->Reap(core.GetFenceValue(*m_fence));
+        ReapCompleted();
 
         // Whatever a PREVIOUS Execute() retired out of the pool, buried now
         // (see m_retiredPool). It has to be here,

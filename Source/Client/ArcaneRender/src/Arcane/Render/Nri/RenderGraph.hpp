@@ -775,6 +775,13 @@ namespace Arcane
         // means nothing on another's.
         [[nodiscard]] std::uint64_t CompletedFence() const noexcept;
 
+        // Reaps THIS graph's graveyard lane against THIS graph's own completed fence
+        // (CompletedFence()): the exact pairing Execute() runs at its top, shared so a
+        // context that is NOT executing (an idle holder another context's boundary just
+        // drained evictions into) can free them without waiting for its next frame. A
+        // no-op before the first Execute (no lane latched, nothing buried).
+        void ReapCompleted();
+
         // THIS GRAPH'S GRAVEYARD LANE -- RgExecuteDesc::graves, latched at the
         // first Execute(). Null before it, which is exactly the state in which
         // the graph owns nothing to bury.

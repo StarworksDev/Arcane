@@ -1486,6 +1486,11 @@ namespace Arcane
                 m_meshBuffers->DrainPending(m_graves, fence);
             if (m_textures)
                 m_textures->DrainPending(m_graves, fence);
+            // The drained copies now sit in THIS lane, which Execute reaps only at its own
+            // next frame: an idle holder would keep them in VRAM. Reap at this context's
+            // own completed fence (the pairing Execute does), so they die now.
+            if (m_graph)
+                m_graph->ReapCompleted();
         }
 
         // Closes both caches' open clock frames without evicting anything: the scope

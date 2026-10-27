@@ -545,9 +545,20 @@ TEST_CASE("an idle holder's queued eviction is drained at another context's boun
     Wire(a, *device, px);
     Wire(b, *device, px);
     // The hooks a real NriGraphContext registers: drain its queue on ITS graveyard at
-    // ITS last-submitted fence.
-    device->RegisterContext(&a, [](const Guid&) {}, [&] { a.cache->DrainPending(a.graves, a.fence); });
-    device->RegisterContext(&b, [](const Guid&) {}, [&] { b.cache->DrainPending(b.graves, b.fence); });
+    // ITS last-submitted fence, then reap that lane at ITS OWN completed fence (the test
+    // controls the completed value; the context's RenderGraph::ReapCompleted does it for real).
+    std::uint64_t aCompleted = 0;
+    std::uint64_t bCompleted = 0;
+    device->RegisterContext(&a, [](const Guid&) {}, [&]
+    {
+        a.cache->DrainPending(a.graves, a.fence);
+        a.graves.Reap(aCompleted);
+    });
+    device->RegisterContext(&b, [](const Guid&) {}, [&]
+    {
+        b.cache->DrainPending(b.graves, b.fence);
+        b.graves.Reap(bCompleted);
+    });
 
     const Guid x{ 100, 0 };
     REQUIRE(a.cache->Resolve(x) != nullptr);
@@ -565,17 +576,25 @@ TEST_CASE("an idle holder's queued eviction is drained at another context's boun
     b.cache->EvictPending(b.graves, b.fence);
     device->DrainOtherContexts(&b);
     CHECK(a.cache->ResidentCount() == 0u);
-    CHECK(a.graves.Pending() > 0u);          // on A's OWN graveyard
+    CHECK(a.graves.Pending() > 0u);          // on A's OWN graveyard (A's completed fence is 0)
     CHECK(b.graves.Pending() == 0u);         // never B's lane
-    a.graves.Reap(6);                        // A's fence is 7: not yet
+
+    // The drain also REAPS the idle holder's own lane at its own completed fence, with no
+    // manual Reap here: below A's fence 7 the copies wait, at 7 they are destroyed.
+    aCompleted = 6;
+    device->DrainOtherContexts(&b);
     CHECK(a.graves.Pending() > 0u);
-    a.graves.Reap(7);
+    aCompleted = 7;
+    device->DrainOtherContexts(&b);
     CHECK(a.graves.Pending() == 0u);
     CHECK(account.TakePending(a.cache.get()).empty());
 
-    // The admitting context is not drained by its own call.
-    device->DrainOtherContexts(&a);
-    CHECK(b.cache->ResidentCount() == 2u);
+    // The admitting context is skipped by its own call: queue an eviction for B (A admits
+    // past the cap and takes one of B's cold entries), then DrainOtherContexts(&b) must
+    // leave B's queue alone while it drains A's.
+    REQUIRE(a.cache->Resolve(Guid{ 400, 0 }) != nullptr);
+    device->DrainOtherContexts(&b);
+    CHECK_FALSE(account.TakePending(b.cache.get()).empty());   // B (the admitter) was not drained
 
     device->UnregisterContext(&a);
     device->UnregisterContext(&b);
