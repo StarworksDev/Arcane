@@ -20,6 +20,7 @@
 
 #include <Arcane/Assets/ArtifactReader.hpp>
 
+#include <Arcane/Assets/ArtifactCodec.hpp>
 #include <Arcane/AssetPipeline/ArtifactFormat.hpp>
 #include <Arcane/AssetPipeline/ArtifactStore.hpp>
 #include <Arcane/Guid.hpp>
@@ -58,21 +59,11 @@ namespace
         return out;
     }
 
-    // FNV-1a 64-bit over just the source bytes -- the SAME algorithm and constants
-    // TextureImporter.cpp's HashSourceBytes and ArtifactReader.cpp's own client-side
-    // HashSourceBytes both use, duplicated here (this suite writes a fixture's sourceHash
-    // through the pipeline side, then ReadClientMeshArtifact re-derives the same fingerprint
-    // internally against `currentSourceBytes` -- the two must agree by construction).
+    // The source hash is the shared codec's function -- the same one the importers and the
+    // runtime reader call, so this fixture cannot drift from either.
     std::uint64_t FnvOfSource(std::span<const std::byte> bytes) noexcept
     {
-        std::uint64_t h = 14695981039346656037ULL;
-        constexpr std::uint64_t prime = 1099511628211ULL;
-        for (std::byte b : bytes)
-        {
-            h ^= static_cast<std::uint64_t>(static_cast<std::uint8_t>(b));
-            h *= prime;
-        }
-        return h;
+        return Arcane::HashSourceBytes(bytes);
     }
 
     // A minimal-but-valid mesh fixture: 3 zeroed vertices, indices {0,1,2}, one section
@@ -438,4 +429,65 @@ TEST_CASE("mesh artifact: FindArtifactForGuid finds a MESH artifact", "[artifact
     CHECK(Arcane::FindArtifactForGuid(store, meshGuid).size() == 1u);
     CHECK(Arcane::FindArtifactForGuid(store, texGuid).size() == 1u);
     CHECK(Arcane::FindArtifactForGuid(store, Guid::Generate()).empty());
+}
+
+TEST_CASE("mesh readers refuse an index that is not less than vertexCount", "[artifact]")
+{
+    // Both independent readers (the client's ReadClientMeshArtifact and the pipeline's
+    // ReadMeshArtifact) must refuse an index >= vertexCount: it would reach the GPU index
+    // buffer and read past the vertex buffer. vertexCount == 1 here, so only index 0 is valid.
+    const fs::path dir = TempDir("mesh_index_bound");
+    const Guid guid = Guid::Generate();
+    const std::vector<std::byte> source = PatternBytes(32, 0x66);
+    const std::vector<Arcane::AssetPipeline::MeshArtifactVertex> vertices(1);
+
+    auto descFor = [&](std::uint32_t indexCount)
+    {
+        Arcane::AssetPipeline::MeshArtifactDesc d{};
+        d.sourceGuid = guid;
+        d.sourceHash = FnvOfSource(source);
+        d.importerVersion = Arcane::kClientMeshImporterVersionMirror;
+        d.vertexCount = 1;
+        d.indexCount = indexCount;
+        d.sectionCount = indexCount ? 1u : 0u;
+        if (indexCount) d.sections = { { "Slot", 0, indexCount, 0 } };
+        return d;
+    };
+
+    SECTION("index 0xFFFFFFFF is refused by both readers")
+    {
+        const fs::path path = dir / "bad_index.arcart";
+        const std::vector<std::uint32_t> indices = { 0xFFFFFFFFu };
+        REQUIRE(Arcane::AssetPipeline::WriteMeshArtifact(path, descFor(1), vertices, indices));
+        CHECK(Arcane::ReadClientMeshArtifact(path, source, guid).refusal != Arcane::ArtifactRefusal::None);
+        CHECK_FALSE(Arcane::ReadClientMeshArtifact(path, source, guid).mesh.has_value());
+        CHECK_FALSE(Arcane::AssetPipeline::ReadMeshArtifact(path).has_value());
+    }
+
+    SECTION("index == vertexCount is refused (the boundary)")
+    {
+        const fs::path path = dir / "boundary_index.arcart";
+        const std::vector<std::uint32_t> indices = { 1u };
+        REQUIRE(Arcane::AssetPipeline::WriteMeshArtifact(path, descFor(1), vertices, indices));
+        CHECK(Arcane::ReadClientMeshArtifact(path, source, guid).refusal != Arcane::ArtifactRefusal::None);
+        CHECK_FALSE(Arcane::AssetPipeline::ReadMeshArtifact(path).has_value());
+    }
+
+    SECTION("control: index 0 with vertexCount 1 still loads")
+    {
+        const fs::path path = dir / "good_index.arcart";
+        const std::vector<std::uint32_t> indices = { 0u };
+        REQUIRE(Arcane::AssetPipeline::WriteMeshArtifact(path, descFor(1), vertices, indices));
+        CHECK(Arcane::ReadClientMeshArtifact(path, source, guid).refusal == Arcane::ArtifactRefusal::None);
+        CHECK(Arcane::AssetPipeline::ReadMeshArtifact(path).has_value());
+    }
+
+    SECTION("control: indexCount 0 still loads")
+    {
+        const fs::path path = dir / "no_indices.arcart";
+        const std::vector<std::uint32_t> indices;
+        REQUIRE(Arcane::AssetPipeline::WriteMeshArtifact(path, descFor(0), vertices, indices));
+        CHECK(Arcane::ReadClientMeshArtifact(path, source, guid).refusal == Arcane::ArtifactRefusal::None);
+        CHECK(Arcane::AssetPipeline::ReadMeshArtifact(path).has_value());
+    }
 }

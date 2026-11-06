@@ -415,7 +415,7 @@ namespace
         Arcane::GpuSceneFrame frame;
         Arcane::GpuSceneSync(world.reg, world.mirror, /*deviceSyncedGeneration*/ 0u, frame.stage);
         Arcane::BuildGpuSceneFrame(world.mirror, &visible,
-                                   world.reg.GetResource<Arcane::MeshTable>(), view, frame);
+                                   Arcane::MeshSectionRanges(world.reg.GetResource<Arcane::MeshTable>()), view, frame);
 
         // The fixture is worth nothing if it does not actually produce the
         // shapes the oracle is meant to discriminate.
@@ -522,7 +522,7 @@ namespace
         Arcane::GpuSceneFrame frame2;
         Arcane::GpuSceneSync(world.reg, world.mirror, Arcane::GpuSceneSyncedGeneration(device), frame2.stage);
         Arcane::BuildGpuSceneFrame(world.mirror, &shrunk,
-                                   world.reg.GetResource<Arcane::MeshTable>(), view, frame2);
+                                   Arcane::MeshSectionRanges(world.reg.GetResource<Arcane::MeshTable>()), view, frame2);
         REQUIRE(frame2.stats.coarseVisible < frame.stats.coarseVisible);
         // ...and the identity again, on a DIFFERENT live frame: the rebuild
         // dropped rows from shared batches while the transparent records stayed,
@@ -568,7 +568,7 @@ namespace
         Arcane::GpuSceneFrame frame3;
         Arcane::GpuSceneSync(world.reg, world.mirror, Arcane::GpuSceneSyncedGeneration(device), frame3.stage);
         Arcane::BuildGpuSceneFrame(world.mirror, &onlyTransparent,
-                                   world.reg.GetResource<Arcane::MeshTable>(), view, frame3);
+                                   Arcane::MeshSectionRanges(world.reg.GetResource<Arcane::MeshTable>()), view, frame3);
         REQUIRE(frame3.rowCount > 0);                    // every row is still resident -- nothing was freed
         REQUIRE(frame3.batches.empty());                 // ...and no indirect batch is emitted
         REQUIRE(frame3.args.empty());
@@ -604,7 +604,7 @@ namespace
         Arcane::GpuSceneFrame frame4;
         Arcane::GpuSceneSync(world.reg, world.mirror, Arcane::GpuSceneSyncedGeneration(device), frame4.stage);
         Arcane::BuildGpuSceneFrame(world.mirror, &returned,
-                                   world.reg.GetResource<Arcane::MeshTable>(), view, frame4);
+                                   Arcane::MeshSectionRanges(world.reg.GetResource<Arcane::MeshTable>()), view, frame4);
         REQUIRE(frame4.batches.size() == 2);             // meshA's two sections, one row each
         REQUIRE(frame4.transparentDraws.size() == 2);
 

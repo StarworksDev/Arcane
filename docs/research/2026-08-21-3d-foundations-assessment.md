@@ -295,17 +295,21 @@ non-feature. For 3D scenes it is not optional:
 
 ### F5 — the compositing architecture
 
-Two coupled changes:
+**Superseded 2026-10-09.** The design is `docs/superpowers/specs/2026-10-09-f5-unified-world-pipeline-design.md`: 2D draws through the 3D path. The "both sort into a shared depth" bridge below is history, not the design. The clear still moves off `CmdClearAttachments`.
+
+Two coupled changes, as written on 2026-08-21:
 
 1. **Hoist the clear to a declarative attachment load-op.** Today
    `Batch2DNode::Record` issues `CmdClearAttachments` mid-pass
-   (`Batch2DNode.cpp:1321-1325`), with the intent stated as *"the only node that
+   (`Batch2DNode.cpp:1395-1405`), with the intent stated as *"the only node that
    clears the canvas at all, so there is exactly one background colour in the
-   process."* `NriGraphContext.cpp:1123-1163` already records the declarative
-   clear-op as deferred work. This is how both D3D12 and Vulkan want it
-   expressed, and it is faster on tiled hardware.
+   process."* `NriGraphContext.cpp:1235-1252` is the clear seam: attachments are
+   load/store, and there is no declarative clear op yet. (The 2026-08-21 cite
+   `NriGraphContext.cpp:1123-1163` does not describe a clear.) This is how both
+   D3D12 and Vulkan want it expressed, and it is faster on tiled hardware.
 2. **One world pass with a shared depth buffer** that 3D geometry and 2D world
    content both sort into.
+   Clarification: this item is not the design. Sprites are drawn through the 3D path (`docs/superpowers/specs/2026-10-09-f5-unified-world-pipeline-design.md`).
 
 Until (1) exists, node ordering is forced: anything declared before `batch2d` is
 erased by its clear, and anything after composites on top. That is why 3D
@@ -373,6 +377,8 @@ update cadence is what makes the v0.1 risk acceptable here.
 
 ## Still open
 
+**Answered 2026-10-09.** `SpriteRenderer` is a world quad in the shared depth buffer, drawn through the 3D path (`docs/superpowers/specs/2026-10-09-f5-unified-world-pipeline-design.md`). The question as it stood:
+
 **Does `SpriteRenderer` stay 2D-positioned, or become a world quad in 3D space?**
 
 Not required for F1 — F1's requirement is only that sprites keep rendering
@@ -396,7 +402,7 @@ should be a per-sprite flag, not a global decision.
    moving. ABI 15 → 16. Scene format decision applied.
 2. **F2** — `MeshRenderer` + mesh/material assets, with the cook pipeline.
 3. **F3** — bounds, frustum culling, draw sorting.
-4. **F5** — declarative clear-op and the unified world pass.
+4. **F5** — declarative clear and the unified world pass. Design: `docs/superpowers/specs/2026-10-09-f5-unified-world-pipeline-design.md`. The separate 2D-world stage is not the design.
 5. **F4** alongside F2/F3 as authoring catches up.
 6. **Box3D** after F1, as its own arc.
 7. **Phase 4's Task 9** then becomes trivially correct, because the scene will

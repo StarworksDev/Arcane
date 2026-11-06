@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <cstddef>
 #include <filesystem>
@@ -109,6 +110,11 @@ TEST_CASE("GameModule: OnShutdown runs while the module's component handle is st
     CHECK(captured.find("with handle closed") == std::string::npos);
 }
 
+// Servitor final fix pass (C-I3): a reload is synchronous, so the host learns
+// its begin and end from this observer and publishes the "reloading" state.
+static std::vector<bool> g_reloadEvents;
+static void RecordReload(bool reloading, void*) { g_reloadEvents.push_back(reloading); }
+
 TEST_CASE("Hot swap V1->V2 preserves state AND runs the new code", "[hotreload]")
 {
     // Guard against ordering contamination: ensure we start with genuine V1 content.
@@ -128,7 +134,12 @@ TEST_CASE("Hot swap V1->V2 preserves state AND runs the new code", "[hotreload]"
     // Swap the binary under the watched path, then force a state-preserving reload.
     std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginV2"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
+    g_reloadEvents.clear();
+    host.SetReloadObserver(&RecordReload, nullptr);
     REQUIRE(host.ForceReload());                   // SaveState -> unload -> load V2 -> Init -> LoadState
+    CHECK(g_reloadEvents == std::vector<bool>{true, false});   // begin, then end (final fix pass)
+    CHECK(host.ReloadAttempts() == 1);             // a successful reload is an attempt too (Task 30)
+    CHECK(host.LastReloadOk());
 
     CHECK(ReadPulse(rt) == 5);                     // STATE SURVIVED the swap
     StepAllK(rt, host, 1);
@@ -156,10 +167,22 @@ TEST_CASE("ABI mismatch rolls back to last-good; session survives", "[hotreload]
     REQUIRE(host.Load());
     StepAllK(rt, host, 3);
     REQUIRE(ReadPulse(rt) == 3);
+    CHECK(host.ReloadAttempts() == 0);             // Load is not a reload (Task 30)
+    CHECK(host.LastReloadOk());
+    const std::uint32_t generation = host.Generation();
 
     std::filesystem::copy_file(Arcane::Test::ModuleFile("HotReloadPluginBad"), Arcane::Test::ModuleFile("HotReloadPluginV1"),
                                std::filesystem::copy_options::overwrite_existing);
+    g_reloadEvents.clear();
+    host.SetReloadObserver(&RecordReload, nullptr);
     CHECK_FALSE(host.ForceReload());               // ABI mismatch -> reload fails
+    CHECK(g_reloadEvents == std::vector<bool>{true, false});   // a failed reload ends too (final fix pass)
+    host.SetReloadObserver(nullptr, nullptr);
+    // The failure's only record (Task 30): the generation stays, the attempt
+    // is counted and its outcome kept, for a host's remote `wait reload`.
+    CHECK(host.Generation() == generation);
+    CHECK(host.ReloadAttempts() == 1);
+    CHECK_FALSE(host.LastReloadOk());
     CHECK(host.IsLoaded());                        // still on last-good
     StepAllK(rt, host, 1);
     CHECK(ReadPulse(rt) == 4);                      // last-good V1 still running, state intact

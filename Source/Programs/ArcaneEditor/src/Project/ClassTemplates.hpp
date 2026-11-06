@@ -34,8 +34,10 @@ namespace Arcane::Editor::ClassTemplates
 {
     enum class Kind : int { Component = 0, System, PlainClass, Count };
 
+    // Fixed Update / Update. The Render phase is retired (F5 plan 1 Task 5:
+    // no host runs it), so the wizard does not offer it.
     ARC_CONSTANT("enum and array arity: one per system phase choice")
-    inline constexpr int kSystemPhaseChoiceCount = 3;
+    inline constexpr int kSystemPhaseChoiceCount = 2;
     ARC_CONSTANT("enum and array arity: one per system role choice")
     inline constexpr int kSystemRoleChoiceCount  = 3;
 

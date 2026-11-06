@@ -61,6 +61,7 @@
 // as a failure and simply retried next call, the same "cheap to retry" reasoning Commit
 // failures get.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -188,6 +189,14 @@ namespace Arcane::AssetPipeline
         // LastFailures() at the start.
         [[nodiscard]] CookResult CookProject(const std::filesystem::path& projectDir);
 
+        // Asks a CookProject running on another thread to stop: it checks this flag between
+        // sources, so it returns (with the partial result) after at most the import in
+        // flight. Sticky, thread-safe, never cleared -- a session that was told to stop is
+        // being torn down (CookQueue's destructor), and a cancel that lands before the pass
+        // starts must still win. The only unbounded wait left is a stuck importer.
+        void RequestCancel() noexcept { m_cancel.store(true, std::memory_order_release); }
+        [[nodiscard]] bool CancelRequested() const noexcept { return m_cancel.load(std::memory_order_acquire); }
+
         // Read-only: true iff at least one source (any kind in CookKinds()) under
         // projectDir/Content has no current artifact yet. Never imports, never writes to
         // disk -- the `--check` core, shared verbatim with CookProject's own staleness
@@ -236,6 +245,7 @@ namespace Arcane::AssetPipeline
         [[nodiscard]] const TextureMetaSettings& TextureDefaults() const { return m_textureDefaults; }
 
     private:
+        std::atomic<bool> m_cancel{ false };
         TextureMetaSettings m_textureDefaults{};
         ProgressFn m_progress;
         ImporterFn m_textureImporter;

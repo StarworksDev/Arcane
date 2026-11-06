@@ -493,3 +493,60 @@ TEST_CASE("artifact store: RebuildIndexFromScan recovers a MESH artifact's guid"
     CHECK(store.Lookup(meshGuid) == std::optional<std::uint64_t>(0xAAAAull));
     CHECK(store.Lookup(texGuid)  == std::optional<std::uint64_t>(0xBBBBull));
 }
+
+// ---- Review fix round 1, B4 fix 1: RemoveAllExcept works off the scan, never rescans -----
+
+TEST_CASE("pipeline: RemoveAllExcept removes the scanned non-current files for a guid, keeps the current one, and does not rescan",
+          "[pipeline]")
+{
+    const fs::path root = TempDir("remove_all_except_single_scan");
+    ArtifactStore store(root);
+
+    const Guid guid = Guid::Generate();
+    const Guid other = Guid::Generate();
+
+    auto writeAt = [&](const Guid& g, std::uint64_t key)
+    {
+        const fs::path path = store.PathFor(key);
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        REQUIRE(WriteTextureArtifact(path, MakeDesc(g, kTextureImporterVersion), PatternBytes(4, 1), PatternBytes(4, 2)));
+        return path;
+    };
+
+    const fs::path current = writeAt(guid, 0x1111ull);
+    const fs::path strayA = writeAt(guid, 0x2222ull);
+    const fs::path strayB = writeAt(guid, 0x3333ull);
+    const fs::path otherGuid = writeAt(other, 0x4444ull);
+
+    store.RebuildIndexFromScan();   // the ONE scan
+
+    // Appears after the scan: a rescanning implementation would delete it. The contract is
+    // that the caller scanned once (CookProject does, per pass) and the removals work off it.
+    const fs::path lateStray = writeAt(guid, 0x5555ull);
+
+    std::vector<fs::path> remaining;
+    const std::size_t removed = store.RemoveAllExcept(guid, 0x1111ull, &remaining);
+
+    CHECK(removed == 2u);
+    CHECK(remaining.empty());
+    CHECK(fs::exists(current));
+    CHECK_FALSE(fs::exists(strayA));
+    CHECK_FALSE(fs::exists(strayB));
+    CHECK(fs::exists(otherGuid));   // another guid is never touched
+    CHECK(fs::exists(lateStray));   // not in the scan -> not seen: no second directory walk
+
+    // A second call has nothing left from the scan to remove.
+    CHECK(store.RemoveAllExcept(guid, 0x1111ull, nullptr) == 0u);
+}
+
+TEST_CASE("pipeline: RemoveAllExcept without a prior scan fails the guid loudly instead of reporting clean",
+          "[pipeline]")
+{
+    const fs::path root = TempDir("remove_all_except_no_scan");
+    ArtifactStore store(root);
+
+    std::vector<fs::path> remaining;
+    CHECK(store.RemoveAllExcept(Guid::Generate(), 0x1111ull, &remaining) == 0u);
+    CHECK_FALSE(remaining.empty());   // the caller missed RebuildIndexFromScan: not a clean sweep
+}

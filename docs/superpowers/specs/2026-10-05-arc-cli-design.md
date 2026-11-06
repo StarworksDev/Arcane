@@ -1,6 +1,8 @@
 # arc CLI (D27) -- design
 
-**DRAFT 2026-10-05 -- awaiting the user's review; no plan or code until approved.**
+**Naming (AM7, 2026-10-13):** the tool is now Servitor and the engine side is ArcaneRemote; see s0.29 AM7 for the mapping. AM8 (exit 9, engine root) and AM9 (an engine-version-independent client) follow it. The body below keeps its original `arc` spellings.
+
+**APPROVED 2026-10-09 (user): every recommended pick in s0 (0.1-0.28) plus amendments AM1-AM6 (s0.29). Build scope now: P0 + `play|stop|pause|resume|step` pulled forward from P1 (s13). Branch `feat/arc-cli`.** Drafted 2026-10-05.
 
 **Roadmap row:** D27 (`docs/superpowers/specs/2026-10-05-arcane-1.0-roadmap.md`). **Research:** `docs/research/2026-10-05-arc-cli-research.md` (the external survey and the seam inventory this spec builds on; its Q1-Q30 table is superseded by section 0 below). **Verified against:** Arcane `main` at `c0fb42e1`, plus `feat/settings-s7` at `b982b4a8` for the settings-arc types (`CVarContext`, `Audience`, `RemoteCVarService`), which are not on `main` yet.
 
@@ -183,6 +185,46 @@ Each item is a real fork. The recommended pick is what the rest of this spec ass
 - (c) **Both: `/arc/v1` changes only on a breaking change; `capabilities[]` announces additive features; the CLI refuses a too-new major with exit 4 and a remediation, and degrades with a notification on missing capabilities.**
 - **Recommended: (c).**
 
+**0.29 Amendments (user, 2026-10-09, after an outside review by two other assistants of the s0 summary)**
+Most of that review is already covered here: the Origin/Host checks and the header-only token (s10.1, s4.5); stale descriptors (the `{pid, start}` rule, s4.4); the thin client with host-served schemas (s5.3, `arc call`); one build path, since the editor's rebuild spawns arcbuild (0.22); 0.25 deferred to P1; and the Astra schema fixes carried in the Astra lane. The six points it raised that are new are adopted:
+- **AM1, server tick semantics.** On a host whose loop is a fixed-tick server (ArcaneServer, or a headless runtime with no render), "frame" in 0.12, s4.3 and s7 means one **tick**. Commands drain at the tick boundary, before the simulation step. `host.frame` carries the tick number. `wait frames N` and `step N` count ticks. Captures are refused on a host with no renderer (`capture.no-renderer`, exit 2).
+- **AM2, fan-out.** `--all <hostKind>` (or `--all` for every live host of the project) sends one command to every matching live host in parallel. The client prints one envelope per host, inside a `{hosts:[{pid, hostKind, envelope}]}` wrapper (an ndjson frame per host under `--format ndjson`). The exit code is the worst per-host code, ranked 7 > 6 > 8 > 5 > 4 > 3 > 2 > 0. `--all` with a `drive` command needs `--yes`. The bot-swarm milestone depends on this.
+- **AM3, reserved netcode observability.** The catalogue reserves the `net.*` group for the replication arc (D10). Expected commands: `net.connections` (per connection: peer, RTT, loss, in/out bytes per second), `net.replication` (entities replicated, snapshot bytes, deltas, budget drops), `net.tick` (tick time, budget, overruns) and `ecs.archetypes` (entity counts by archetype; read-only, may land in P0). The commands register through the same declaration macro. arc builds none of them except `ecs.archetypes`.
+- **AM4, `--json` alias.** `--json` equals `--format json`, and it wins over TTY auto-detection. Agents run under pseudo-terminals, so the agent instructions (the P4 skill and every dispatch brief) always pass `--json`.
+- **AM5, descriptor permissions.** The descriptor holds the token. On Windows it is created with an owner-only DACL (the current user plus SYSTEM); on POSIX it is created 0600. It is written under the same rule to its temp file before the rename.
+- **AM6, exit codes 5 vs 7 stated.** 5 means `host.busy`: the request was provably not run, and retrying at the same target is safe. 7 means the host is unreachable, died or is restarting: rediscover first (`arc status`), then retry against the new pid. Every `host.busy{state}` (including 0.27's minimized state and the queue-full state) is exit 5.
+- **AM7 (2026-10-13, user): naming.** The client tool is **Servitor** (`servitor` / `servitor.exe`, premake project `Servitor` at `Source/Programs/Servitor`, output `Binaries/<cfg>/Servitor/`). It is the user-facing remote-control client and will be the first Hub package. The engine side keeps a generic name, the same rule as `--offscreen`: the Runtime module is `ArcaneRemote` (`Source/Runtime/ArcaneRemote/`, `ARC_REMOTE_API`, namespace `Arcane::Remote`, headers `<Arcane/Remote/...>`, client code `Arcane::Remote::Cli`), the wire paths are `/remote/v1/...`, the headers `X-Remote-*`, the host flags `--remote`, `--remote-descriptor`, `--remote-idle`, the descriptor dir `<project>/Saved/Remote/`, the cvars `editor.remote.enable`, `remote.server.frameBudgetMs`, `remote.server.queueDepth`, `log.remote.ringLines`, the read-only env var `ARC_REMOTE_READ_ONLY`, error codes `remote.*`, and Catch2 tags `[remote]` (client cases `[servitor][client]`). P2 scenario files are `.servitor`. `arc` / `ARC_` is reserved for engine macros (`ARC_*`) and backstage tools (`arcbuild`, `arccook`); a stutter such as `ARC_ARC_*` must never exist. Every `arc` in this spec's body that names the tool reads as Servitor, and every engine-side `arc` spelling reads as the mapping above. The full mapping is `.superpowers/sdd/2026-10-09-arc-cli-p0/RENAME-SERVITOR.md`; the P0 plan (rev 8.2) applies it.
+- **AM8 (2026-10-13, Hub packages spec, agreed with the distribution lane): exit 9 and the engine root.**
+  - **Exit 9 is reserved for the Hub's PATH launcher** (Hub packages spec s5), which runs Servitor and passes Servitor's exit code through. The launcher exits 9 when it cannot run Servitor:
+    - `engine.not-found`: no engine is registered, or the chosen engine's folder is gone.
+    - `package.not-installed`: the engine exists, but Servitor is not installed on it.
+    - `package.incompatible` (reserved for a later user-scope install): the installed Servitor does not speak the engine's remote protocol major.
+  - **The launcher's output.** The sentence goes to stderr. Under `--json` or `--format json|ndjson`, a minimal envelope (`ok:false`, `errors:[{code, message}]`) also goes to stdout; ndjson carries it inside the final result frame.
+  - **Servitor never exits 9.** The static manifest (`servitor commands --format json`) lists 9 with these codes, marked launcher-only.
+  - **Engine root.** Hosts to launch, and their exe-relative log and diagnostics directories, resolve in this order, first match wins:
+    1. `--engine <root>`;
+    2. `SERVITOR_ENGINE`;
+    3. the source layout: `../ArcaneEditor`, `../ArcaneRuntime`, `../ArcaneServer` beside `Binaries/<Config>-<os>-<arch>-md/Servitor/`;
+    4. the package layout: `<exeDir>/../../sdk/sdk.json` exists, and hosts are at `<root>/Binaries/<engineConfig>-<os>-<arch>-md/<Host>/`, with `engineConfig` read from that file.
+  - **Roots without a usable answer.** A root with no `sdk/sdk.json` is a source checkout, which uses Servitor's own build configuration. A package root whose `sdk.json` lacks `engineConfig`, or no root at all, is `engine.unresolved` (exit 4) with remediation, never a guess.
+  - **The launcher passes the root through the environment.** It sets `SERVITOR_ENGINE` in the child's environment and never edits argv, so a user's own `--engine` wins.
+  - Descriptor discovery (`<project>/Saved/Remote/`) does not depend on the layout.
+- **AM9 (2026-10-14, user): the client is engine-version-independent.** Servitor's code must not depend on the engine build it ships beside, so one Servitor can talk to any host that speaks a protocol major it supports.
+  - **Boundary.** `servitor` links ArcaneCore, ArcaneNet and the wire-protocol module `ArcaneRemoteProtocol` only. That module holds the envelope, the error and exit tables, the descriptor and redaction, and depends on ArcaneCore alone. Servitor never links the host side of ArcaneRemote, ArcaneEngine, ArcaneScene, ArcaneSim, ArcaneAssets or ArcaneCrypto. A test checks Servitor's staged library closure. Process identity (`{pid, start}` liveness) is ArcaneCore's `Platform::IsProcessLive`; `EditorLock::IsLive` wraps it.
+  - **The wire is the contract.** The client builds request `args` as JSON by field name and never includes a host command's args struct or registry.
+  - **Versions.**
+    - The protocol has a major (1) and a minor (0). The minor rises with each additive change. `GET /status` and the envelope carry `protocolMinor`; an absent `protocolMinor` reads 0.
+    - The engine advertises both numbers in `Source/Runtime/ArcaneRemoteProtocol/remote-protocol.json`, which a test pins to the C++ constants. The Hub reads that file in source checkouts, and installed engines copy it into `sdk/sdk.json` as `remoteProtocol: {major, minor}`.
+  - **Compatibility within a major.**
+    - Changes are additive.
+    - Both sides ignore unknown fields in the envelope, its `host` block, `data` and `GET /status`.
+    - New request fields go inside `options`, whose unknown keys the host ignores. Unknown top-level request keys and unknown `args` keys stay refusals (s6.2).
+    - The client declares the majors it supports (P0: `{1}`). Any other major is `protocol.mismatch` (exit 4) with remediation.
+    - Features are discovered from the host's catalog, never inferred from version numbers. A verb whose command the host lacks gets `command.unknown` (exit 2), with remediation naming the command and the host's `major.minor`.
+  - **Servitor's own version.** Servitor has its own semver, starting at 0.1.0. `servitor --version` and the static manifest print it with the supported majors.
+  - **Supersedes.** AM7's "client code `Arcane::Remote::Cli`" (the client is the Servitor program's own code, namespace `Servitor`) and the body's hard-coded sibling launch (the engine root follows AM8). Exit 4 also covers `engine.unresolved`.
+  - **Distribution.** In Hub v1, Servitor still ships per engine, in the engine-scoped package shape (Hub packages spec). A later one-per-user install (scope `user`) needs no change to this spec.
+
 ---
 
 ## 1. What the user asked for (2026-10-05)
@@ -307,6 +349,7 @@ Every path below was read on `main` at `c0fb42e1` unless marked `s7` (branch `fe
 4. **Reads come from snapshots.** A command reads live state on the main thread at the frame boundary, when nothing else mutates it, and serializes its answer to JSON there; that JSON is the snapshot. The listener only writes bytes. Streams (`watch`, `logs --follow`) are produced the same way: the main thread computes the per-frame delta and hands an immutable buffer to the listener. Cvar reads may also use `CVarRegistry::Snapshot()` (s7), which is wait-free from any thread, but v1 does not need to.
 5. **Nothing blocks the main thread.** A command that must wait (a rendered frame, settle, a reload, a build) is a job (s7.7): it arms work, returns, and is stepped once per frame by the dispatcher until done. A command that would block is a design error caught in review; the dispatcher logs any single command exceeding its budget by 10x as a warning with the command name.
 6. **The host state gates main-thread commands.** States: `booting`, `ready`, `reloading` (PluginHost mid-reload), `compiling-shaders`, `building`, `modal` (a `ModalErrorQueue` dialog or any modal popup is open), `playing`, `paused`, `minimized`, `shutting-down`. Each command declares which states it tolerates; otherwise the answer is `host.busy{state}` and the request is **provably not run**, which is the only case the client retries automatically (s6.6).
+   - **What a P0 host publishes (final fix pass, 2026-10-15).** The session recomputes the state at every drain, highest first: `shutting-down` (latched once the host leaves its loop), `reloading` (published the moment a `PluginHost` reload begins and ends, because the reload is synchronous: `GET /status` and the descriptor show it while the main thread is inside it, and no drain ever does), `building` (the editor's module rebuild is running), `modal` (an editor with an interactive window has a queued error dialog or an open ImGui modal popup; a headless editor's queued dialogs are unattended, so they stay log and Problems entries and never read `modal`), `paused`, `playing`, `minimized`, `ready`. The play axis is the editor's Play mode and its RunLoop's pause, or a runtime's or server's AM1 tick gate: held (at start, or after `stop`) is `ready`, running is `playing`, a paused run is `paused`. The `PlayPolicy` gate reads the play axis itself, so an `EditOnly` command is refused in Play even while `modal` or `building` outranks it. P0 publishes neither `booting` (the descriptor is written once the host serves) nor `compiling-shaders`.
 7. **Every response carries the frame number it ran on** (`host.frame`), so `wait frames N`, `step N` and "edit then capture" are exact.
 8. **Hot reload.** The listener, queue, job table, token and engine/editor commands live in the host executable and in ArcaneCore/ArcaneClient, never in the game DLL. Game-module commands are registered under the module's name (the settings S1 "current module" capture) and dropped by `PluginHost`'s unload path beside `CVarRegistry::UnregisterModule`; a request for a dropped command during a reload answers `host.busy{state:"reloading"}`, after it `command.unknown`. The catalogue generation increments on every change and is in every envelope, so a client notices.
 
@@ -344,6 +387,7 @@ Every path below was read on `main` at `c0fb42e1` unless marked `s7` (branch `fe
 - The token (0.5) is 32 random bytes as 64 hex characters (`Crypto::GenerateSecureToken(32)`), sent as `Authorization: Bearer <token>`, compared with `HexEquals` (constant time).
 - **The token is never logged or echoed.** The host never writes it to the log or a report; `arc --verbose` redacts it; `--format github` never prints it; a failed auth does not echo the presented value.
 - **A session** is per request, not a connection: there is no login. Per-request headers carry the client's name (`X-Arc-Client: claude|codex|grok|ci|<free text>`, for the audit log), the read-only flag (0.6), and an optional `X-Arc-Request-Id` the envelope echoes.
+  - **The caller's name (final fix pass, 2026-10-15).** The header is `X-Remote-Client` (AM7). Its value is 1 to 128 printable ASCII characters; any other value is refused with `arg.invalid` (exit 2) before the call is queued, and an absent header leaves the audit line's `client` empty. Servitor always sends it: `--client <name>`, or by default `servitor/<version> pid <pid>`, and refuses a `--client` the host would refuse.
 - Repeated auth failures from the loopback peer are rate-limited with `Net/RateLimiter.hpp` (default 20 per 10 s, then `auth.throttled`).
 
 ### 4.6 The CLI
@@ -355,9 +399,13 @@ Every path below was read on `main` at `c0fb42e1` unless marked `s7` (branch `fe
 
 ### 4.7 Host lifecycle
 - **`arc launch editor|runtime|server [--project P] [--headless] [--backend dx12|vulkan] [-- <host flags>]`** spawns the host from the sibling directory of the `bin/<cfg>-windows-x86_64-md/` tree the CLI lives in (`../ArcaneEditor/ArcaneEditor.exe` and so on; or `--exe`), adding `--arc --arc-descriptor <path>`. It waits for that exact descriptor and `state:"ready"` (or `--until booted|ready|settled`), then prints `{pid, port, descriptor, hostKind}`. Host stdout and stderr go to `Saved/arc/logs/<kind>-<pid>.{out,err}.txt`, as `bevy_brp_mcp`'s `brp_launch` does, and their paths are in the envelope.
+  - **A boot that outlives `--timeout` (final fix pass, 2026-10-15)** answers `launch.timeout` (exit 8) with `detail {pid, log, descriptor, state}`: the spawned process is still running, so it is never `host.busy` (exit 5, "provably not run, retry is safe"), and the remediation names `servitor wait ready --pid N` and `servitor quit --pid N`.
 - **`--arc` on a host** arms the listener (runtime, server; the editor is armed by its cvar). **With `--arc` armed, `--headless` no longer requires `--frames`**: the reason for that refusal ("a process it cannot stop") is gone because `arc quit` is a stop path. Without `--arc` the refusal stands unchanged. A headless host with `--arc` and no `--frames` also exits by itself when no arc request has arrived for `--arc-idle-exit <s>` (default 600), so an abandoned CI host cannot live forever.
+- **Held start (AM1; Task 29, 2026-10-15):** a runtime or server launched with `--remote` and no `--frames` starts held at frame 0 until `servitor play` or `servitor resume` runs it (a `--frames N` run is not held), and it says so through the startup log line `remote: holding at frame 0 (servitor play/resume to start)`, a windowed runtime's title suffix ` [held]` while the sim is held (at start, or paused or stopped by servitor) and `--remote`'s help text (an editor has no tick gate: it opens in Edit, and `servitor play` enters Play); there is no opt-out flag.
 - **`arc quit [--force] [--report <path>]`** asks the host to shut down cleanly at the next frame boundary through its normal exit path (report written, `exitReason:"arc-quit"`, descriptor deleted). `--force` terminates the process after `--timeout`. The editor honours its usual unsaved-changes guard: an editor with dirty documents answers `host.busy{state:"modal"}` unless `--discard-changes` is given, which is a `drive` command and audited.
 - **Waiting:** `arc wait ready|settled|frames N|reload|state <s>|job <id>` (s7.1). `settled` reuses the `--settle` predicate (two byte-equal frozen-clock captures and `ShaderCompiler::IsIdle()`), bounded by `--timeout`.
+  - **`reload` on a failed reload (Task 30).** A reload that fails or is refused leaves `PluginHost::Generation()` alone, so the host also hands its session `PluginHost::ReloadAttempts()` and `LastReloadOk()`; a failed attempt after the wait armed answers `module.reload-failed` (exit 6) with `detail {pluginGeneration, atFrame}` instead of timing out.
+  - **Host bound on a wait (verification N3).** A host runs a `host.wait` for at most `kMaxWaitTimeoutMs` (10 minutes), whatever `options.timeoutMs` asks for (the listener and `--timeout` both admit up to the u32 maximum of milliseconds). A longer request ends at that bound like any timeout (`timedOut`, exit 8), and the final envelope carries the warning `wait.timeout-clamped` with `detail {requestedMs, maxMs}`. The bound exists because `wait settled` freezes the host clock during its captures and nothing cancels a wait whose client went away.
 - **A host that dies mid-command** is reported with exit 7 and an envelope naming what is known: the exit code if observed, whether a `.arcdiag` appeared in `<exe dir>/diagnostics` after the request was sent (its path), and the last state seen. HostWitness's precedence applies: died, then timed out, then the envelope.
 
 ## 5. Command registration and self-description
@@ -466,12 +514,33 @@ POST /arc/v1/call
 | `component.unknown`, `component.absent`, `component.ambiguous` | component addressing |
 | `reflect.unreadable`, `reflect.unsupported` | the codec refused a value or a field type |
 | `cvar.unknown`, `cvar.type-mismatch`, `cvar.refused-weaker`, `cvar.protected` | from `SetResult` and the service |
+| `cvar.refused` | any other refused set (`SetResult::Stale`, `TypeMismatch` or an unrecognized refusal); exit 6 |
 | `undo.unavailable`, `undo.batch-structural` | s8 |
 | `play.edit-only` | an authoring command in Play (0.16) |
+| `play.not-playing` | pause, resume or step on an editor in Edit; exit 6 |
+| `play.refused` | the editor refused Play or Stop, or `play.start --topology` names a different topology than the running one (`detail.running`); exit 6. `play.start` on an editor already playing (no topology, or the same one) is `ok` with `data.alreadyPlaying: true` and the running `topology` |
+| `play.stopped` | a `play.step` ended before its ticks ran (stop, a held gate, Play left, or the session ended); ticks may have run, so it is exit 6, never the retryable exit 5 |
 | `ui.not-found`, `ui.ambiguous`, `ui.stale-ref`, `ui.not-actionable` | s9 |
 | `capture.no-frame`, `capture.minimized` | s7.4 |
+| `capture.no-renderer` | a capture (or `wait settled`) on a host with no renderer; exit 2 (AM1) |
+| `capture.artifact-failed` | the capture's PNG was not written; exit 6 |
 | `compare.failed`, `compare.missing-reference` | mirrors `exitReason` |
+| `compare.reference-unreadable` | the reference could not be resolved or decoded; exit 6 |
+| `compare.bless-failed` | `--bless` wrote no reference; exit 6 |
+| `compare.artifact-failed` | a Failed verdict's capture or diff PNG was not written; exit 6 |
 | `job.unknown`, `job.cancelled`, `job.failed` | s7.7 |
+| `arg.inapplicable` | a flag or argument that does not apply to this command or host (Rule 3); exit 2 |
+| `resource.ambiguous` | a resource name that matches more than one type; exit 2 |
+| `resource.not-found`, and any other `*.not-found` | addressing; exit 6 |
+| `ecs.artifact-failed`, `resource.artifact-failed`, `scene.artifact-failed`, `log.artifact-failed` | a dump over the inline cap could not be written as an artifact; exit 6 |
+| `module.reload-failed` | `wait reload` saw a reload fail (or be refused) after it armed; the previous module is still loaded; exit 6 |
+| `quit.force-failed` | `quit --force` could not end the process (client side); exit 6 |
+| `host.unavailable` | the host has no armed session for this command (stopped, or not wired on this host); exit 5 |
+| `protocol.mismatch`, `engine.unresolved` | client side: a host protocol major this client does not speak; no engine root resolves (`--engine`, `SERVITOR_ENGINE`, the source sibling, a package root; AM8); exit 4 |
+| `host.unreachable`, `host.died`, `host.hung`, `host.restarting` | client side: no answer, the process exited, its heartbeat stalled past the hung rule, or it is restarting; exit 7 |
+| `wait.timeout` | reserved for a wait condition false at timeout; today a wait (and a `play.step`) times out as `ok` with `data.timedOut` (exit 8) |
+| `call.timeout` | client side: the request body was sent and no reply came by `--timeout`, while the target watch still saw the process alive with a fresh heartbeat; the command may still be running (`detail.inFlight: true`); exit 8, never resent |
+| `launch.timeout` | client side: `servitor launch` spawned a host that did not read ready within `--timeout`; it is still running (`detail.pid`); exit 8 |
 | `internal` | a bug; carries the `.arcdiag` path when one exists |
 
 ### 6.5 Formats (0.10)
@@ -490,8 +559,9 @@ POST /arc/v1/call
 | 4 | no host: nothing to attach to, a stale descriptor, or a protocol-major mismatch (with remediation) |
 | 5 | host busy or not ready within `--timeout`; provably not run; retryable |
 | 6 | the host answered and the operation failed (`errors[]` set; verdict `Errored`) |
-| 7 | host unreachable or died mid-command (with a `.arcdiag` path when one exists); retryable only with `--retry-on-death` |
-| 8 | a check ran and did not pass: test failures, `compare.failed`, a wait condition false at timeout, a scenario expectation, or verdict `Failed`/`Indeterminate` |
+| 7 | host unreachable or died mid-command (with a `.arcdiag` path when one exists); retryable only with `--retry-on-death`, which resends only after `host.died` or `host.hung` and only to the dead host's replacement: a host of the same kind and project root (compared normalized), a different `{pid, start}`, that was not live when the call began (AM6). Servitor rescans about every 250 ms within the remaining `--timeout`; two such hosts are refused at once, and none by the deadline reports the death. `--retry-on-death` with `--all` is refused (exit 2; retry one host kind at a time with `--host <kind>`), and so is `--retry-on-death` with `--pid` (exit 2: a restarted host has a new pid) |
+| 8 | a check ran and did not pass: test failures, `compare.failed`, a wait condition false at timeout, a scenario expectation, or verdict `Failed`/`Indeterminate`; also `call.timeout` and `launch.timeout` |
+| 9 | reserved for the Hub's PATH launcher (AM8): `engine.not-found`, `package.not-installed`, `package.incompatible`; `servitor` itself never returns it |
 | 130 / 143 | SIGINT / SIGTERM |
 
 - **Retry rule:** the client retries automatically (twice, with backoff) only when the request was provably not run: `host.busy`, or a connection refused before the body was sent. `--no-retry` disables it.
@@ -574,6 +644,9 @@ Example, `arc ecs query --with LocalTransform,MeshRenderer --fields LocalTransfo
 | `arc input key <key> [--down\|--up\|--tap]`, `arc input mouse move\|click\|drag ...`, `arc input action <name> [--value v]` | `input.inject` | E (Play) R | NotUndoable | P1 |
 | `arc batch <file.json>` | `/arc/v1/batch` | E R | s8.3 | P1 |
 
+- **`play.start`** (P0, Task 29) answers `data {playing: true, topology}`. On an editor that is already playing, it does not restart Play: it answers `ok` with the topology that is running and `alreadyPlaying: true`, and an explicit `--topology` that differs is `play.refused` (exit 6, `detail.running`). A runtime or server refuses `--topology` (`arg.inapplicable`, exit 2): its topology is fixed at launch.
+- **`play.step N`** (P0, Task 29) completes when `host.frame` has moved N: one fixed tick per advance on a server, a headless runtime, a stepped host and an editor in Play; on a windowed runtime that is running, one loop pass (whatever its fixed sub-steps), as AM1 counts `host.frame`.
+  - **Overlap and bound (final fix pass, 2026-10-15).** A runtime or server keeps one step budget: a new `play.step N` raises the pending ticks to at least N and never adds, and each step completes on its own target, so two overlapping `step 10` calls run 10 ticks, not 20. A step is bounded on the host like `host.wait` (its `timeoutMs`, at most `kMaxWaitTimeoutMs`, with the `wait.timeout-clamped` warning past it); at the bound it answers `ok` with `data.timedOut` (exit 8) and gives back the ticks no other running step still needs. On the editor a step asks for single steps only while the primary loop is paused (a running loop advances `host.frame` by itself). The embedded server world mirrors the primary loop every frame, its pause and its single step of that frame, so the toolbar and servitor keep both worlds in lockstep.
 - **`entity.set`** takes `Component.field.path=<json>` pairs, resolved against the reflected type; the value is parsed by `ReflectionJsonReader` and refused rather than coerced (`reflect.unreadable`). In the editor it is one transaction (s8.1).
 - **`cvar.*`** goes through the generalized `RemoteCVarService` in the session's context (0.24, s10.2). `cvar.set` publishes before answering, so the reply shows the value in effect, as the service already does; `cvar.explain` returns the structured history (`published`, `pending`, `setBy`, `history[]`).
 - **`console.exec`** runs `CVarRegistry::Execute(line, context, SetBy::Console)`. It is the only free-text entry point, it is permission-checked by the same table, `cvar_explain` through it is refused remotely as the service refuses it, and it is `Drive` access. Its result is the command's text plus `ok`, because console commands return text (settings S1 `CommandResult`).
@@ -853,6 +926,8 @@ Each phase ends at a gate (the full suite, the golden gate, and the phase's acce
 - `arc.exe`: status, launch, quit, wait (`ready`, `settled`, `frames`, `state`), world list, commands, list, describe, schema, call; formats `json`, `human`, `ndjson`; the exit-code table.
 - Verbs: `cvar get|set|list|explain`, `console`, `logs` (with the new sink), `problems` (with the Core store), `entity get`, `ecs query` (read-only), `ecs stats`, `resource list|get`, `scene tree`, `selection`, `stats frame`, `screenshot viewport|window`, `compare`.
 - **Acceptance:** a CI script launches a headless editor on ReferenceProject, waits for `settled`, reads `MeshCube`'s `LocalTransform`, sets a `PlayerSafe` cvar and reads it back with `explain` provenance, compares against the `editor-ui` reference with the lane's own capture source, reads `problems`, and quits, using only envelopes and exit codes; the same against a headless runtime and a server (cvars, ecs). The `[arc]` unit and integration suites are green, and the self-test proves the gate can fail.
+
+**P0 additions (2026-10-09):** `play|stop|pause|resume|step` (from P1; undoable:false, declared per 0.16), AM1 tick semantics, AM2 `--all` fan-out, AM4 `--json`, AM5 descriptor DACL, AM6 exit mapping, `ecs.archetypes`. Acceptance adds: a headless runtime and a server launched together, `arc --all cvar get ...` answering from both, and `arc play`/`step 10`/`stop` on the headless runtime with `host.frame` advancing exactly 10.
 
 **P1, act.**
 - `entity set|add|remove` (transactional component edits), `entity spawn|despawn|duplicate` (structural, one step each), `batch` (component-only transactional; structural members refused with `undo.batch-structural`), `undo`, `redo`.

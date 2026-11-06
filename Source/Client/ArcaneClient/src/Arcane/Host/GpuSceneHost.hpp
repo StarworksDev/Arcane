@@ -1,16 +1,14 @@
 #pragma once
 #include <Arcane/Modules/ArcaneClientApi.hpp>
 
-// PrepareSceneForRender -- the host's three calls per frame (F3, spec s4/s5):
-// build the visible set(s), sync the GPU-scene mirror, build the frame. Called
-// AFTER the fixed/update schedulers (WorldTransform + WorldBounds current) and
-// BEFORE RunLoop::SubmitRender (the sprite sweep reads views[0]). Header-only
-// so the two frame drivers (EditorAppFrame.cpp, RuntimeFrame.cpp) share one
-// definition and ArcaneTests can drive it without a device.
+// PrepareSceneForRender -- the three calls (F3, spec s4/s5): build the visible
+// set(s), sync the GPU-scene mirror, build the frame. Header-only so
+// ArcaneTests can drive it without a device. F5 plan 1 Task 6 moved the hosts'
+// call into ExtractFrame; this function stays for the tests that already call it.
 //
 // TWO VIEWS when they differ: in Play the sprites draw with View() (the scene
-// camera's orthographic view) while the mesh pass draws with the perspective
-// scene camera (RuntimeFrame.cpp's ActivePerspectiveSceneCamera). Each pass
+// camera's orthographic view) while the mesh pass draws with packet.meshView,
+// the perspective scene camera ExtractFrame resolved. Each pass
 // culls against its own camera: views[0] = main, views[1] = mesh. F5 unifies
 // the two passes under one view; until then the second set is the honest one.
 //
@@ -107,7 +105,7 @@ namespace Arcane
             return;   // no mesh pass this frame; the stage still lands (rows stay current for the frame that has one)
         }
         const VisibleSet* meshVis = twoViews ? &sv->views[1] : &sv->views[0];
-        BuildGpuSceneFrame(*mirror, meshVis, reg.GetResource<MeshTable>(), *meshView, out);
+        BuildGpuSceneFrame(*mirror, meshVis, MeshSectionRanges(reg.GetResource<MeshTable>()), *meshView, out);
     }
 
     // THE DROPPED-STAGE REMEDY (ruling R-F). GpuSceneSync records lastModel and
@@ -118,7 +116,7 @@ namespace Arcane
     // that never reached the GPU and would never be re-staged: the next
     // frame's out.Clear() drops it, and the rows draw stale (or never-written)
     // bytes when they come into view. A host calls this on every such outcome
-    // AFTER PrepareSceneForRender ran for that frame. It hands the mirror a
+    // AFTER ExtractFrame ran for that frame. It hands the mirror a
     // NEW generation, so the next GpuSceneSync sees the device's stamp
     // mismatch and re-stages every live row with prev == model -- spans and
     // batch ids stay put (cheaper and safer than dropping the resource). A

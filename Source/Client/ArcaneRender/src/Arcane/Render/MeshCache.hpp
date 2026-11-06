@@ -36,7 +36,7 @@
 // second map beside `table`, on the stated premise that Task 5's material
 // chain would read the mesh's own default `material` Guid through it. Task 5
 // resolved that differently and better -- MeshEntry::slots (F2c Task 10 grew
-// this from a scalar `material`; SceneResources.hpp) carries the Guid(s) on
+// this from a scalar `material`; SceneCacheRecords.hpp) carries the Guid(s) on
 // the published table, so the submission sweep needs no cache pointer at all
 // -- and no other consumer ever appeared: MeshDocument, its one named
 // candidate, edits the SOURCE .arcmesh and never touches the resolved cache.
@@ -51,7 +51,7 @@
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Guid.hpp>
 #include <Arcane/Mesh/MeshAsset.hpp>          // MeshArtifactSupplyFn / CookPendingFn -- Services' Task 11 fields
-#include <Arcane/Scene/SceneResources.hpp>   // Arcane::MeshEntry (full type: Table()'s value type)
+#include <Arcane/Scene/SceneCacheRecords.hpp>   // Arcane::MeshEntry (full type: Table()'s value type)
 
 #include <filesystem>
 #include <functional>
@@ -113,7 +113,7 @@ namespace Arcane
 
         // Guid -> resolved record (the MeshTable payload). Stable storage
         // between mutating calls -- see MeshEntry's own comment
-        // (SceneResources.hpp) for exactly what "stable" guarantees here and
+        // (SceneCacheRecords.hpp) for exactly what "stable" guarantees here and
         // why (element addresses survive a rehash; only an erase invalidates
         // them).
         const std::unordered_map<Guid, MeshEntry>& Table() const;

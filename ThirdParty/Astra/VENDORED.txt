@@ -1,11 +1,10 @@
-﻿Astra vendored from the standalone repo. DO NOT EDIT THESE HEADERS IN PLACE --
-change them in the Astra repo and re-run scripts\sync-astra.ps1, or the next
+Astra vendored from the standalone repo. DO NOT EDIT THESE FILES IN PLACE --
+change them in the Astra repo and re-run scripts\sync-vendor.ps1, or the next
 sync silently reverts your edit.
 
 source  : D:\dev\starworks\Astra
-commit  : c46a90ede5584c5aae5692da02889e2f8f35425b
-branch  : dev
-subject : feat(resources): AstraTransientResource -- a resource that opts out is never written by ResourceStorage::Serialize, so Save/Load never revives it (a block from before the opt-out is decoded and discarded); for republished state such as a clock, an input view holding a pointer, or a physics world
-synced  : 2026-10-02 08:30:19
-scope   : include/ only (Arcane compiles nothing else from this tree --
-          see Arcane/premake5.lua IncludeDir["Astra"])
+commit  : fa5ff853df2c2ead4c460e30641bffb2e6481ea0
+branch  : detached
+subject : Merge pull request #13 from StarworksDev/feat/result-from-mosaic
+synced  : 2026-10-13 17:04:42
+scope   : include/ only (Arcane compiles nothing else from this tree)

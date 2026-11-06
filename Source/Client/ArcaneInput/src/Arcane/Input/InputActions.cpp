@@ -1,6 +1,7 @@
 #include <Arcane/Input/InputActions.hpp>
 #include <Arcane/Base/Engine.hpp>   // ExecutablePathUtf8: the exe directory off-Windows
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/IO/ReadRegularFile.hpp>
 
 #include <Arcane/Base/Log.hpp>
 #include <Arcane/Input/InputSettings.hpp>
@@ -54,17 +55,11 @@ namespace Arcane
         // local binary file reader (Assets.cpp pattern)
         std::vector<uint8_t> ReadInputFileBytes(const std::filesystem::path& path)
         {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file)
+            const auto raw = Arcane::ReadRegularFile(path);
+            if (!raw || raw->empty())
                 return {};
-            const std::streamsize size = file.tellg();
-            if (size <= 0)
-                return {};
-            file.seekg(0, std::ios::beg);
-            std::vector<uint8_t> bytes((size_t)size);
-            if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
-                return {};
-            return bytes;
+            const auto* p = reinterpret_cast<const uint8_t*>(raw->data());
+            return std::vector<uint8_t>(p, p + raw->size());
         }
 
         // ControlSource / ControlId

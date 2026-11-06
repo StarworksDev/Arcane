@@ -16,7 +16,7 @@
 #
 # Legs run one at a time, Windows first, and every requested leg runs even
 # when one fails. Seeds: one random seed (printed) by default; -Seeds 2 runs
-# CI's pair (N, N50021); -Seed N fixes N (CI's N is the run number). Jobs:
+# CI's pair (N, (N + 50021) mod 4294967296); -Seed N fixes N (CI's N is the run number). Jobs:
 # Linux = min(CPUs, memory GB / 2) of what Docker reports, Windows = msbuild
 # /m; -Jobs N sets both. Logs: logs\local\<leg>-<Config>\.
 # Exit: 0 every leg passed; 1 a leg failed; 2 preflight / image / tag failure.

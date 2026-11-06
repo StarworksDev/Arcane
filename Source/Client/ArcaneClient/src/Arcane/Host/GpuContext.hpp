@@ -36,6 +36,11 @@
 
 namespace Arcane
 {
+    // The host window's title as Create() makes it. The editor replaces it
+    // with its own; the runtime keeps it, plus " [held]" while a --remote
+    // tick gate holds its sim (Servitor P0 Task 29, Remote::HeldWindowTitle).
+    inline constexpr const char* kHostWindowTitle = "Arcane Runtime";
+
     class ARC_CLIENT_API GpuContext
     {
     public:

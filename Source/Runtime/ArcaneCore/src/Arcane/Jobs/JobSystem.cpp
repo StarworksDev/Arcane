@@ -61,7 +61,7 @@ namespace Arcane
     {
         enki::TaskScheduler                     ts;
         std::unique_ptr<EnkiTaskExecutor>       taskExec;  // the sole enki adapter (worker-index face)
-        std::shared_ptr<Mosaic::IWorkScheduler> adapter;   // ArcaneWorkScheduler over taskExec; destroyed first
+        std::shared_ptr<ArcaneWorkScheduler>    adapter;   // ArcaneWorkScheduler over taskExec; concrete so ~JobSystem can null its executor
 
         // F2b Task 12: Submit()'s fire-and-forget task objects. enki::TaskSet
         // must outlive its own execution (AddTaskSetToPipe only stores a
@@ -118,11 +118,19 @@ namespace Arcane
 
     JobSystem::~JobSystem()
     {
-        // Drop adapters before the scheduler shuts down (both hold refs to ts).
-        // adapter wraps taskExec -> release it first.
+        // Drain and join the pool FIRST, while taskExec and adapter are alive: a
+        // queued task may still call back through either. Then null the
+        // executor on the adapter, because a caller can keep the
+        // shared_ptr<IWorkScheduler> from WorkScheduler() past this object, and
+        // a null executor runs ParallelFor inline as worker 0 instead of
+        // dereferencing the dead taskExec. Only then drop the adapter and the
+        // executor. A kept WorkScheduler must not be inside a ParallelFor on
+        // another thread while ~JobSystem runs (the write is atomic, the call in
+        // flight is not drained).
+        m_impl->ts.WaitforAllAndShutdown();
+        m_impl->adapter->SetExecutor(nullptr);
         m_impl->adapter.reset();
         m_impl->taskExec.reset();
-        m_impl->ts.WaitforAllAndShutdown();
     }
 
     std::shared_ptr<Mosaic::IWorkScheduler> JobSystem::WorkScheduler() const

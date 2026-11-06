@@ -2,7 +2,9 @@
 
 #include "Arcane/AssetPipeline/CgltfGuard.hpp"
 #include "Arcane/AssetPipeline/CookKey.hpp"
-#include "Arcane/AssetPipeline/SourceHash.hpp"
+#include <Arcane/Assets/ArtifactCodec.hpp>
+#include <Arcane/IO/PathConfine.hpp>
+#include <Arcane/IO/ReadRegularFile.hpp>
 
 #include <cgltf.h>
 #include <meshoptimizer.h>
@@ -15,6 +17,7 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace Arcane::AssetPipeline
@@ -34,21 +37,7 @@ namespace Arcane::AssetPipeline
         // for why: the cook key and the importer must see the SAME bytes, by construction).
         std::optional<std::vector<std::byte>> ReadWholeFileBytes(const fs::path& path)
         {
-            std::ifstream in(path, std::ios::binary);
-            if (!in) return std::nullopt;
-
-            in.seekg(0, std::ios::end);
-            const std::streamoff len = in.tellg();
-            if (len < 0) return std::nullopt;
-            in.seekg(0, std::ios::beg);
-
-            std::vector<std::byte> out(static_cast<std::size_t>(len));
-            if (!out.empty())
-            {
-                in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
-                if (!in) return std::nullopt;
-            }
-            return out;
+            return Arcane::ReadRegularFile(path);
         }
 
         bool StartsWith(const char* s, const char* prefix) noexcept
@@ -201,14 +190,31 @@ namespace Arcane::AssetPipeline
         // trusted). A node with no mesh of its own still contributes its transform to its
         // children (nested.gltf's parent node). `out` collects one (mesh*, worldTransform) pair
         // per node that DOES carry a mesh, in walk order.
-        void WalkNodeTree(const cgltf_node& node, const glm::mat4& parentWorld,
+        void WalkNodeTree(const cgltf_node& root, const glm::mat4& parentWorld,
                            std::vector<std::pair<const cgltf_mesh*, glm::mat4>>& out)
         {
-            const glm::mat4 world = parentWorld * LocalTransform(node);
-            if (node.mesh != nullptr)
-                out.emplace_back(node.mesh, world);
-            for (cgltf_size i = 0; i < node.children_count; ++i)
-                WalkNodeTree(*node.children[i], world, out);
+            // Explicit stack: a hostile glTF can nest nodes as deep as its file allows, and
+            // the recursive walk this replaces overflowed the native stack on one. The
+            // visited set (insert is the membership test, so the walk stays linear in the
+            // node count) also ends a malformed child cycle instead of looping.
+            struct Frame { const cgltf_node* node; glm::mat4 parent; };
+            std::vector<Frame> stack;
+            stack.push_back({ &root, parentWorld });
+            std::unordered_set<const cgltf_node*> seen;
+            while (!stack.empty())
+            {
+                const Frame frame = stack.back();
+                stack.pop_back();
+                if (!seen.insert(frame.node).second)
+                    continue;
+                const glm::mat4 world = frame.parent * LocalTransform(*frame.node);
+                if (frame.node->mesh != nullptr)
+                    out.emplace_back(frame.node->mesh, world);
+                // Right to left, so the left-most child pops first: the order the
+                // recursive walk produced.
+                for (cgltf_size i = frame.node->children_count; i > 0; --i)
+                    stack.push_back({ frame.node->children[i - 1], world });
+            }
         }
 
         // One drawable range before slot dedup runs -- indexOffset/indexCount are already final
@@ -272,6 +278,10 @@ namespace Arcane::AssetPipeline
         // sees, the client refuses with HashMismatch, and the next cook heals it -- ACCEPTED,
         // not a bug: the alternative would be threading one already-read buffer through both
         // cgltf's own buffer resolution and the hash, which cgltf's API gives no seam for.
+        // Buffer uris resolve through the confining reader (CgltfGuard.hpp): "../" and
+        // absolute uris are refused here, not only in ReadExternalBuffers.
+        CgltfConfinedReads confinedReads(sourcePath);
+        confinedReads.Apply(options);
         const cgltf_result loadResult = cgltf_load_buffers(&options, guard.data, sourcePath.string().c_str());
         if (loadResult != cgltf_result_success)
         {
@@ -777,7 +787,15 @@ namespace Arcane::AssetPipeline
             if (buffer.uri == nullptr || StartsWith(buffer.uri, "data:"))
                 continue;
 
-            const fs::path bufferPath = baseDir / DecodeUriToPath(buffer.uri);
+            // operator/ replaces its left side for an absolute right side, so an absolute
+            // decoded uri is refused BEFORE the join; the joined path must then stay
+            // strictly inside the asset directory (no "../", no symlink out).
+            const fs::path decoded = DecodeUriToPath(buffer.uri);
+            if (decoded.is_absolute())
+                return std::nullopt;
+            const fs::path bufferPath = baseDir / decoded;
+            if (!Arcane::PathIsInsideDirectory(baseDir, bufferPath))
+                return std::nullopt;
             const std::optional<std::vector<std::byte>> bytes = ReadWholeFileBytes(bufferPath);
             if (!bytes)
                 return std::nullopt;   // referenced buffer unreadable -- CookSession turns

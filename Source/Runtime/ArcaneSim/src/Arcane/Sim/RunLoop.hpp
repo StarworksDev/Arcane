@@ -6,12 +6,13 @@
 //
 // Advance() runs >=0 FixedUpdate steps then Update once, through the parallel
 // executor. SubmitRender() runs the Render scheduler SEQUENTIALLY on the calling
-// thread (Batcher2D is not thread-safe and must be recorded where Begin was
-// called). The host brackets SubmitRender() between Batcher2D::Begin and
-// Batcher2D::Drain.
+// thread -- but the Render phase is RETIRED (F5 plan 1 Task 5): no host calls
+// SubmitRender any more. Sprites are submitted once per frame by the frame
+// extract (Arcane/Render/ExtractFrame.hpp), which runs RenderSubmissionSystem
+// itself between the host's Batcher2D::Begin and the drain it copies.
 //
 // Sim-time control (Epic 04): pause / single-step / time-scale gate the FIXED
-// phase only; Update + Render keep running so an editor's camera/UI/input stay
+// phase only; Update and the frame (extract + render) keep running so an editor's camera/UI/input stay
 // live while the sim is frozen. Consumers reach these through Runtime::Loop();
 // there is no separate Runtime API and no plugin-ABI surface. TIME-SCALE scales
 // the SIM CLOCK by scaling the accumulator input -- the fixed step stays canonical
@@ -59,7 +60,7 @@ namespace Arcane
 
         // ---- sim-time control -------------------------------------------------
         // Freeze/thaw the fixed phase. While paused the sim clock does not advance
-        // (no accumulation, zero fixed steps) but Update + Render still run.
+        // (no accumulation, zero fixed steps) but Update and the frame still run.
         void SetPaused(bool p) noexcept { m_paused = p; }
         [[nodiscard]] bool IsPaused() const noexcept { return m_paused; }
 
@@ -70,9 +71,15 @@ namespace Arcane
         [[nodiscard]] double TimeScale() const noexcept { return m_timeScale; }
 
         // Request exactly one canonical fixed step on the next Advance, even while
-        // paused; one-shot (auto-clears after it runs). Ignored if not paused (the
-        // running loop already steps), but harmless to call.
+        // paused; one-shot (auto-clears after it runs). On a running loop that
+        // Advance runs the one step INSTEAD of accumulating its realDt, so it is
+        // one tick whatever the dt, backlog or time scale, and the backlog is
+        // left as it was (StepFixed; the runtime's remote `step` relies on it).
         void RequestSingleStep() noexcept { m_singleStep = true; }
+        // A single step is requested and the next Advance will run it (the
+        // editor counts that Advance as a sim advance for host.frame, Servitor
+        // P0 Task 29).
+        [[nodiscard]] bool SingleStepPending() const noexcept { return m_singleStep; }
 
         // The fixed step's rate (Hz) -- a RUNTIME value (Core-DLL split, plan 1
         // Task 6 review round 1): StepFixed's canonical `fixedDt` (`1.0 /
@@ -137,6 +144,7 @@ namespace Arcane
         }
 
         // Run the Render scheduler on the calling thread (single-threaded).
+        // RETIRED (F5 plan 1 Task 5): no host calls this; kept for the ABI.
         void SubmitRender()
         {
             m_schedulers->render.Execute(*m_registry);

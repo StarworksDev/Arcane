@@ -1176,6 +1176,37 @@ namespace Arcane
     //     (image-less) form -- layout. A game links only its .arcmodule
     //     descriptor's closure. ReferenceProject.arcproj and the arcbuild
     //     fixture restamped (Aphelyon.arcproj restamps in P7).
+    // v60 (2026-10-13, Servitor P0 -- RemoteCVarService context):
+    //     Next ABI after main at execution time (main was 59, re-read at
+    //     execution; this constant is that value plus one).
+    //     RemoteCVarRequest gained `context` (CVarContext, default ServerAdmin)
+    //     as its last field. RemoteCVarResponse gained structured strings after
+    //     `text`: valueJson, type, setBy, audience, scope, apply, flags,
+    //     publishedJson, pendingJson, historyJson. `text` is unchanged.
+    //     New ARC_CORE_API exports CVarValueToJson and ToString(SetBy). A
+    //     module compiled against the previous request/response is rejected.
+    //     ReferenceProject.arcproj and the arcbuild fixture restamped
+    //     (Aphelyon.arcproj restamps with its next engine sync).
+    // v61 (Servitor P0 -- host remote flags):
+    //     Next ABI after main at execution time, the second P0 bump.
+    //     Expected 61 once Task 0 landed 60 (main was 59, engine
+    //     modularization P4). Re-read main and Task 0's constant;
+    //     this constant is one above Task 0.
+    //     HostConfig gained `remote`, `remoteDescriptor`, `remoteIdleExitSeconds`
+    //     (default 600), and `remoteIdleExitSupplied` at the end of the non-Dist
+    //     field block. `--remote` lifts the headless-without-`--frames` refusal.
+    //     Dist builds reject the three flags at parse with exit 2.
+    //     SanitizeRelaunchLine strips them. ServerConfig gained the same four
+    //     fields; that struct is not the game ABI.
+    //     ReferenceProject.arcproj and the arcbuild fixture's Fixture.arcproj
+    //     restamped to this integer (Aphelyon.arcproj restamps with its next
+    //     engine sync).
+    // v62 (3D-readiness Plan B Task 2): adds GamePlugin_ABIDigest and
+    //     PluginVTable::ABIDigest (a ninth pointer, after DrawUI). The host
+    //     compares the export against kGamePluginABIDigest (Core/AbiVersion.hpp)
+    //     after the epoch matches and refuses a module whose digest differs,
+    //     before Init, on the loaded-DLL path and the static adoption path.
+    //     ReferenceProject.arcproj and the arcbuild fixture restamped.
 
     // The ABI version compiled into the LOADED Arcane.dll -- i.e. the one the
     // plugin gate actually enforces at runtime.
@@ -1226,6 +1257,11 @@ namespace Arcane
         // the only window where ImGui draw calls are valid. The plugin's Update runs
         // in the sim phase (before BeginFrame), so it is too early for ImGui.
         inline constexpr const char* kDrawUI      = "GamePlugin_DrawUI";
+        // v62: the compiler-derived layout digest of THIS module's build
+        // (AbiGameMix() evaluated in the module's TU). Required, but only
+        // resolved once the epoch matches, so an old module without it still
+        // fails at the epoch compare.
+        inline constexpr const char* kABIDigest   = "GamePlugin_ABIDigest";
     }
 
     // Host-side resolved function-pointer table for one loaded plugin image.
@@ -1244,5 +1280,8 @@ namespace Arcane
         // ImGui draw window). Update is sim-phase -- too early. May be null if a plugin
         // does not export it (resolution is lenient); the host null-checks before calling.
         void     (*DrawUI)()                             = nullptr;
+        // v62: AbiGameMix() as the MODULE's translation unit evaluated it. The
+        // host compares it with kGamePluginABIDigest (AcceptPluginAbi) before Init.
+        std::uint64_t (*ABIDigest)()                     = nullptr;
     };
 }

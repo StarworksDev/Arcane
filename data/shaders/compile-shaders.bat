@@ -67,6 +67,11 @@ call :compile mesh_cull cs_main cs_6_5 mesh_cull_cs || exit /b 1
 :: The 3D reference grid (F4 plan 1 Task 10, spec s5.2) -- analytic, depth-tested after the mesh pass.
 call :compile grid vs_main vs_6_5 grid_vs || exit /b 1
 call :compile grid ps_main ps_6_5 grid_ps || exit /b 1
+:: The post-tonemap overlay pass (F5 plan 1 Task 3) -- lines/fills and the folded 3D grid, after the tonemap, sampling scene depth.
+call :compile overlay vs_main vs_6_5 overlay_vs || exit /b 1
+call :compile overlay ps_main ps_6_5 overlay_ps || exit /b 1
+call :compile overlay grid_vs_main vs_6_5 overlay_grid_vs || exit /b 1
+call :compile overlay grid_ps_main ps_6_5 overlay_grid_ps || exit /b 1
 :: graph_grid_vs/_ps were emitted here until the NRI Phase 5a final-review fix
 :: wave. Their only loader was GraphGridPass, deleted at Task 9.5a; the shader
 :: graph's backdrop is now drawn with ImGui primitives

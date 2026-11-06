@@ -21,6 +21,10 @@
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Config/RemoteCVarService.hpp>
 #include <Arcane/Plugin/PluginHost.hpp>
+#if !defined(ARC_BUILD_DIST)
+#include <Arcane/Base/DiagnosticStore.hpp> // Servitor P0 --remote: problems.list's store (Task 22)
+#include <Arcane/Remote/HostSession.hpp>   // Servitor P0: the --remote surface (a Runtime module, never Client)
+#endif
 
 #include <memory>
 #include <optional>
@@ -73,5 +77,18 @@ namespace Arcane::Server
         std::optional<Arcane::RemoteCVarService> m_cvarService;
         std::optional<AdminConsole>              m_adminConsole;
         StdinLines                               m_stdin;
+#if !defined(ARC_BUILD_DIST)
+        // Servitor P0 (Task 11): armed by --remote after the admin console,
+        // drained at the top of every tick before the sim advances, stopped
+        // before Finish. Declared last, so it is torn down first; it touches
+        // the process command registry and its own listener only.
+        //
+        // Task 22 fix round 1: the store problems.list reads. Under --remote,
+        // Run() installs it as the engine's diagnostics sink first thing, so
+        // project-open, module-load and boot-scene diagnostics are in it when
+        // the session arms. Declared before m_remote, so it outlives the session.
+        Arcane::DiagnosticStore                      m_problems;
+        std::unique_ptr<Arcane::Remote::HostSession> m_remote;
+#endif
     };
 }

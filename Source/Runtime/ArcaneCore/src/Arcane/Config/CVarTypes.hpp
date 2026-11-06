@@ -4,6 +4,8 @@
 // 18; settings spec 2026-10-03 s4.1). The enum is the contract games declare
 // against: new types are APPENDED, never inserted, so no ordinal moves.
 
+#include <Arcane/Core/Api.hpp>
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -84,6 +86,9 @@ namespace Arcane
         Code         = 60,
         Console      = 70,
     };
+
+    // The rung's enumerator name ("Default", ..., "Console"); "?" outside the enum.
+    [[nodiscard]] ARC_CORE_API const char* ToString(SetBy by) noexcept;
 
     constexpr bool operator<(SetBy a, SetBy b) noexcept
     {

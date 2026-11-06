@@ -12,6 +12,7 @@
 
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/PhysicsDebugDraw.hpp>
+#include "Helpers/PhysicsDebugDrawSolver.hpp"
 #include <Arcane/Render/RenderSystems.hpp>
 #include <Arcane/Scene/RenderViewSettings.hpp>
 #include <Arcane/Scene/SceneResources.hpp>
@@ -25,7 +26,8 @@
 
 #include <Arcane/Scene/Components.hpp>
 #include <Arcane/Scene/PhysicsComponents.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Scene/SceneModule.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 
@@ -103,7 +105,7 @@ TEST_CASE("Arcane::PhysicsInterpBuffer2D captures the pre-step pose each fixed s
 
     // Step once: creates the body, captures prev (== the initial pose (0,0)), steps.
     physics(reg);
-    const P::BodyHandle h = reg.GetComponent<Arcane::PhysicsBodyRef2D>(e)->handle;
+    const P::BodyHandle h = Arcane::Detail::Physics2D::UnpackBody(reg.GetComponent<Arcane::PhysicsBodyRef2D>(e)->handle);
     const P::PhysicsWorld& world = *Arcane::Detail::Physics2D::Access::Solver(*reg.GetResource<Arcane::PhysicsWorld2D>());
     const P::Vec2 afterStep1 = world.Position(h);   // pose after step 1
 

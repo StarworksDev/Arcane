@@ -25,6 +25,7 @@
 #include <Manifold2D/Physics/Shapes.hpp>
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/PhysicsDebugDraw.hpp>
+#include "Helpers/PhysicsDebugDrawSolver.hpp"
 #include <Arcane/Scene/ViewTransform.hpp>   // the mirrored-affine case (F4 plan 1 T3)
 #include <Arcane/Scene/RenderViewSettings.hpp>
 

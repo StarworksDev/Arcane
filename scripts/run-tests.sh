@@ -21,7 +21,8 @@
 # without a reason fails this script, so a list cannot grow unexplained.
 #
 # Reports: console, plus JUnit at test-results/<leg>-<Config>[-gpu]-seed<N>.junit.xml
-# (<leg> = $ARCANE_CI_LEG, default the OS name). Exit status is ArcaneTests'.
+# and Catch2 JSON beside it, checked by scripts/check-baselines.py (invocation key
+# "~[gpu] <linux|macos>"). Exit status is ArcaneTests', else the baseline check's.
 #
 # Catch2 ANDs separate test-spec arguments, so each exclusion is passed as its
 # own ~"name" argument. Inside a quoted name Catch2 still treats ',' as an OR
@@ -86,8 +87,23 @@ fi
 LEG="${ARCANE_CI_LEG:-$OS}"
 mkdir -p "$ROOT/test-results"
 JUNIT="$ROOT/test-results/$LEG-$CONFIG$GPU_TAG-seed${SEED:-random}.junit.xml"
+JSON="$ROOT/test-results/$LEG-$CONFIG$GPU_TAG-seed${SEED:-random}.json"
 
 echo "run-tests: $OS $CONFIG, seed ${SEED:-random}, ${#specs[@]} spec(s) ($GPU_SPEC + $(( ${#specs[@]} - 1 )) exclusion(s)) -> $JUNIT"
 cd "$EXE_DIR"
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-offscreen}"
-exec ./ArcaneTests "${specs[@]}" "${args[@]+"${args[@]}"}" -r console -r "junit::out=$JUNIT"
+set +e
+./ArcaneTests "${specs[@]}" "${args[@]+"${args[@]}"}" -r console -r "junit::out=$JUNIT" -r "json::out=$JSON"
+SUITE_EXIT=$?
+set -e
+
+# Baseline check (fail closed: a lane with no row in scripts/automation-baselines.json
+# fails unless scripts/baseline-exemptions.json names it). The Linux image has python3,
+# not pwsh. The [gpu] lane is not count-comparable, so it is not checked.
+BASELINE_EXIT=0
+if [ -z "$GPU_TAG" ]; then
+    python3 "$ROOT/scripts/check-baselines.py" -ReportPath "$JSON" -Configuration "$CONFIG" -Invocation "~[gpu] $OS" || BASELINE_EXIT=$?
+fi
+
+if [ "$SUITE_EXIT" -ne 0 ]; then exit "$SUITE_EXIT"; fi
+exit "$BASELINE_EXIT"

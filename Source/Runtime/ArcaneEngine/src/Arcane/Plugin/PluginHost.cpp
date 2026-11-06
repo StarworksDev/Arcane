@@ -9,13 +9,16 @@
 #include <Arcane/Base/ProcessContext.hpp>
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Config/CVarConfig.hpp>
+#include <Arcane/Core/ModuleAttach.hpp>
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Config/PlayerSettings.hpp>
 #include <Arcane/Platform/Paths.hpp>   // Paths::TempDir -- where the versioned plugin images are staged (settings spec s11.0)
 #include <Arcane/Plugin/ClientHooks.hpp>
 #include <Arcane/Plugin/PluginSettings.hpp>
 #include <Arcane/Plugin/SystemFactory.hpp>
+#include <Arcane/Scene/PhysicsQuery.hpp>   // ClearPhysicsQueryFns2DInRange: an unpinnable dependency's drop (M-P3)
 #include <Arcane/Sim/NetDriver.hpp>
+#include <Arcane/Sim/SimHook.hpp>
 
 #include <Astra/Serialization/BinaryReader.hpp>
 #include <Astra/Serialization/BinaryWriter.hpp>
@@ -189,10 +192,22 @@ namespace Arcane
                     break;
                 case PluginResolveError::Kind::AbiMismatch:
                     d.code    = "plugin.abi.mismatch";
-                    d.message = "Plugin '" + name + "' targets engine ABI " +
-                                std::to_string(resolveError.pluginAbi) + ", but this engine is ABI " +
-                                std::to_string(resolveError.engineAbi) + ".";
-                    d.detail  = "Rebuild the game DLL against this engine and update its manifest.";
+                    if (resolveError.pluginAbi == resolveError.engineAbi)
+                    {
+                        d.message = "Plugin '" + name + "' matches engine ABI " +
+                                    std::to_string(resolveError.engineAbi) +
+                                    " but its layout digest differs from this engine's.";
+                        d.detail  = "The module was compiled against different engine headers or "
+                                    "defines (for example ASTRA_ENTITY_BITS). Rebuild the game DLL "
+                                    "against this engine.";
+                    }
+                    else
+                    {
+                        d.message = "Plugin '" + name + "' targets engine ABI " +
+                                    std::to_string(resolveError.pluginAbi) + ", but this engine is ABI " +
+                                    std::to_string(resolveError.engineAbi) + ".";
+                        d.detail  = "Rebuild the game DLL against this engine and update its manifest.";
+                    }
                     break;
                 case PluginResolveError::Kind::CrtFlavorMismatch:
                     d.code    = "plugin.crt.mismatch";
@@ -230,6 +245,14 @@ namespace Arcane
         EngineContext          ctx{};
         std::optional<PluginImage> current;
         std::uint32_t gen = 0;
+        // Reload's own record (ReloadAttempts / LastReloadOk): every reload
+        // that tried, and how the last one ended. Poll drops Reload's bool.
+        std::uint64_t reloadAttempts = 0;
+        bool          lastReloadOk   = true;
+        // SetReloadObserver: told when a reload begins and ends (Servitor's
+        // "reloading" host state).
+        PluginHost::ReloadObserver reloadObserver = nullptr;
+        void*                      reloadObserverUser = nullptr;
 
         std::filesystem::file_time_type lastWrite{};
         bool                            pending = false;
@@ -244,9 +267,12 @@ namespace Arcane
         std::vector<std::filesystem::path> pluginSources;
         std::vector<PluginImage>           plugins;
 
-        // Dependency images a load mapped (see LoadTracked), pinned for this
-        // host's whole load session -- hot reload included, so a reload never
-        // unmaps and remaps them and re-runs their statics.
+        // Dependency images a load mapped (see LoadTracked). Windows: pinned
+        // for this host's whole load session -- hot reload included, so a
+        // reload never unmaps and remaps them and re-runs their statics -- and
+        // disowned when the session ends. ELF and Mach-O pin for the life of
+        // the process instead (Module::PinsForProcessLife) and never record
+        // an entry here.
         struct PinnedDependency
         {
             Module::ImageSpan image;
@@ -279,11 +305,16 @@ namespace Arcane
         // ApplyLogSettings / settings read jumped into freed code (the S2-13
         // [witness][server] 0xC0000005). The rule is GENERAL, not a name match:
         // every image THIS load newly mapped (before/after diff of the mapped
-        // set, taken around this load alone) is pinned for the session and
-        // disowned when the last session pinning it ends (EndLoadSession).
+        // set, taken around this load alone) is pinned. Windows pins it for the
+        // load session and disowns it when the last session pinning it ends
+        // (EndLoadSession); ELF and Mach-O pin it for the life of the process
+        // and never disown it (Module::PinsForProcessLife).
         std::optional<Plugin> LoadTracked(const std::filesystem::path& dll, const std::string& module,
                                           PluginResolveError* error)
         {
+            // The diff assumes the SINGLE LOADER THREAD: an image another
+            // thread maps while this load runs counts as fresh. Contract and
+            // evidence at Plugin::Load's snapshot (PR #20 review M8).
             const std::vector<Module::MappedModule> before = Module::MappedModules();
             std::optional<Plugin> loaded = LoadScoped(dll, module, error);
             if (loaded)
@@ -304,6 +335,66 @@ namespace Arcane
                 const bool fresh = std::ranges::none_of(before, [base](const Module::MappedModule& m) {
                     return m.image.base == base;
                 });
+
+                // ELF and Mach-O: a fresh dependency is pinned FOR PROCESS LIFE
+                // and never disowned (Module::PinsForProcessLife) -- engine
+                // libraries are never hot-reloaded, only the game module is, so
+                // its registrations stay valid for every later session. No
+                // session bookkeeping: the image cannot unmap, so
+                // EndLoadSession has nothing to drop for it.
+                //
+                // The rule's LIMIT (PR #20 re-review M-P5): it pins every fresh
+                // image that is not a plugin image of this host, whatever it
+                // is -- an engine library, a third-party library a game vendors
+                // with an rpath (build/modules.lua), or a project plugin the
+                // primary happens to link (DT_NEEDED / LC_LOAD_DYLIB) and that
+                // LoadInitPlugins has not loaded yet. Pinning the first two is
+                // the point. The third is pinned too: its own later load (in
+                // place) gets the same image back, its Unload drops its cvars by
+                // range while the image stays mapped, so a later session runs it
+                // without them, and a rebuilt copy is picked up only after a
+                // restart. Not narrowed: excluding it (by path, against
+                // pluginSources or the project's plugin folders) would hand that
+                // image back to the loader's own unload decision -- the I1/I-R1
+                // hazard this rule exists to remove -- with nothing to drop its
+                // registrations if it unmapped before its own load ran. The
+                // shape needs a game that links a project plugin's library
+                // directly (plugins are meant to be loaded, not linked), so the
+                // limit is documented here rather than handled. The game's own
+                // image is never pinned (`loadingImage` and IsPluginImage above;
+                // the sim-hook child's pluginMappedAfterUnload witness).
+                if constexpr (Module::PinsForProcessLife())
+                {
+                    if (!fresh)
+                        continue;
+                    if (Module::PinMapped(mapped))
+                    {
+                        ARC_TRACE("plugin: pinned dependency image '{}' for the life of the process",
+                                  mapped.path.generic_string());
+                        continue;
+                    }
+                    // Not pinnable (M-P3): PinMapped's NOLOAD look-up missed the
+                    // name MappedModules recorded, or the base moved. The game
+                    // image holds it now, but it may unmap with the game, under
+                    // whatever it registered -- the I1 crash a session later.
+                    // Practically unreachable (dl_iterate_phdr's and dyld's name
+                    // IS the loader's own, so NOLOAD finds it), and there is no
+                    // reference to take for a Windows-style session pin either,
+                    // so take the refusal net's rule (Plugin::Load): an image
+                    // that cannot be pinned is treated as unmapping, and its
+                    // registrations go NOW, while it is certainly mapped. The
+                    // cost is that library's cvars and settings for this
+                    // process; the alternative is a dangling call.
+                    const std::size_t cvars = CVarRegistry::Get().UnregisterModuleRange(base, mapped.image.size);
+                    const std::size_t attaches = UnregisterModuleAttachInRange(base, mapped.image.size);
+                    const std::size_t hooks = UnregisterSimHooksInRange(base, mapped.image.size);
+                    const bool query = ClearPhysicsQueryFns2DInRange(base, mapped.image.size);
+                    ARC_WARN("plugin: dependency image '{}' could not be pinned for the life of the process; dropped "
+                             "{} cvar slot(s), {} module-attach callback(s), {} sim hook(s){} it registered, so "
+                             "nothing is left pointing into it if it unmaps with the game module",
+                             mapped.path.generic_string(), cvars, attaches, hooks, query ? " and the 2D query pair" : "");
+                    continue;
+                }
 
                 std::optional<Module> pin;
                 {
@@ -352,6 +443,20 @@ namespace Arcane
                     if (dropped != 0)
                         ARC_TRACE("plugin: disowned {} registration(s) of a dependency image '{}'",
                                   dropped, dep.pin.Path().generic_string());
+                    // Sim hooks: a hook module a game imports maps after the seal and
+                    // is refused (Sim/SimHook.hpp); this net catches any hook that
+                    // still points into the dependency before the pin goes.
+                    // An ENGINE module a game imports registered a module-attach
+                    // callback at image load (ARC_MODULE); every later Runtime
+                    // constructor calls AttachAllModules, so it leaves with the image.
+                    const std::size_t attaches = UnregisterModuleAttachInRange(dep.image.base, dep.image.size);
+                    if (attaches != 0)
+                        ARC_TRACE("plugin: dropped {} module-attach callback(s) of a dependency image '{}'",
+                                  attaches, dep.pin.Path().generic_string());
+                    const std::size_t hooks = UnregisterSimHooksInRange(dep.image.base, dep.image.size);
+                    if (hooks != 0)
+                        ARC_WARN("plugin: dropped {} sim hook(s) of a dependency image '{}' -- hook modules must be linked by the host",
+                                 hooks, dep.pin.Path().generic_string());
                 }
             }
             dependencies.clear();
@@ -458,6 +563,20 @@ namespace Arcane
             if (runtimes.empty() || p.CVarModule().empty()) return;
             const LayerSources layers = Primary().CVarLayerSources();
             CVarRegistry::Get().ApplyLayersFor(p.CVarModule(), layers);
+            // ELF and Mach-O: the dependency images game loads mapped keep their
+            // registrations under their OWN module names (Plugin::Load
+            // re-attributes them; issue #21 M-P1/M-P2), so they no longer ride
+            // on this module's name. Layer each here too, at every load, as
+            // they were under the game's name -- and as a Windows dependency,
+            // re-registered under the loading module's name each session, still
+            // is: a later project, or a different game stem, applies ITS rungs
+            // to them. Re-layering applies the new project's keys only: a key
+            // that only the previous project set keeps its value on a pinned
+            // dependency, the same as host-linked engine cvars on a project
+            // switch. Empty on Windows.
+            for (const std::string& dependency : Plugin::DependencyCVarModules())
+                if (dependency != p.CVarModule())
+                    CVarRegistry::Get().ApplyLayersFor(dependency, layers);
             // The module's keys are known now: republish the whole set, and log
             // (once per surviving issue -- OpenProject deferred its log to here).
             PublishCVarConfigDiagnostics(ValidateCVarLayers(CVarRegistry::Get(), layers), CVarConfigLog::Now);
@@ -512,6 +631,15 @@ namespace Arcane
             const PluginVTable& vt = img.plugin->VTable();
             if (callShutdown && vt.Shutdown)
                 ScopedCall(*img.plugin, [&] { vt.Shutdown(); });
+            // Sim hooks (Sim/SimHook.hpp): the fallback net for a hook that points
+            // into this image. BEFORE the ClearSystems below, which re-runs every
+            // hook's InstallSystems and would re-add the dying image's systems.
+            {
+                const Module::ImageSpan span = img.plugin->LoadedModule().Image();
+                const std::size_t hooks = UnregisterSimHooksInRange(span.base, span.size);
+                if (hooks != 0)
+                    ARC_WARN("PluginHost: dropped {} sim hook(s) owned by the unloading module -- hook modules must be linked by the host", hooks);
+            }
             // Drop plugin-created audio handles before clearing systems/registry, the
             // same window in which we tear down plugin-owned ECS state. The 2026-06-26
             // host refactor unified all teardown paths (unload, init-failure, reload-of-
@@ -606,6 +734,8 @@ namespace Arcane
                 // before-the-unmap clear the primary does in TeardownImage -- and,
                 // for the same reason, keyed on `base` alone, outside the range guard.
                 process.SystemFactories().ClearOwner(img.plugin->FactoryOwner());   // == image.base for a loaded image
+                // The secondaries' sim-hook net is NOT here: it runs in
+                // ShutdownPluginsLive, before any ClearSystems (see there).
                 if (image.size != 0)
                 {
                     for (Runtime* rt : runtimes)
@@ -664,6 +794,7 @@ namespace Arcane
                         // on that path).
                         PluginImage failed;
                         failed.plugin = std::move(*p);
+                        DropSecondarySimHooks();   // the loaded secondaries' net, before TeardownImage's ClearSystems
                         TeardownImage(failed, /*callShutdown*/ true);
                     }
                     else   // a real load failure, not Init()-returned-false -- name the cause
@@ -693,6 +824,25 @@ namespace Arcane
             for (auto it = plugins.rbegin(); it != plugins.rend(); ++it)
                 if (it->plugin && it->plugin->VTable().Shutdown)
                     ScopedCall(*it->plugin, [&] { it->plugin->VTable().Shutdown(); });
+            DropSecondarySimHooks();
+        }
+
+        // Sim hooks (Sim/SimHook.hpp): the fallback net for a hook that points
+        // into a secondary's image. Every caller runs it BEFORE any ClearSystems
+        // (Task 8 fix round 2, the TeardownImage ruling): ClearSystems re-runs
+        // every hook's InstallSystems and would re-add the image's systems.
+        // ShutdownPluginsLive runs it on every path that later unloads or
+        // re-establishes the secondaries.
+        void DropSecondarySimHooks()
+        {
+            for (auto& img : plugins)
+            {
+                if (!img.plugin)
+                    continue;
+                const Module::ImageSpan image = img.plugin->LoadedModule().Image();
+                if (const std::size_t hooks = UnregisterSimHooksInRange(image.base, image.size); hooks != 0)
+                    ARC_WARN("PluginHost: dropped {} sim hook(s) owned by a secondary -- hook modules must be linked by the host", hooks);
+            }
         }
 
         // Re-Init each loaded plugin (load order) on the SAME mapped modules -- used to
@@ -1066,12 +1216,19 @@ namespace Arcane
 
 #if defined(ARC_MONOLITHIC)
         // STATIC MODE (engine modularization s3.1/s3.2): the game is linked into
-        // this executable. No copy, no Module::Load, no ABI probe (ARC_GAME_MODULE's
-        // static_assert pinned it), no hot reload -- adopt ArcGameModule_Get()'s
-        // table and run the same Init/instantiate sequence as a loaded image.
+        // this executable. No copy, no Module::Load, no hot reload -- adopt
+        // ArcGameModule_Get()'s table (AdoptStaticGameModule runs the same epoch +
+        // digest gate a loaded image gets, before Init) and run the same
+        // Init/instantiate sequence as a loaded image.
         {
             PluginImage img;
-            img.plugin = Plugin::FromStatic(*ArcGameModule_Get(), name);
+            PluginResolveError adoptError{};
+            if (!AdoptStaticGameModule(*ArcGameModule_Get(), &adoptError, &img.plugin, name))
+            {
+                PublishPluginLoadFailure(name, m_impl->source, adoptError);
+                ARC_ERROR("plugin: static game module '{}' refused: ABI epoch/digest mismatch", name);
+                return false;
+            }
             m_impl->LayerModuleCVars(*img.plugin);
             m_impl->RefreshContext();
             if (!m_impl->InitImage(*img.plugin))
@@ -1210,6 +1367,18 @@ namespace Arcane
         if (m_impl->source.empty())
             return true;
 
+        ++m_impl->reloadAttempts;   // from here on the reload tries; its outcome is recorded below
+        // The observer hears the begin now and the end on every return below
+        // (Servitor's "reloading" host state: a reload is synchronous).
+        struct ReloadNotice
+        {
+            ReloadObserver fn;
+            void* user;
+            ~ReloadNotice() { if (fn) fn(false, user); }
+        } const notice{ m_impl->reloadObserver, m_impl->reloadObserverUser };
+        if (notice.fn)
+            notice.fn(true, notice.user);
+
         // Multi-module: quiesce plugins (kept mapped) so the primary's reset doesn't touch
         // a running secondary, run the UNCHANGED primary reload, then re-establish the
         // plugins on the post-reload registry. With no plugins both calls are no-ops, so
@@ -1220,7 +1389,10 @@ namespace Arcane
         // here too, BEFORE the secondaries are quiesced, so a refused reload bounces
         // nothing at all -- not the primary, not a secondary, not a generation.
         if (m_impl->RefuseReloadForActiveNetDriver())
+        {
+            m_impl->lastReloadOk = false;
             return false;
+        }
         m_impl->ShutdownPluginsLive();
         const bool ok = m_impl->ReloadPrimary(restoreState);
         m_impl->InitPluginsLive();
@@ -1228,6 +1400,7 @@ namespace Arcane
         // (after ReloadPrimary's own InstantiateAll); idempotent, so this only adds what
         // they brought back.
         m_impl->InstantiateAll();
+        m_impl->lastReloadOk = ok;
         return ok;
 #endif
     }
@@ -1325,6 +1498,22 @@ namespace Arcane
     std::uint32_t PluginHost::Generation() const noexcept
     {
         return m_impl->gen;
+    }
+
+    std::uint64_t PluginHost::ReloadAttempts() const noexcept
+    {
+        return m_impl->reloadAttempts;
+    }
+
+    bool PluginHost::LastReloadOk() const noexcept
+    {
+        return m_impl->lastReloadOk;
+    }
+
+    void PluginHost::SetReloadObserver(ReloadObserver fn, void* user) noexcept
+    {
+        m_impl->reloadObserver     = fn;
+        m_impl->reloadObserverUser = fn != nullptr ? user : nullptr;
     }
 
     bool PluginHost::SaveStatePrimary(BinaryWriter& w)

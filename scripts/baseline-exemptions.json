@@ -1,0 +1,40 @@
+{
+  "note": "A (configuration, invocation) lane with no row in automation-baselines.json fails scripts/check-baselines.ps1 and scripts/check-baselines.py unless it is listed here with a non-empty reason.",
+  "exemptions": [
+    {
+      "configuration": "Dist",
+      "invocation": "~[gpu] hosted-ci",
+      "reason": "The desk must not set CI or ARCANE_BUILD_MACHINE. Hosted Dist skips CrashPathTest reporter cases only when CI is set, so this lane has no measured count until a hosted Dist JSON artifact is copied in."
+    },
+    {
+      "configuration": "Debug",
+      "invocation": "~[gpu] linux",
+      "reason": "No linux count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    },
+    {
+      "configuration": "Release",
+      "invocation": "~[gpu] linux",
+      "reason": "No linux count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    },
+    {
+      "configuration": "Dist",
+      "invocation": "~[gpu] linux",
+      "reason": "No linux count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    },
+    {
+      "configuration": "Debug",
+      "invocation": "~[gpu] macos",
+      "reason": "No macos count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    },
+    {
+      "configuration": "Release",
+      "invocation": "~[gpu] macos",
+      "reason": "No macos count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    },
+    {
+      "configuration": "Dist",
+      "invocation": "~[gpu] macos",
+      "reason": "No macos count has been measured yet (scripts/run-tests.sh was not checking baselines before this change; this desk is Windows). Copy the counts from the first CI JSON artifact into automation-baselines.json and delete this entry."
+    }
+  ]
+}

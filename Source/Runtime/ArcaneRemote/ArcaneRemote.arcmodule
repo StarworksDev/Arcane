@@ -1,0 +1,26 @@
+{
+  "name": "ArcaneRemote",
+  "type": "Runtime",
+  "dependencies": {
+    "public": [
+      "ArcaneCore",
+      "ArcaneNet",
+      "ArcaneRemoteProtocol"
+    ],
+    "private": [
+      "ArcaneAssets",
+      "ArcaneCrypto",
+      "ArcaneEngine",
+      "ArcaneScene",
+      "ArcaneSim"
+    ]
+  },
+  "thirdParty": {
+    "public": [
+      "Astra",
+      "nlohmann"
+    ],
+    "private": []
+  },
+  "platforms": {}
+}

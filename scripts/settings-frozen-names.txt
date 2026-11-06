@@ -466,6 +466,7 @@ log.dir
 log.file.flushLevel
 log.file.keepCount
 log.level
+log.remote.ringLines
 log.server.consoleLevel
 log.server.file.maxBytes
 log.server.file.maxFiles
@@ -511,6 +512,8 @@ physics.substepCount
 plugin.hotReload.copyRetries
 plugin.hotReload.copyRetryMs
 plugin.hotReload.settleMs
+remote.server.frameBudgetMs
+remote.server.queueDepth
 render.adapter
 render.allowTearing
 render.backend

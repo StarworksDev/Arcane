@@ -21,7 +21,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -39,7 +41,8 @@
 #include <Arcane/Plugin/PluginHost.hpp>
 #include <Arcane/Scene/Components.hpp>
 #include <Arcane/Scene/PhysicsComponents.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Scene/SceneModule.hpp>
 #include <Arcane/Scene/SceneResources.hpp>
 #include <Arcane/Sim/SimSettings.hpp>   // ApplySimStepCap
@@ -48,6 +51,7 @@
 
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
 
+#include "Helpers/ConstantScan.hpp"
 #include "Helpers/TestTypeContext.hpp"
 #include "../../Fixtures/HotReloadPlugin/HotReloadShared.hpp"
 
@@ -96,6 +100,94 @@ TEST_CASE("Play snapshots and Stop restores the authored registry", "[editor]")
         if (Arcane::SpriteRenderer* s = restored.GetComponent<Arcane::SpriteRenderer>(le))
         { CHECK(s->sortingLayer == 3); found = true; }
     CHECK(found);
+}
+
+#if !defined(ARC_BUILD_DIST)   // PlaySession::FailNextRestoreForTesting is compiled out of Dist
+TEST_CASE("a failed Stop stays in Play and a second Stop restores", "[editor][play]")
+{
+    Arcane::Runtime runtime(Arcane::Test::Process());
+    Astra::Registry& reg = runtime.Registry();
+    Arcane::RegisterSceneComponents(reg);
+
+    const Astra::Entity e = reg.CreateEntity();
+    Arcane::SpriteRenderer sp; sp.sortingLayer = 3;
+    reg.AddComponent<Arcane::SpriteRenderer>(e, sp);
+
+    Arcane::Editor::PlaySession play;
+    REQUIRE(play.Play(runtime));
+    REQUIRE(play.IsPlaying());
+
+    const auto sortingLayer = [&runtime]() {
+        Astra::Registry& live = runtime.Registry();
+        for (Astra::Entity le : live.GetEntityManager())
+            if (Arcane::SpriteRenderer* s = live.GetComponent<Arcane::SpriteRenderer>(le))
+                return static_cast<int>(s->sortingLayer);
+        return -1;
+    };
+    {
+        Astra::Registry& live = runtime.Registry();
+        for (Astra::Entity le : live.GetEntityManager())
+            if (Arcane::SpriteRenderer* s = live.GetComponent<Arcane::SpriteRenderer>(le))
+                s->sortingLayer = 99;
+    }
+
+    // The restore fails: Stop reports it, Play stays, the play-time sentinel is untouched.
+    play.FailNextRestoreForTesting();
+    CHECK_FALSE(play.Stop(runtime));
+    CHECK(play.IsPlaying());
+    CHECK(sortingLayer() == 99);
+    CHECK(runtime.Loop().IsPaused());   // paused on both outcomes
+
+    // The flag was one-shot: the second Stop restores the authored value.
+    CHECK(play.Stop(runtime));
+    CHECK_FALSE(play.IsPlaying());
+    CHECK(play.Mode() == Arcane::Editor::EditorMode::Edit);
+    CHECK(sortingLayer() == 3);
+}
+#endif
+
+TEST_CASE("a failed Stop is wired through Save, Clear and the plugin Poll", "[editor][play]")
+{
+    const auto read = [](const char* relative) {
+        std::ifstream in(Arcane::Test::RepoRoot() / relative);
+        REQUIRE(in.good());
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    };
+    const std::string play  = read("Source/Programs/ArcaneEditor/src/App/PlayMode.cpp");
+    const std::string frame = read("Source/Programs/ArcaneEditor/src/App/EditorAppFrame.cpp");
+    const std::string scene = read("Source/Programs/ArcaneEditor/src/App/EditorAppScene.cpp");
+
+    const std::size_t stop = play.find("bool PlaySession::Stop(");
+    REQUIRE(stop != std::string::npos);
+    const std::size_t fail = play.find("if (!ok)", stop);
+    const std::size_t edit = play.find("m_mode = EditorMode::Edit", stop);
+    REQUIRE(fail != std::string::npos);
+    REQUIRE(edit != std::string::npos);
+    CHECK(fail < edit);
+
+    CHECK(frame.find("could not be stopped") != std::string::npos);
+    CHECK(scene.find("PushPlayStopFailedModal()") != std::string::npos);   // Clear shares the Save button's modal
+    CHECK(frame.find("if (!InPlayMode())") != std::string::npos);
+    CHECK(frame.find("editor.play.failnextrestore") != std::string::npos);
+    // The test hook is compiled out of Dist: method, member and branch sit inside the guard.
+    const std::string hdr = read("Source/Programs/ArcaneEditor/src/App/PlayMode.hpp");
+    const std::size_t hook = hdr.find("FailNextRestoreForTesting");
+    REQUIRE(hook != std::string::npos);
+    const std::size_t hookGuard = hdr.rfind("#if !defined(ARC_BUILD_DIST)", hook);
+    REQUIRE(hookGuard != std::string::npos);
+    CHECK(hdr.find("#endif", hookGuard) > hook);
+    const std::size_t branch = play.find("m_failNextRestore");
+    REQUIRE(branch != std::string::npos);
+    const std::size_t branchGuard = play.rfind("#if !defined(ARC_BUILD_DIST)", branch);
+    REQUIRE(branchGuard != std::string::npos);
+    CHECK(play.find("#endif", branchGuard) > branch);
+    const std::size_t poll = frame.find("m_plugin->Poll();");
+    REQUIRE(poll != std::string::npos);
+    const std::size_t guardAt = frame.rfind("if (!InPlayMode())", poll);
+    REQUIRE(guardAt != std::string::npos);   // the guard text must exist before its position means anything
+    CHECK(poll - guardAt < 120);             // the guard is the statement right above
 }
 
 namespace
@@ -606,6 +698,95 @@ TEST_CASE("Play as embedded server: the server world takes the live sim.maxSteps
     CHECK(t->fixedStep == 10);   // was 5 when the server loop kept its ctor-read cap
 
     REQUIRE(play.Stop(runtime));
+}
+
+// Servitor final fix round 2 (I-3): TickServer mirrors the primary loop every
+// frame -- its pause, and its single step of this frame -- so the embedded
+// server world stays in lockstep whoever paused or stepped the primary (the
+// toolbar or servitor), and a resume anywhere resumes both.
+TEST_CASE("Play as embedded server: the server world mirrors the primary's pause and single step", "[editor][netmode][sim]")
+{
+    Arcane::Runtime runtime(Arcane::Test::Process());
+    Arcane::RegisterSceneComponents(runtime.Registry());
+    const Astra::Entity root = runtime.Registry().CreateEntityWith(Arcane::Transform{});
+    runtime.Registry().SetResource<Arcane::SceneRoot>(Arcane::SceneRoot{root});
+
+    Arcane::Editor::PlaySession play;
+    REQUIRE(play.Play(runtime, nullptr, Arcane::Editor::PlayTopology::EmbeddedServer));
+    Arcane::Runtime* server = play.ServerWorld();
+    REQUIRE(server != nullptr);
+    const auto ticks = [&] {
+        const Arcane::Time* t = server->Registry().GetResource<Arcane::Time>();
+        REQUIRE(t != nullptr);
+        return t->fixedStep;
+    };
+    play.TickServer(0.05, false, false);
+    const std::uint64_t before = ticks();
+    CHECK(before > 0);                          // running: wall dt ticks it
+
+    play.TickServer(0.2, true, false);          // the primary is paused (toolbar or servitor)
+    CHECK(server->Loop().IsPaused());
+    CHECK(ticks() == before);                   // paused: wall dt runs nothing
+    play.TickServer(0.2, true, true);           // the primary took one single step this frame
+    CHECK(ticks() == before + 1);               // exactly one, whatever the frame's dt
+    play.TickServer(0.2, true, false);
+    CHECK(ticks() == before + 1);
+
+    play.TickServer(0.05, false, false);        // a resume anywhere resumes the server too
+    CHECK_FALSE(server->Loop().IsPaused());
+    CHECK(ticks() > before + 1);
+    REQUIRE(play.Stop(runtime));
+}
+
+// Servitor final fix round 3 (N-3): --play-as enters Play after the remote
+// session's arm, as entering that session interactively does (arm in Edit,
+// then Play), so --remote --play-as embedded-server|client keeps its remote
+// surface. EnterScriptedPlay is what EditorApp::Init calls.
+namespace
+{
+struct ArmProbe {
+    Arcane::Editor::PlaySession* play = nullptr;
+    Arcane::Runtime* runtime = nullptr;
+    int calls = 0;
+    bool playingWhenArmed = true;
+    Arcane::NetMode modeWhenArmed = Arcane::NetMode::Client;
+};
+void RecordArm(void* user)
+{
+    auto* probe = static_cast<ArmProbe*>(user);
+    ++probe->calls;
+    probe->playingWhenArmed = probe->play->IsPlaying();
+    probe->modeWhenArmed = probe->runtime->Mode();
+}
+}
+
+TEST_CASE("--play-as arms the remote session before it enters Play", "[editor][netmode]")
+{
+    Arcane::Runtime runtime(Arcane::Test::Process());
+    Arcane::RegisterSceneComponents(runtime.Registry());
+    const Astra::Entity root = runtime.Registry().CreateEntityWith(Arcane::Transform{});
+    runtime.Registry().SetResource<Arcane::SceneRoot>(Arcane::SceneRoot{root});
+
+    for (const char* playAs : {"embedded-server", "client", "listen-server", "standalone"})
+    {
+        INFO(playAs);
+        Arcane::Editor::PlaySession play;
+        ArmProbe probe;
+        probe.play = &play;
+        probe.runtime = &runtime;
+        REQUIRE(Arcane::Editor::EnterScriptedPlay(play, runtime, nullptr, playAs, &RecordArm, &probe));
+        CHECK(probe.calls == 1);
+        CHECK_FALSE(probe.playingWhenArmed);                                // armed in Edit...
+        CHECK(probe.modeWhenArmed == Arcane::NetMode::Standalone);          // ...in the edit-mode topology
+        CHECK(play.IsPlaying());
+        REQUIRE(play.Stop(runtime));
+    }
+    {
+        Arcane::Editor::PlaySession play;
+        REQUIRE(Arcane::Editor::EnterScriptedPlay(play, runtime, nullptr, "embedded-server", nullptr, nullptr));
+        CHECK(play.Topology() == Arcane::Editor::PlayTopology::EmbeddedServer);
+        REQUIRE(play.Stop(runtime));
+    }
 }
 
 TEST_CASE("Play as listen server flips the ONE world to ListenServer; Stop restores Standalone", "[editor][netmode]")

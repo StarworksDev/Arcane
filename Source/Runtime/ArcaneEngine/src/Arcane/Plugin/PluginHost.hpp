@@ -113,6 +113,22 @@ namespace Arcane
         [[nodiscard]] bool                IsLoaded()   const noexcept;
         [[nodiscard]] const PluginVTable* Vtable()     const noexcept;
         [[nodiscard]] std::uint32_t       Generation() const noexcept;
+        // Every Reload that tried (Poll's included, whose bool nobody sees),
+        // succeeded or not, and whether the last one succeeded. A failed or
+        // refused reload leaves Generation() alone, so these are its only
+        // record: a host hands them to its remote session (HostSession::
+        // DrainFrame), which answers `servitor wait reload` with the failure.
+        // A plugins-only host and a monolithic one never try: 0 and true.
+        [[nodiscard]] std::uint64_t       ReloadAttempts() const noexcept;
+        [[nodiscard]] bool                LastReloadOk()   const noexcept;
+        // Called with true when a Reload begins trying (the attempt ReloadAttempts
+        // counts) and with false when it ends, on every outcome. A reload is
+        // synchronous on the caller's thread, so this is the only moment a host
+        // can publish that it is reloading (Servitor's "reloading" host state).
+        // Null clears it; the last call wins. A no-op reload (plugins-only or
+        // monolithic) calls nothing.
+        using ReloadObserver = void (*)(bool reloading, void* user);
+        void SetReloadObserver(ReloadObserver fn, void* user) noexcept;
 
         // PlaySession (and any other caller that would otherwise invoke the
         // primary vtable's SaveState/LoadState directly) goes through these so

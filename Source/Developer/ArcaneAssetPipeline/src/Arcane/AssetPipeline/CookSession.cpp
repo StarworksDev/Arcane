@@ -5,6 +5,7 @@
 #include "Arcane/AssetPipeline/CookKey.hpp"
 
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/IO/ReadRegularFile.hpp>
 
 #include <Json.hpp>
 
@@ -160,21 +161,7 @@ namespace Arcane::AssetPipeline
 
         std::optional<std::vector<std::byte>> ReadWholeFileBytes(const fs::path& path)
         {
-            std::ifstream ifs(path, std::ios::binary);
-            if (!ifs) return std::nullopt;
-
-            ifs.seekg(0, std::ios::end);
-            const std::streamoff len = ifs.tellg();
-            if (len < 0) return std::nullopt;
-            ifs.seekg(0, std::ios::beg);
-
-            std::vector<std::byte> out(static_cast<std::size_t>(len));
-            if (!out.empty())
-            {
-                ifs.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
-                if (!ifs) return std::nullopt;
-            }
-            return out;
+            return Arcane::ReadRegularFile(path);
         }
 
         // Flattens ReadExternalBuffers' own result into the span-of-spans shape
@@ -270,6 +257,24 @@ namespace Arcane::AssetPipeline
         }
     }
 
+    namespace
+    {
+        // True iff the file at `path` parses with the reader for `kind`. The static_assert fails
+        // the build when a kind row is added to the table without a case below (C4062 is off by
+        // default on MSVC, so the switch alone would not catch it).
+        static_assert(kCookKindTable.size() == 2, "a new CookKind needs a case in CurrentArtifactParses");
+
+        bool CurrentArtifactParses(CookKind kind, const fs::path& path)
+        {
+            switch (kind)
+            {
+            case CookKind::Texture: return ReadTextureArtifact(path).has_value();
+            case CookKind::Mesh:    return ReadMeshArtifact(path).has_value();
+            }
+            return false;
+        }
+    }
+
     std::span<const CookKindEntry> CookKinds() noexcept
     {
         return std::span<const CookKindEntry>(kCookKindTable);
@@ -295,6 +300,11 @@ namespace Arcane::AssetPipeline
         {
             for (const fs::path& source : EnumerateSources(contentDir, kindEntry.extensions))
             {
+                // CookQueue's destructor asks a pass on a worker to stop; one import is the
+                // longest the caller then waits.
+                if (m_cancel.load(std::memory_order_acquire))
+                    return result;
+
                 fs::path metaPath = source;
                 metaPath += ".meta";
 
@@ -376,33 +386,43 @@ namespace Arcane::AssetPipeline
                 // -- for a settings-only edit, the stale artifact's sourceHash still matches
                 // the CURRENT source bytes (only the settings changed), so it would even
                 // hash-validate as if it were current, silently masking the settings change.
-                const std::optional<std::uint64_t> previousKeyForGuid = store.Lookup(*guid);
-
-                // Best-effort removal of a superseded old-key artifact for `guid`, now that
-                // `newKey` is the artifact this pass is about to make current for it. A no-op
-                // when there was nothing indexed yet, or the key didn't actually change.
-                // Failure (e.g. a locked file) is silently tolerated -- ResolveCurrentArtifactPath
-                // never trusts the index anyway (see this file's own header comment), and a
-                // future SweepOrphans/self-heal pass gets another chance at it once the guid's
-                // OWN source is ever removed.
-                auto removeSupersededArtifact = [&](std::uint64_t newKey)
+                // Review fix round 1: delete EVERY artifact for this guid except the current
+                // key, not just the one key the index held (it is last-writer-wins, so a
+                // stray same-guid file that was never the indexed key survived, and a
+                // client-side directory scan by guid could still resolve it). Returns false
+                // and records a failure when a stale file could not be removed: the guid is
+                // then NOT up to date / cooked, since the stale bytes may still be served.
+                auto removeNonCurrent = [&]() -> bool
                 {
-                    if (previousKeyForGuid && *previousKeyForGuid != newKey)
-                    {
-                        std::error_code removeEc;
-                        fs::remove(store.PathFor(*previousKeyForGuid), removeEc);
-                    }
+                    std::vector<fs::path> left;
+                    store.RemoveAllExcept(*guid, cookKey, &left);
+                    if (left.empty())
+                        return true;
+
+                    const std::string reason = "superseded artifact could not be removed";
+                    m_lastFailures[*guid] = reason;
+                    result.failures.emplace_back(*guid, reason);
+                    ++result.failed;
+                    if (m_progress) m_progress(source, false, reason);
+                    return false;
                 };
 
+                // The up-to-date outcome needs the current-key file to exist AND parse with
+                // the reader for its kind; a truncated or garbled file falls through into the
+                // import path below, which rewrites it.
                 std::error_code existsEc;
                 if (fs::exists(finalPath, existsEc))
                 {
-                    store.PutIndex(*guid, cookKey);
-                    removeSupersededArtifact(cookKey);
-                    result.upToDateGuids.push_back(*guid);   // I3: every kind, beside the count
-                    ++result.upToDate;
-                    if (m_progress) m_progress(source, true, "up to date");
-                    continue;
+                    if (CurrentArtifactParses(kindEntry.kind, finalPath))
+                    {
+                        store.PutIndex(*guid, cookKey);
+                        if (!removeNonCurrent())
+                            continue;
+                        result.upToDateGuids.push_back(*guid);   // I3: every kind, beside the count
+                        ++result.upToDate;
+                        if (m_progress) m_progress(source, true, "up to date");
+                        continue;
+                    }
                 }
 
                 if (const std::optional<std::string> memo = ReadFailureMemo(intermediateDir, cookKey))
@@ -489,7 +509,8 @@ namespace Arcane::AssetPipeline
                 }
 
                 store.PutIndex(*guid, cookKey);
-                removeSupersededArtifact(cookKey);
+                if (!removeNonCurrent())
+                    continue;
                 result.cookedGuids.push_back(*guid);
                 ++result.cooked;
                 if (m_progress) m_progress(source, true, "cooked");
@@ -547,8 +568,11 @@ namespace Arcane::AssetPipeline
                 }
                 }
 
+                // Same test CookProject's up-to-date branch applies: present AND parses. A
+                // truncated file at the current key is stale, not clean.
                 std::error_code ec;
-                if (!fs::exists(store.PathFor(*cookKeyOpt), ec))
+                const fs::path current = store.PathFor(*cookKeyOpt);
+                if (!fs::exists(current, ec) || !CurrentArtifactParses(kindEntry.kind, current))
                     return true;   // at least one stale source -- short-circuit
             }
         }

@@ -4,7 +4,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,7 @@
 #include <Arcane/Scene/Components.hpp>
 #include <Arcane/Scene/SceneModule.hpp>
 
+#include "Helpers/ConstantScan.hpp"
 #include "Helpers/TestTypeContext.hpp"
 
 namespace
@@ -206,6 +209,97 @@ TEST_CASE("CommandStack: Commit is the safe close for an ABANDONED gesture", "[e
         stack.Redo();
         CHECK(reg->GetComponent<Arcane::Transform>(e)->position.x == 5.0f);
     }
+}
+
+TEST_CASE("Abandon commits a live target and restores a survivor when one target is gone; Cancel still does not revert",
+          "[edit]")
+{
+    auto reg = MakeReg();
+    const Astra::Entity a = reg->CreateEntity();
+    const Astra::Entity b = reg->CreateEntity();
+    reg->AddComponent<Arcane::Transform>(a, Arcane::Transform{});
+    reg->AddComponent<Arcane::Transform>(b, Arcane::Transform{});
+    const Astra::ComponentDescriptor* desc = DescriptorFor(*reg, a, "Arcane::Transform");
+    REQUIRE(desc != nullptr);
+    Arcane::CommandStack stack([&reg]() -> Astra::Registry& { return *reg; });
+    auto x = [&reg](Astra::Entity e) { return reg->GetComponent<Arcane::Transform>(e)->position.x; };
+
+    // Cancel: the existing contract. Both stay at 5, nothing undoable.
+    {
+        const Arcane::TransactionId txn = stack.Begin("Gizmo");
+        stack.SnapshotComponent(a, desc);
+        stack.SnapshotComponent(b, desc);
+        reg->GetComponent<Arcane::Transform>(a)->position.x = 5.0f;
+        reg->GetComponent<Arcane::Transform>(b)->position.x = 5.0f;
+        stack.Cancel(txn);
+        CHECK(x(a) == 5.0f);
+        CHECK(x(b) == 5.0f);
+        CHECK_FALSE(stack.CanUndo());
+        reg->GetComponent<Arcane::Transform>(a)->position.x = 0.0f;
+        reg->GetComponent<Arcane::Transform>(b)->position.x = 0.0f;
+    }
+
+    // Abandon with every target alive: the pose stays and is undoable.
+    {
+        const Arcane::TransactionId txn = stack.Begin("Gizmo");
+        stack.SnapshotComponent(a, desc);
+        stack.SnapshotComponent(b, desc);
+        reg->GetComponent<Arcane::Transform>(a)->position.x = 5.0f;
+        reg->GetComponent<Arcane::Transform>(b)->position.x = 5.0f;
+        stack.Abandon(txn);
+        CHECK_FALSE(stack.InTransaction());
+        CHECK(x(a) == 5.0f);
+        CHECK(x(b) == 5.0f);
+        REQUIRE(stack.CanUndo());
+        stack.Undo();
+        CHECK(x(a) == 0.0f);
+        CHECK(x(b) == 0.0f);
+    }
+
+    // Abandon with one target destroyed: the survivor returns to its snapshot,
+    // and no undo entry is pushed.
+    {
+        const Arcane::TransactionId txn = stack.Begin("Gizmo");
+        stack.SnapshotComponent(a, desc);
+        stack.SnapshotComponent(b, desc);
+        reg->GetComponent<Arcane::Transform>(a)->position.x = 7.0f;
+        reg->GetComponent<Arcane::Transform>(b)->position.x = 7.0f;
+        reg->DestroyEntity(b);
+        stack.Abandon(txn);
+        CHECK_FALSE(stack.InTransaction());
+        CHECK(x(a) == 0.0f);
+        CHECK_FALSE(stack.CanUndo());
+    }
+
+    // A stale owner is inert, as for Commit and Cancel.
+    {
+        const Arcane::TransactionId txn = stack.Begin("Gizmo");
+        stack.Abandon(Arcane::TransactionId::None);
+        CHECK(stack.InTransaction());
+        stack.Cancel(txn);
+    }
+}
+
+TEST_CASE("the gizmo's abandoned-drag branch calls Abandon, not Cancel", "[edit]")
+{
+    std::ifstream in(Arcane::Test::RepoRoot() / "Source/Programs/ArcaneEditor/src/App/EditorAppFrame.cpp");
+    REQUIRE(in.good());
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string src = ss.str();
+
+    const std::size_t fn = src.find("void EditorApp::UpdateGizmoInteraction(");
+    REQUIRE(fn != std::string::npos);
+    const std::size_t end = src.find("// Phase 7: sim advance.", fn);
+    REQUIRE(end != std::string::npos);
+    const std::string body = src.substr(fn, end - fn);
+
+    const std::size_t elseBranch = body.find("// Only reached with an active drag");
+    REQUIRE(elseBranch != std::string::npos);
+    const std::string tail = body.substr(elseBranch);
+    CHECK(tail.find("Abandon(") != std::string::npos);
+    CHECK(tail.find("Cancel(") == std::string::npos);
+    CHECK(src.find("editor.gizmo.probe") != std::string::npos);
 }
 
 TEST_CASE("CommandStack: a transaction groups two components into one undo step", "[edit]")

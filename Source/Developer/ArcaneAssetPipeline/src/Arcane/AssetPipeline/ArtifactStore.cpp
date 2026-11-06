@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 // Only for CurrentProcessId() below -- part of the per-invocation tmp-path uniqueness that
 // makes concurrent same-key Commit() calls safe (see ArtifactStore.hpp's concurrency contract).
@@ -153,20 +154,23 @@ namespace Arcane::AssetPipeline
     void ArtifactStore::RebuildIndexFromScan()
     {
         m_index.clear();
+        m_allByGuid.clear();
+        m_scanComplete = true;
 
         const std::filesystem::path artifactsDir = m_intermediateDir / "Artifacts";
 
         std::error_code ec;
-        if (!std::filesystem::exists(artifactsDir, ec) || ec)
-            return;
+        const bool dirExists = std::filesystem::exists(artifactsDir, ec);
+        if (ec) { m_scanComplete = false; return; }
+        if (!dirExists) return;   // nothing cooked yet: a complete (empty) scan
 
         std::filesystem::recursive_directory_iterator it(artifactsDir, ec);
-        if (ec) return;
+        if (ec) { m_scanComplete = false; return; }
 
         const std::filesystem::recursive_directory_iterator end;
         for (; it != end; it.increment(ec))
         {
-            if (ec) break;
+            if (ec) { m_scanComplete = false; break; }
 
             const std::filesystem::directory_entry& entry = *it;
 
@@ -186,6 +190,7 @@ namespace Arcane::AssetPipeline
             if (!prefix) continue;   // corrupt/unreadable -- skip, never abort the scan
 
             m_index[prefix->sourceGuid] = *cookKey;
+            m_allByGuid[prefix->sourceGuid].push_back(path);
         }
     }
 
@@ -208,6 +213,47 @@ namespace Arcane::AssetPipeline
             it = m_index.erase(it);
         }
 
+        return removed;
+    }
+
+    std::size_t ArtifactStore::RemoveAllExcept(const Guid& guid, std::uint64_t keepKey,
+                                               std::vector<std::filesystem::path>* remaining)
+    {
+        // The last scan could not finish, so a stray may be invisible: report the whole
+        // Artifacts directory as "left" and let the caller fail the guid rather than call it clean.
+        if (!m_scanComplete && remaining)
+            remaining->push_back(m_intermediateDir / "Artifacts");
+
+        const auto found = m_allByGuid.find(guid);
+        if (found == m_allByGuid.end())
+            return 0;
+
+        std::size_t removed = 0;
+        std::vector<std::filesystem::path> kept;   // what stays in the scan record for this guid
+        for (const std::filesystem::path& file : found->second)
+        {
+            const std::optional<std::uint64_t> key = FromHex16(file.stem().string());
+            if (key && *key == keepKey)
+            {
+                kept.push_back(file);
+                continue;
+            }
+
+            std::error_code removeEc;
+            std::filesystem::remove(file, removeEc);
+
+            std::error_code existsEc;
+            if (std::filesystem::exists(file, existsEc) || existsEc)
+            {
+                kept.push_back(file);
+                if (remaining) remaining->push_back(file);
+            }
+            else
+            {
+                ++removed;
+            }
+        }
+        found->second = std::move(kept);
         return removed;
     }
 }

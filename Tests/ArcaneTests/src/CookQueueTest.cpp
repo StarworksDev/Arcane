@@ -22,15 +22,21 @@
 #include <stb_image_write.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "Helpers/ConstantScan.hpp"   // Arcane::Test::RepoRoot
 
 namespace fs = std::filesystem;
 using namespace Arcane::AssetPipeline;
@@ -450,5 +456,156 @@ TEST_CASE("CookQueue + AssetPanelModel: a mesh recorded Queued mid-pass reads Co
     CHECK(model.Health().cooked == 1);
 
     fs::remove_all(content, ec);
+    fs::remove_all(project, ec);
+}
+
+TEST_CASE("CookQueue's destructor waits with a deadline", "[editor][cook]") {
+    std::ifstream in(Arcane::Test::RepoRoot() / "Source/Programs/ArcaneEditor/src/Project/CookQueue.cpp",
+                     std::ios::binary);
+    REQUIRE(in.good());
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    const auto dtor = text.find("CookQueue::~CookQueue()");
+    REQUIRE(dtor != std::string::npos);
+    const auto next = text.find("void CookQueue::", dtor + 1);
+    REQUIRE(next != std::string::npos);
+    const auto body = text.substr(dtor, next - dtor);
+    CHECK(body.find("sleep_for") != std::string::npos);
+    CHECK(body.find("abort") != std::string::npos);
+    CHECK(body.find("yield") == std::string::npos);
+}
+
+TEST_CASE("CookQueue: a throwing cook is reported as a failure and the queue still destroys", "[editor][cook]")
+{
+    const fs::path project = TempProjectDir("throwing_importer");
+    const fs::path png = project / "Content" / "textures" / "a.png";
+    WritePngFile(png, 4, 4, SolidPixels(4, 4, 9, 9, 9, 255));
+    WriteMetaSidecar(png, Guid::Generate());
+
+    ManualSubmit submit;
+    std::vector<CookResult> delivered;
+    {
+        CookQueue queue(project, [&submit](std::function<void()> job) { submit(std::move(job)); });
+        queue.SetImporterForTesting(
+            [](std::span<const std::byte>, const Guid&, const TextureMetaSettings&) -> std::optional<ImportedTexture>
+            {
+                throw std::runtime_error("boom");
+            });
+        queue.SetOnCookComplete([&](const CookResult& r) { delivered.push_back(r); });
+
+        queue.NoteChanged();
+        submit.RunNext();   // the catch keeps the exception inside the job
+        CHECK_FALSE(queue.CookPending());
+        queue.Pump();
+
+        REQUIRE(delivered.size() == 1u);
+        CHECK(delivered[0].failed >= 1u);
+        REQUIRE_FALSE(delivered[0].failures.empty());
+        CHECK(delivered[0].failures[0].second.find("boom") != std::string::npos);
+    }   // ~CookQueue returns: m_running was cleared on the throw path
+
+    std::error_code ec;
+    fs::remove_all(project, ec);
+}
+
+// Review fix round 1 (B4 fix 1): the exit-vs-NoteChanged window. The pass decides to go
+// idle, releases the mutex, and only then does m_running clear. An edit noted in that
+// instant used to see m_running == true, set m_dirty, and submit nothing -- and nobody
+// ever read the flag again. The hook fires exactly there.
+#if !defined(ARC_BUILD_DIST)
+TEST_CASE("CookQueue: an edit noted as the pass goes idle is cooked, not dropped", "[editor][cook]")
+{
+    const fs::path project = TempProjectDir("lost_wakeup");
+    const fs::path pngA = project / "Content" / "textures" / "a.png";
+    WritePngFile(pngA, 4, 4, SolidPixels(4, 4, 10, 10, 10, 255));
+    const Guid guidA = Guid::Generate();
+    WriteMetaSidecar(pngA, guidA);
+    const fs::path pngB = project / "Content" / "textures" / "b.png";
+    const Guid guidB = Guid::Generate();
+
+    ManualSubmit submit;
+    CookQueue queue(project, [&submit](std::function<void()> job) { submit(std::move(job)); });
+    std::vector<CookResult> delivered;
+    queue.SetOnCookComplete([&](const CookResult& r) { delivered.push_back(r); });
+
+    bool fired = false;
+    queue.SetPassExitHookForTesting([&]
+    {
+        if (fired) return;
+        fired = true;
+        // The edit lands now: after the pass's last look at m_dirty, before it is idle.
+        WritePngFile(pngB, 4, 4, SolidPixels(4, 4, 200, 100, 50, 255));
+        WriteMetaSidecar(pngB, guidB);
+        queue.NoteChanged();
+    });
+
+    queue.NoteChanged();
+    submit.RunNext();
+    REQUIRE(fired);
+
+    // The edit must have a pass coming: either queued as a job or still dirty-looped.
+    REQUIRE(submit.pending.size() == 1u);
+    submit.RunNext();
+    CHECK_FALSE(queue.CookPending());
+
+    queue.Pump();
+    std::size_t cookedB = 0;
+    for (const CookResult& r : delivered)
+        for (const Guid& g : r.cookedGuids)
+            if (g == guidB) ++cookedB;
+    CHECK(cookedB == 1u);
+}
+#endif
+
+TEST_CASE("CookQueue: destroying the queue cancels a long pass between sources", "[editor][cook]")
+{
+    const fs::path project = TempProjectDir("cancel_on_destroy");
+    constexpr int kSources = 40;
+    for (int i = 0; i < kSources; ++i)
+    {
+        // Distinct bytes per source, so no two share a cook key and every one needs an import.
+        const fs::path png = project / "Content" / "textures" / ("s" + std::to_string(i) + ".png");
+        WritePngFile(png, 4, 4, SolidPixels(4, 4, static_cast<unsigned char>(i * 5),
+                                            static_cast<unsigned char>(255 - i * 5), 7, 255));
+        WriteMetaSidecar(png, Guid::Generate());
+    }
+
+    auto importCalls = std::make_shared<std::atomic<int>>(0);
+    ManualSubmit submit;
+    std::thread worker;
+    std::chrono::milliseconds waited{ 0 };
+    {
+        auto queue = std::make_unique<CookQueue>(
+            project, [&submit](std::function<void()> job) { submit(std::move(job)); });
+        queue->SetImporterForTesting(
+            [importCalls](std::span<const std::byte> bytes, const Guid& g, const TextureMetaSettings& settings)
+            {
+                importCalls->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));   // 40 x 100 ms uncancelled
+                return ImportTexture(bytes, g, settings);
+            });
+
+        queue->NoteChanged();
+        REQUIRE(submit.pending.size() == 1u);
+        worker = std::thread([job = std::move(submit.pending.front())] { job(); });
+
+        // Wait until the pass is genuinely inside its first import.
+        const auto spinStart = std::chrono::steady_clock::now();
+        while (importCalls->load() == 0 && std::chrono::steady_clock::now() - spinStart < std::chrono::seconds(10))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        REQUIRE(importCalls->load() >= 1);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        queue.reset();   // ~CookQueue: cancel, then wait for the import in flight
+        waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+    }
+    worker.join();
+
+    // Uncancelled the wait is ~4 s. Cancelled it is the import in flight (~100 ms) plus slack.
+    CHECK(waited < std::chrono::milliseconds(2000));
+    CHECK(importCalls->load() < kSources);
+
+    std::error_code ec;
     fs::remove_all(project, ec);
 }

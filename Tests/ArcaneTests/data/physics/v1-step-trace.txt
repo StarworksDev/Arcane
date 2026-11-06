@@ -1,0 +1,1457 @@
+arcane-physics-v1-step-trace 1
+steps 120
+parallelSolver 0
+step 1
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fffc831 00000000
+2 1 3f99999a 403fe419 00000000
+3 1 bf4ccccd 401fe419 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 1
+4 1 0 0 1 1 0 0
+sensorEnd 0
+step 2
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fff3717 00000000
+2 1 3f99999a 403f9b8c 00000000
+3 1 bf4ccccd 401f9b8c 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 3
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ffe4cb2 00000000
+2 1 3f99999a 403f265a 00000000
+3 1 bf4ccccd 401f265a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 4
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ffd0902 00000000
+2 1 3f99999a 403e8482 00000000
+3 1 bf4ccccd 401e8482 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 5
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ffb6c07 00000000
+2 1 3f99999a 403db605 00000000
+3 1 bf4ccccd 401db605 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 6
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ff975c1 00000000
+2 1 3f99999a 403cbae2 00000000
+3 1 bf4ccccd 401cbae2 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 7
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ff72630 00000000
+2 1 3f99999a 403b931a 00000000
+3 1 bf4ccccd 401b931a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 8
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ff47d54 00000000
+2 1 3f99999a 403a3eac 00000000
+3 1 bf4ccccd 401a3eac 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 9
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ff17b2e 00000000
+2 1 3f99999a 4038bd99 00000000
+3 1 bf4ccccd 4018bd99 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 10
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fee1fbd 00000000
+2 1 3f99999a 40370fe0 00000000
+3 1 bf4ccccd 40170fe0 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 11
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fea6b01 00000000
+2 1 3f99999a 40353582 00000000
+3 1 bf4ccccd 40153582 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 12
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fe65cfa 00000000
+2 1 3f99999a 40332e7e 00000000
+3 1 bf4ccccd 40132e7e 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 13
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fe1f5a8 00000000
+2 1 3f99999a 4030fad5 00000000
+3 1 bf4ccccd 4010fad5 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 14
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fdd350b 00000000
+2 1 3f99999a 402e9a86 00000000
+3 1 bf4ccccd 400e9a86 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 15
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fd81b23 00000000
+2 1 3f99999a 402c0d92 00000000
+3 1 bf4ccccd 400c0d92 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 16
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fd2a7f0 00000000
+2 1 3f99999a 402953f8 00000000
+3 1 bf4ccccd 400953f8 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 17
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fccdb72 00000000
+2 1 3f99999a 40266db9 00000000
+3 1 bf4ccccd 40066db9 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 18
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fc6b5a9 00000000
+2 1 3f99999a 40235ad5 00000000
+3 1 bf4ccccd 40035ad5 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 19
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fc03695 00000000
+2 1 3f99999a 40201b4b 00000000
+3 1 bf4ccccd 40001b4b 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 20
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fb95e36 00000000
+2 1 3f99999a 401caf1c 00000000
+3 1 bf4ccccd 3ff95e37 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 21
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fb22c8c 00000000
+2 1 3f99999a 40191647 00000000
+3 1 bf4ccccd 3ff22c8d 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 22
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3faaa197 00000000
+2 1 3f99999a 401550cd 00000000
+3 1 bf4ccccd 3feaa198 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 23
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3fa2bd57 00000000
+2 1 3f99999a 40115ead 00000000
+3 1 bf4ccccd 3fe2bd58 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 1
+1 1 0 0 3 1 0 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 24
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f9a7fcc 00000000
+2 1 3f99999a 400d3fe8 00000000
+3 1 bf4ccccd 3fda7fce 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 25
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f91e8f7 00000000
+2 1 3f99999a 4008f47d 00000000
+3 1 bf4ccccd 3fd1e8f9 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 26
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f88f8d7 00000000
+2 1 3f99999a 40047c6d 00000000
+3 1 bf4ccccd 3fc8f8d9 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 27
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f7f5ed7 00000000
+2 1 3f99999a 3fffaf6f 00000000
+3 1 bf4ccccd 3fbfaf6e 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 28
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f6c196a 00000000
+2 1 3f99999a 3ff60cb9 00000000
+3 1 bf4ccccd 3fb60cb8 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 29
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f582168 00000000
+2 1 3f99999a 3fec10b8 00000000
+3 1 bf4ccccd 3fac10b7 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 30
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f4376d0 00000000
+2 1 3f99999a 3fe1bb6c 00000000
+3 1 bf4ccccd 3fa1bb6b 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 31
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f2e19a2 00000000
+2 1 3f99999a 3fd70cd5 00000000
+3 1 bf4ccccd 3f970cd4 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 32
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f1809de 00000000
+2 1 3f99999a 3fcc04f3 00000000
+3 1 bf4ccccd 3f8c04f2 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 1
+4 1 0 0 1 1 0 0
+step 33
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3f014784 00000000
+2 1 3f99999a 3fc0a3c6 00000000
+3 1 bf4ccccd 3f80a3c5 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 34
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ed3a528 00000000
+2 1 3f99999a 3fb4e94e 00000000
+3 1 bf4ccccd 3f69d29a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 35
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ea3561d 00000000
+2 1 3f99999a 3fa8d58b 00000000
+3 1 bf4ccccd 3f51ab14 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 36
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3e6343cc 00000000
+2 1 3f99999a 3f9c687d 00000000
+3 1 bf4ccccd 3f38d0f9 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 37
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3dfa220d 00000000
+2 1 3f99999a 3f8fa224 00000000
+3 1 bf4ccccd 3f1f4448 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 38
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 3ca09f4c 00000000
+2 1 3f99999a 3f828280 00000000
+3 1 bf4ccccd 3f050501 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 39
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 00000000 b71da800 00000000
+2 1 3f99999a 3f6a1323 00000000
+3 1 bf4ccccd 3ed42648 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 1
+1 1 0 0 0 1 0 0
+contactEnd 0
+contactHit 1
+1 1 0 0 0 1 0 0 00000000 befafb06 80000000 bf800000 40c6d0db
+sensorBegin 0
+sensorEnd 0
+step 40
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3b5a23d0 b84a7b74 3b11e550
+2 1 3f99999a 3f4e6eb0 00000000
+3 1 bf4de876 3e9e691a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 1
+1 1 0 0 3 1 0 0 bef99932 3e24171f bf733265 3e9fe425 3ffee2e7
+sensorBegin 0
+sensorEnd 0
+step 41
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3c7baa90 b8609c0a 3c09a2b8
+2 1 3f99999a 3f3217a7 00000000
+3 1 bf5219bf 3e572899 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 42
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3cd9b2d1 b8711c4e 3c3932b0
+2 1 3f99999a 3f150e08 00000000
+3 1 bf564b08 3ddd694c 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 43
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d176ea6 b87d6a68 3c332b02
+2 1 3f99999a 3eeea3a7 00000000
+3 1 bf5a7c51 3b5d9700 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 44
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d3eaa72 b8834d7f 3bef1a11
+2 1 3f99999a 3eb1c612 00000000
+3 1 bf5ead9a bdd5248b 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 45
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d628cda b886b8b0 39cb36a0
+2 1 3f99999a 3e6706a2 00000000
+3 1 bf62dee3 be5b653f 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 1
+1 1 0 0 3 1 0 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 46
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d818af5 b8894416 bc206e3a
+2 1 3f99999a 3dcf6d92 00000000
+3 1 bf63eb35 be80000d 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 2
+1 1 0 0 2 1 0 0
+3 1 0 0 0 1 0 0
+contactEnd 0
+contactHit 1
+3 1 0 0 0 1 0 0 bf97d5d8 bf000000 00000000 bf800000 40d581d8
+sensorBegin 0
+sensorEnd 0
+step 47
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d90397d b88b2cbc bcbcfaa6
+2 1 3f99999a bcd31b38 00000000
+3 1 bf63eb35 be80004f 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 48
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3d9e8b3d b88c9742 bd17c54d
+2 1 3f99999a be1f47ef 00000000
+3 1 bf63eb35 be8000af 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 49
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3dacdcfd b88da844 bd510d48
+2 1 3f99999a be937b67 00000000
+3 1 bf63eb35 be80011c 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 50
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3dbb2ebd b88e7008 bd852aa2
+2 1 3f998403 be999246 b8f64f50
+3 1 bf63eb35 be80018a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 1
+2 1 0 0 0 1 0 0
+contactEnd 0
+contactHit 1
+2 1 0 0 0 1 0 0 3f4cccce befcf0e7 80000000 bf800000 41002f14
+sensorBegin 0
+sensorEnd 0
+step 51
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3dc9807d b88f06f9 bda1cea1
+2 1 3f99802a be999f5c b9070ede
+3 1 bf63eb35 be8001f4 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 1
+1 1 0 0 2 1 0 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 52
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3dd7d23d b88f794c bdbe72a0
+2 1 3f998016 be999fb8 b8f521ce
+3 1 bf63eb35 be800255 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 53
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3de623fc b88fcb10 bddb16a0
+2 1 3f998007 be999fea b8e2d0b6
+3 1 bf63eb35 be8002ac 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 54
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3df475bb b890087b bdf7ba9f
+2 1 3f997fe1 be99a0ff b8b3285e
+3 1 bf63eb35 be8002f8 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 55
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e0163bd b890359f be0a2f4f
+2 1 3f997fc3 be99a1d1 b88dee53
+3 1 bf63eb35 be80033a 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 56
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e088c9d b8905aa1 be18814f
+2 1 3f997fab be99a26f b860cd24
+3 1 bf63eb35 be800372 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 57
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e0fb57d b890736e be26d34f
+2 1 3f997f98 be99a2e5 b831f0c3
+3 1 bf63eb35 be8003a2 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 58
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e16de5d b890882a be35254f
+2 1 3f997f89 be99a33e b80cc988
+3 1 bf63eb35 be8003ca 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 59
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e1e073d b89094c4 be43774f
+2 1 3f997f7d be99a381 b7de9148
+3 1 bf63eb35 be8003eb 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 1
+1 1 0 0 2 1 0 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 60
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e25301d b890a15e be51c94f
+2 1 3f997f74 be99a3b3 b7afe90c
+3 1 bf63eb35 be800407 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 61
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e2b7585 39ccd8b0 be5f47b6
+2 1 3f9993c0 be99a090 b9e5f17c
+3 1 bf63eb35 be80041e 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 62
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e2e790b 3a89898e be6960bb
+2 1 3f99e387 be99a6ce b9b659c6
+3 1 bf63eb35 be800431 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 63
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e306e5b b6908500 be71bb6c
+2 1 3f9a311a be99a6b8 b991d2da
+3 1 bf63eb35 be800441 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 64
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3281ed b7cd88b8 be75f2bf
+2 1 3f9a733e be99a62a b961ceb5
+3 1 bf63eb35 be80044e 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 65
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e341ec4 b81028a6 be792c3e
+2 1 3f9aa69b be99a619 b92a5820
+3 1 bf63eb35 be800459 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 66
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e354380 b82ff568 be7b757d
+2 1 3f9acb04 be99a5fb b9022fef
+3 1 bf63eb35 be800462 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 67
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35f04a b8465381 be7ccee0
+2 1 3f9ae076 be99a5e8 b8c706d9
+3 1 bf63eb35 be800469 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 68
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e362525 b8560c0a be7d386d
+2 1 3f9ae6f0 be99a5db b8983040
+3 1 bf63eb35 be80046f 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 69
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3613f7 b8924615 be7d15d2
+2 1 3f9ae5e2 be99a384 b88baf70
+3 1 bf63eb35 be800473 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 70
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3604a3 b891e4d3 be7cf72a
+2 1 3f9ae5cf be99a3c4 b868b506
+3 1 bf63eb35 be800476 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 71
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35f54f b8919bfc be7cd880
+2 1 3f9ae5bb be99a3ea b836f00a
+3 1 bf63eb35 be800479 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 72
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35e5fb b891636b be7cb9d6
+2 1 3f9ae5ab be99a406 b80fd018
+3 1 bf63eb35 be80047c 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 73
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35d6a7 b8913b20 be7c9b2e
+2 1 3f9ae59f be99a41a b7e20986
+3 1 bf63eb35 be80047e 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 74
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35c753 b8911afa be7c7c86
+2 1 3f9ae595 be99a428 b7b1863c
+3 1 bf63eb35 be800480 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 75
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35b7ff b89102f6 be7c5ddc
+2 1 3f9ae58d be99a432 b78b6e8a
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 76
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35a8ab b890f314 be7c3f34
+2 1 3f9ae587 be99a439 b75afd4a
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 77
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e359957 b890e745 be7c208a
+2 1 3f9ae582 be99a43e b72bf673
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 78
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e358a03 b890df87 be7c01e1
+2 1 3f9ae57e be99a441 b706d84e
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 79
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e357aaf b890d7c9 be7be338
+2 1 3f9ae57b be99a443 b6d38d2e
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 80
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e356b5b b890d41c be7bc48f
+2 1 3f9ae579 be99a444 b6a5c334
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 81
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e355c07 b890d06f be7ba5e6
+2 1 3f9ae577 be99a445 b68230e0
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 82
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e354cb3 b890ccc2 be7b873d
+2 1 3f9ae576 be99a446 b64c4913
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 83
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e353d5f b890c915 be7b6893
+2 1 3f9ae575 be99a446 b61fff62
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 84
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e352e0b b890c568 be7b49ea
+2 1 3f9ae574 be99a446 b5fad6c4
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 85
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e351eb7 b890c5cc be7b2b41
+2 1 3f9ae573 be99a446 b5c4c838
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 86
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e350f63 b890c630 be7b0c98
+2 1 3f9ae572 be99a446 b599830c
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 87
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e35000f b890c694 be7aedef
+2 1 3f9ae572 be99a446 b5720dde
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 88
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34f0bb b890c6f8 be7acf47
+2 1 3f9ae572 be99a446 b53e0554
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 89
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34e167 b890c75c be7ab09e
+2 1 3f9ae572 be99a446 b512a074
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 90
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34d213 b890c7c0 be7a91f6
+2 1 3f9ae572 be99a446 b4e8572a
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 91
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34c2bf b890c824 be7a734b
+2 1 3f9ae572 be99a446 b4b41085
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 92
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34b36b b890c477 be7a54a3
+2 1 3f9ae572 be99a446 b4886b78
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 93
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34a417 b890c4db be7a35fa
+2 1 3f9ae572 be99a446 b45c0bd9
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 94
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3494c3 b890c53f be7a1751
+2 1 3f9ae572 be99a446 b4274486
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 95
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34856f b890c5a3 be79f8a8
+2 1 3f9ae572 be99a446 b403baf4
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 96
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e34761b b890c607 be79d9ff
+2 1 3f9ae572 be99a446 b3c05d17
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 97
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 98
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 99
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 100
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 101
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 102
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 103
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 104
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 105
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 106
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 107
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 108
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 109
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 110
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 111
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 112
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 113
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 114
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 115
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 116
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 117
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 118
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 119
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0
+step 120
+bodies 5
+0 1 00000000 bf800000 00000000
+1 1 3e3466c7 b890c66b be79bb57
+2 1 3f9ae572 be99a446 b39bcb69
+3 1 bf63eb35 be800481 00000000
+4 1 00000000 3fc00000 00000000
+contactBegin 0
+contactEnd 0
+contactHit 0
+sensorBegin 0
+sensorEnd 0

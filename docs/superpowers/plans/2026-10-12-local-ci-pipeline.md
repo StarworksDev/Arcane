@@ -18,6 +18,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-12-local-ci-pipeline-design.md` (rev 2, `cbb63f12`). Executors read both documents.
 
+**Superseded in part (2026-10-17, review fix round 1).** Current policy is [docs/ci.md](../../ci.md). The second CI seed is `(run_number + 50021) mod 4294967296`. Only a non-pull-request run on `main` publishes the CI image. A pull request whose image inputs changed builds and verifies the image locally, does not push it, and skips the Linux legs that need the registry image. Script bodies, test pins, and workflow YAML below are the 2026-10-12 steps.
+
 **Worktree / branch:** `D:/dev/starworks/Arcane-ci`, `ci/local-pipeline` (off `main` `946092fb`). Shell commands below are Git Bash unless marked PowerShell; `cd /d/dev/starworks/Arcane-ci` first.
 
 ## Global Constraints
@@ -83,7 +85,7 @@
 | R8 | s1.1 apt `--snapshot` on every call | Bootstrap `ca-certificates` from the base image's archive, then set `APT::Snapshot` in `apt.conf.d`, and guard that the lists came from snapshot.ubuntu.com | The snapshot service is HTTPS-only, and the base image has no TLS roots |
 | R9 | s1.4 rsync excludes | One explicit filter file, `scripts/ci/rsync-filter.txt`, not a `.gitignore` merge | `ReferenceProject/Saved/verify-layout.ini` is tracked but matches `.gitignore`'s `*.ini`; a gitignore filter would drop it |
 | R10 | s1.4 "compiler launch through ccache" | The image has `/usr/lib/ccache/{gcc-14,g++-14,clang-19,clang++-19}` links; `local.ps1` puts `/usr/lib/ccache` first on `PATH` | Hosted CI keeps plain compilers (s6: no ccache in hosted CI) |
-| R11 | s1.4 `-Seeds 2` "runs CI's pair" | Adds `-Seed N` (CI's N = the run number). The pair is `N`, `N50021`, refused when it overflows Catch2's 32-bit seed. The default random N is < 42950 | s3.3 compares a local run with a specific CI run |
+| R11 | s1.4 `-Seeds 2` "runs CI's pair" | Adds `-Seed N` (CI's N = the run number). The pair is `N`, `(N + 50021) mod 4294967296`. The default random N is < 42950 | s3.3 compares a local run with a specific CI run |
 | R12 | s3.5 "every `uses:` is pinned" | The Discord notify action is pinned too (it was `@main`) | The acceptance check is literal |
 | R13 | s1.1 / s3.2 "a writable runtime dir for root" + GPU-lane risk | `verify-image.sh` starts headless weston and Xvfb as root at image-build time | Surfaces the GPU-lane casualty before any leg runs |
 | R14 | — | `vulkan-tools` added to the image | `verify-image.sh` uses `vulkaninfo` to prove lavapipe under Xvfb |
@@ -371,8 +373,8 @@ function Resolve-LocalRuns {
     return ,$runs
 }
 
-# One seed, or CI's pair: SEED_A = N, SEED_B = "<N>50021" (ci.yml). Catch2's
-# --rng-seed is 32-bit, so a pair that overflows is refused.
+# One seed, or CI's pair: SEED_A = N, SEED_B = (N + 50021) mod 4294967296
+# (docs/ci.md). The body below is the 2026-10-12 concatenation step.
 function Get-SeedList {
     param([Parameter(Mandatory)][string]$Seed, [ValidateSet(1, 2)][int]$Seeds = 1)
     if ($Seed -notmatch '^[0-9]+$') { throw "local: -Seed must be a non-negative integer (got '$Seed')" }
@@ -1877,7 +1879,9 @@ Create `scripts/ci/tests/test-ci-image.sh`:
 #!/usr/bin/env bash
 # Tests for scripts/ci/ci-image.sh with a stub `docker` on PATH (no daemon,
 # no registry): a published tag is reused, a missing one is built + pushed +
-# verified on a same-repo run, and refused -- never built -- on a fork PR.
+# verified and pushed on a non-pull-request main run, verified locally
+# without a push on a same-repo pull request, and refused -- never built --
+# on a fork PR. The body below is the 2026-10-12 same-repo push step.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 fails=0
@@ -2215,7 +2219,8 @@ LINTED="$REPO/scripts/ci/build.sh $REPO/scripts/ci/container-leg.sh"
 #
 # Legs run one at a time, Windows first, and every requested leg runs even
 # when one fails. Seeds: one random seed (printed) by default; -Seeds 2 runs
-# CI's pair (N, N50021); -Seed N fixes N (CI's N is the run number). Jobs:
+# CI's pair (N, (N + 50021) mod 4294967296); -Seed N fixes N (CI's N is the
+# run number). Jobs:
 # Linux = min(CPUs, memory GB / 2) of what Docker reports, Windows = msbuild
 # /m; -Jobs N sets both. Logs: logs\local\<leg>-<Config>\.
 # Exit: 0 every leg passed; 1 a leg failed; 2 preflight / image / tag failure.
@@ -2511,10 +2516,13 @@ name: CI
 #   image-tag         the CI scripts' own tests, then the Linux image tag
 #                     (scripts/ci/image-tag.sh: a hash of ci/linux/Dockerfile
 #                     and the repo files it copies)
-#   ci-image          ghcr.io/starworksdev/arcane-ci:<tag> -- reused, or built +
-#                     pushed + verified when missing (scripts/ci/ci-image.sh; the
-#                     ONLY job with packages: write); outputs its digest
-#   build-test-linux  the Linux legs, inside that image pinned by digest
+#   ci-image          ghcr.io/starworksdev/arcane-ci:<tag> -- reused, or built,
+#                     verified, and pushed only on a non-pull-request run of
+#                     main (scripts/ci/ci-image.sh; the ONLY job with
+#                     packages: write). A pull request with a new tag verifies
+#                     locally and outputs an empty digest
+#   build-test-linux  the Linux legs, inside that image pinned by digest.
+#                     Skipped when the digest is empty
 #   build-test        the Windows and macOS legs, on the hosted runners
 #   notify            Discord FAILED / RECOVERED, never for pull requests
 #
@@ -2651,6 +2659,8 @@ jobs:
       CXX: ${{ matrix.cxx }}
       # Two seeds per leg (ArcaneTests runs in RANDOM order). Both are printed
       # in the suite banner and in each JUnit file name.
+      # 2026-10-12 step below concatenates. Current SEED_B is
+      # (run_number + 50021) mod 4294967296, computed in bash (docs/ci.md).
       SEED_A: ${{ github.run_number }}
       SEED_B: ${{ github.run_number }}50021
       LINUX_GPU_LANE: ${{ matrix.leg == 'linux-gcc-14' && matrix.config == 'Debug' }}
@@ -2778,6 +2788,8 @@ jobs:
       ARCANE_CI_LEG: ${{ matrix.leg }}
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      # 2026-10-12 step below concatenates. Current SEED_B is
+      # (run_number + 50021) mod 4294967296, computed in bash (docs/ci.md).
       SEED_A: ${{ github.run_number }}
       SEED_B: ${{ github.run_number }}50021
       MACOS_GPU_LANE: ${{ matrix.leg == 'macos-appleclang' && matrix.config == 'Debug' }}
@@ -3039,8 +3051,8 @@ push to the same ref cancels the older run (`concurrency: ci-<ref>`). Its jobs:
 | Job | What it does |
 |---|---|
 | `image-tag` | Runs the CI scripts' own tests, then computes the Linux image tag (`scripts/ci/image-tag.sh`) |
-| `ci-image` | Makes sure `ghcr.io/starworksdev/arcane-ci:<tag>` exists -- reused, or built, pushed and verified (`scripts/ci/ci-image.sh`) -- and outputs its digest. The only job with `packages: write` |
-| `build-test-linux` | The two Linux legs, inside that image pinned by digest |
+| `ci-image` | Reuses `ghcr.io/starworksdev/arcane-ci:<tag>` when that tag is already published. Only a non-pull-request run on `main` builds a missing tag, verifies it, and then pushes (`scripts/ci/ci-image.sh`). A pull request whose image inputs changed builds and verifies the image locally, does not push it, and outputs an empty digest. The only job with `packages: write` |
+| `build-test-linux` | The two Linux legs, inside that image pinned by digest. Skipped when the digest is empty (a pull request that verified a new tag locally, or a failed `ci-image`) |
 | `build-test` | The Windows and macOS legs, on the hosted runners |
 | `notify` | Discord FAILED / RECOVERED; never for pull requests |
 
@@ -3123,29 +3135,33 @@ docker build --target build --build-context scripts=scripts -f ci/linux/Dockerfi
 docker run --rm -v "$PWD/ci/linux:/v:ro" arcane-ci:dev bash /v/verify-image.sh
 ```
 
-**Publishing:** `ci-image` reuses a published tag or, on a same-repo run,
-builds, pushes and verifies it (`scripts/ci/ci-image.sh`). The legs run on
-`image@sha256:<digest>`, never the tag: the tag names the inputs, the digest
-names the image. The package is **public** (Arcane is public, the image holds
-no secrets), so pulls need no credentials; the legs still pass the workflow
-token so a not-yet-public package also works.
+**Publishing:** `ci-image` reuses a published tag. Only a non-pull-request run
+on `main` (a push to `main`, or `workflow_dispatch` on `refs/heads/main`)
+builds a missing tag, verifies it (`verify-image.sh`) and only then pushes it
+(`scripts/ci/ci-image.sh`), so a failed verify publishes nothing. `PUBLISH` is
+that condition. The legs that run use `image@sha256:<digest>`, never the tag:
+the tag names the inputs, the digest names the image. The package is **public**
+(Arcane is public, the image holds no secrets), so pulls need no credentials;
+the legs still pass the workflow token so a not-yet-public package also works.
+A published tag is reused, so a later edit of `scripts/ci/ci-image.sh` (not a
+tag input) does not rebuild or replace it.
 
-**Fork pull requests** cannot publish: when a fork changes an image input,
-`ci-image` fails naming the tag. Re-running it from a branch of this
-repository executes the fork's Dockerfile and scripts in the one job that
-holds `packages: write`, so a maintainer **reviews the `ci/linux/` and
-`scripts/` diff first**. A Dependabot PR, if one is ever configured, behaves
-the same way.
+**Pull requests do not publish.** A pull request whose image inputs changed
+builds and verifies the image locally, does not push it, and writes an empty
+digest. The Linux legs that need the registry image are skipped until a
+non-pull-request run on `main` publishes the tag. A pull request whose tag is
+already published reuses that digest and runs the Linux legs.
 
-**Same-repo branches can publish.** `packages: write` covers every same-repo
-run. `scripts/ci/ci-image.sh` is not a tag input, so a branch that edits it
-(say, to pass a build argument) can push a differently built image over a tag
-`main` already uses. The legs pin the digest read from that tag at run time,
-so the pin does not help. This is accepted with the current solo / trusted
-writer set; the control is review of `ci/linux/` and `scripts/ci/` changes.
+**Fork pull requests** cannot publish, and a missing tag is not built:
+`ci-image` fails naming the tag. A Dependabot pull request is treated the same
+way (`SAME_REPO` stays false). The image is published by the non-pull-request
+`main` run after the change is reviewed and merged, so the `ci/linux/` and
+`scripts/` diff is reviewed before that push.
 
-**Retention:** every image-input change on any branch publishes a tag, and
-nothing deletes old ones yet; the package size is watched (cleanup deferred).
+**Retention:** an image-input change publishes a tag only from a
+non-pull-request run on `main`. A pull request verifies locally and does not
+publish. Nothing deletes old tags yet; the package size is watched (cleanup
+deferred).
 
 ## Local runs
 
@@ -3171,8 +3187,9 @@ scripts\ci\local.ps1 -Full                    # windows-msvc, linux-gcc-14, linu
   through ccache (volume `arcane-ccache`; local only).
 - **Uncommitted changes are included.** Legs run one at a time (Windows first)
   and every leg runs even when one fails. Seeds: one random seed by default
-  (printed); `-Seeds 2` runs CI's pair; `-Seed N` fixes N (CI's N is the run
-  number). Jobs: Linux `min(CPUs, memory GB / 2)` of what Docker reports,
+  (printed); `-Seeds 2` runs CI's pair, `N` and `(N + 50021) mod 4294967296`;
+  `-Seed N` fixes N (CI's N is the run number). Jobs: Linux
+  `min(CPUs, memory GB / 2)` of what Docker reports,
   Windows `msbuild /m`; `-Jobs` sets both.
 - **Output:** one table (leg, config, verdict, minutes, build, per-seed test
   counts, image, log directory), the first compiler/linker errors of a failed

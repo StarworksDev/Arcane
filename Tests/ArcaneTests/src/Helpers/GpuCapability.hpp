@@ -27,6 +27,13 @@ namespace Arcane::Test
     // Never throws; a failed probe is a false, not an error.
     [[nodiscard]] bool BackendAvailable(GraphicsBackend backend);
 
+    // Called from test_main after Catch::Session::run returns and before the
+    // post-run RenderErrorTotal sample. Probe() does not keep the device it
+    // creates, and no helper stores an NriDevice in static or shared storage,
+    // so this has nothing to release. It is the seam a later shared device
+    // would be dropped through, while main can still sample its teardown.
+    void ReleaseSharedTestGpuDevices();
+
     // The human name used in the skip message.
     [[nodiscard]] const char* BackendName(GraphicsBackend backend);
 

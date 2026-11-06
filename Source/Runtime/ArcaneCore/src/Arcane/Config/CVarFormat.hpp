@@ -6,6 +6,7 @@
 
 #include <Arcane/Config/CVarTypes.hpp>
 #include <Arcane/Core/Api.hpp>
+#include <Json.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -34,6 +35,11 @@ namespace Arcane
     // space-separated in shortest round-trip form; Color as hex; Enum as its
     // name, or the ordinal's digits when it is outside `enumNames`.
     ARC_CORE_API std::string FormatCVarValue(const CVarValue& value, const std::vector<std::string>& enumNames = {});
+
+    // The value as JSON: bool -> boolean, integers/floats -> number, string ->
+    // string, Vec2/3/4 -> number arrays of length 2/3/4. Color, Enum and any
+    // other type -> the FormatCVarValue text as a JSON string.
+    ARC_CORE_API nlohmann::json CVarValueToJson(const CVarValue& value);
 
     // Parse console / --set text as `type`. On failure: nullopt, and `error`
     // holds the reason the console shows ("expected int32", ...).

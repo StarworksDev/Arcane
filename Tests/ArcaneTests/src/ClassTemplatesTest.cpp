@@ -127,7 +127,6 @@ TEST_CASE("ClassTemplates::Render System maps every phase and role choice", "[ed
     for (const PhaseCase c : {
              PhaseCase{0, "Arcane::SystemPhase::FixedUpdate", true},
              PhaseCase{1, "Arcane::SystemPhase::Update", false},
-             PhaseCase{2, "Arcane::SystemPhase::Render", false},
          })
     {
         const auto options = ClassTemplates::SystemOptionsForChoiceIndices(c.index, 0);
@@ -161,11 +160,11 @@ TEST_CASE("ClassTemplates::Render System maps every phase and role choice", "[ed
 
 TEST_CASE("ClassTemplates::Render System normalizes stale choices and invalid typed options", "[editor]")
 {
-    STATIC_REQUIRE(ClassTemplates::kSystemPhaseChoiceCount == 3);
+    STATIC_REQUIRE(ClassTemplates::kSystemPhaseChoiceCount == 2);   // Render retired (F5 plan 1 Task 5)
     STATIC_REQUIRE(ClassTemplates::kSystemRoleChoiceCount == 3);
     CHECK(std::string_view(ClassTemplates::SystemPhaseChoiceLabel(0)) == "Fixed Update");
     CHECK(std::string_view(ClassTemplates::SystemPhaseChoiceLabel(1)) == "Update");
-    CHECK(std::string_view(ClassTemplates::SystemPhaseChoiceLabel(2)) == "Render");
+    CHECK(std::string_view(ClassTemplates::SystemPhaseChoiceLabel(2)) == "Fixed Update");   // the retired Render slot
     CHECK(std::string_view(ClassTemplates::SystemPhaseChoiceLabel(99)) == "Fixed Update");
     CHECK(std::string_view(ClassTemplates::SystemRoleChoiceLabel(0)) == "Both");
     CHECK(std::string_view(ClassTemplates::SystemRoleChoiceLabel(1)) == "Server");
@@ -175,6 +174,8 @@ TEST_CASE("ClassTemplates::Render System normalizes stale choices and invalid ty
     const auto choices = ClassTemplates::SystemOptionsForChoiceIndices(-1, 99);
     CHECK(choices.phase == Arcane::SystemPhase::FixedUpdate);
     CHECK(choices.role == Arcane::RoleMask::Both);
+    // A stale index 2 (the retired Render choice) is a Fixed Update system.
+    CHECK(ClassTemplates::SystemOptionsForChoiceIndices(2, 0).phase == Arcane::SystemPhase::FixedUpdate);
 
     ClassTemplates::SystemOptions invalid;
     invalid.phase = static_cast<Arcane::SystemPhase>(255);
@@ -183,6 +184,15 @@ TEST_CASE("ClassTemplates::Render System normalizes stale choices and invalid ty
         ClassTemplates::Kind::System, "Movement", "Aphelyon", invalid);
     CHECK(Has(normalized.source, "Arcane::SystemPhase::FixedUpdate"));
     CHECK(Has(normalized.source, "Arcane::RoleMask::Both"));
+
+    // The retired Render phase is never written, even when typed in directly:
+    // a Render-phase system would register and never run.
+    ClassTemplates::SystemOptions render;
+    render.phase = Arcane::SystemPhase::Render;
+    const auto retired = ClassTemplates::Render(
+        ClassTemplates::Kind::System, "Movement", "Aphelyon", render);
+    CHECK(Has(retired.source, "Arcane::SystemPhase::FixedUpdate"));
+    CHECK_FALSE(Has(retired.source, "Arcane::SystemPhase::Render"));
 }
 
 TEST_CASE("ClassTemplates::Render PlainClass: a class in the project namespace with its own .cpp", "[editor]")

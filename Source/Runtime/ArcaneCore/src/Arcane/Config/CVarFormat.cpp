@@ -312,6 +312,28 @@ namespace Arcane
         return std::nullopt;
     }
 
+    nlohmann::json CVarValueToJson(const CVarValue& value)
+    {
+        switch (value.type)
+        {
+        case CVarType::Bool: return value.AsBool();
+        case CVarType::Int32: return value.AsInt32();
+        case CVarType::UInt32: return value.AsUInt32();
+        case CVarType::Int64: return value.AsInt64();
+        case CVarType::UInt64: return value.AsUInt64();
+        case CVarType::Float32: return value.AsFloat32();
+        case CVarType::Float64: return value.AsFloat64();
+        case CVarType::String: return value.AsString();
+        case CVarType::Vec2: { const CVarVec2 v = value.AsVec2(); return nlohmann::json::array({ v.x, v.y }); }
+        case CVarType::Vec3: { const CVarVec3 v = value.AsVec3(); return nlohmann::json::array({ v.x, v.y, v.z }); }
+        case CVarType::Vec4: { const CVarVec4 v = value.AsVec4(); return nlohmann::json::array({ v.x, v.y, v.z, v.w }); }
+        case CVarType::Color:
+        case CVarType::Enum:
+            break;
+        }
+        return nlohmann::json(FormatCVarValue(value));
+    }
+
     const char* CVarTypeName(CVarType type)
     {
         switch (type)

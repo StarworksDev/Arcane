@@ -30,7 +30,7 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Guid.hpp>
-#include <Arcane/Scene/SceneResources.hpp>   // Arcane::SpriteEntry (full type: Table()'s value type)
+#include <Arcane/Scene/SceneCacheRecords.hpp>   // Arcane::SpriteEntry (full type: Table()'s value type)
 
 #include <filesystem>
 #include <functional>

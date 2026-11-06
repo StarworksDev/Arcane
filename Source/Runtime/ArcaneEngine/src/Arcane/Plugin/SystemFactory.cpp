@@ -5,6 +5,9 @@
 #include <Arcane/Sim/SystemSchedulers.hpp>
 
 #include <algorithm>
+#include <mutex>
+#include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace Arcane
@@ -20,6 +23,27 @@ namespace Arcane
                 case SystemPhase::Render:      return "Render";
             }
             return "Unknown";
+        }
+
+        // THE RENDER PHASE IS RETIRED (F5 plan 1 Task 5): sprites are submitted
+        // once per frame by the frame extract (Arcane/Render/ExtractFrame.hpp),
+        // and no host runs the render scheduler any more. A Render-phase
+        // registration is still ACCEPTED -- the enum value and the registration
+        // ABI are unchanged, so an older module still loads -- but its system
+        // never runs, and the author is told so ONCE per system name for the
+        // process (a hot reload re-registers the same names and stays quiet).
+        void WarnRetiredRenderPhase(const std::string& name)
+        {
+            static std::mutex mutex;
+            static std::unordered_set<std::string> warned;
+            {
+                std::scoped_lock lock(mutex);
+                if (!warned.insert(name).second)
+                    return;
+            }
+            ARC_WARN("SystemFactories: '{}' is registered in the Render phase, which F5 retired -- "
+                     "Render-phase systems never run; draw output now comes from components the "
+                     "frame extract reads (Arcane/Render/ExtractFrame.hpp)", name);
         }
     }
 
@@ -64,6 +88,9 @@ namespace Arcane
                       e.name, PhaseName(e.phase));
             return;
         }
+
+        if (e.phase == SystemPhase::Render)
+            WarnRetiredRenderPhase(e.name);
 
         e.owner = m_openOwner;
         m_entries.push_back(std::move(e));

@@ -377,7 +377,7 @@ namespace Arcane
         if (!im.services.runtime)
             return;
 
-        im.globals.time           = (float)frame.now;
+        im.globals.time           = (float)frame.sceneTime.value_or(frame.now);
         im.globals.deltaTime      = (float)frame.dt;
         im.globals.viewportWidth  = frame.viewportWidth;
         im.globals.viewportHeight = frame.viewportHeight;

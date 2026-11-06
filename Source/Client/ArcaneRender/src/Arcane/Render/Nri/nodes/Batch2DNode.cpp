@@ -21,6 +21,7 @@
 #include <Arcane/Material/MaterialInstance.hpp>
 #include <Arcane/Material/MaterialTemplate.hpp>
 #include <Arcane/Render/Batcher2D.hpp>        // Batch2DDrained / Batch2DVertex / Batch2DDrawSpan
+#include <Arcane/Render/RenderFramePacket.hpp>   // the bound packet's copied batch (F5 plan 1 Task 5)
 #include <Arcane/Render/RenderBudgetSettings.hpp>   // RenderBatch2dSettings -- the caps the constructor latches
 #include <Arcane/Render/RenderLookSettings.hpp>     // render.clearColor, render.sprite.filter
 #include <Arcane/Render/RenderErrorLatch.hpp>
@@ -44,11 +45,12 @@ namespace Arcane
         }
 
         // The engine's canvas clear is render.clearColor (RenderSettings, Live):
-        // AddBatch2DNode reads it ONCE per frame and the same value is both the
-        // canvas's optimized clear value and Record()'s clear, so the two can
-        // never disagree (D3D12 warns on a clear that differs from the
-        // resource's). This is the only node that clears the canvas at all, so
-        // there is exactly one background colour in the process.
+        // DeclareClearedCanvas reads it ONCE per frame and the same value is both
+        // the canvas's optimized clear value and its CLEAR colour load op, so the
+        // two can never disagree (D3D12 warns on a clear that differs from the
+        // resource's). DeclareClearedCanvas is the only place the canvas clear is
+        // declared -- batch2d on a world frame, letterbox on a chrome frame both
+        // call it -- so there is exactly one background colour in the process.
         //
         // The canvas format is GraphCanvasFormat() (NriGraphContext.hpp,
         // render.canvasFormat latched once per process), because the
@@ -1392,18 +1394,10 @@ namespace Arcane
     {
         const nri::CoreInterface& core = context.core;
 
-        // THE CLEAR. Graph attachments are LOAD/STORE and the declaration API
-        // carries no clear op, so a node that needs a cleared target clears it
-        // from its own exec fn -- the seam Task 7 chose and documented in
-        // NriGraphContext::BuildFrame. The executor has already opened
-        // rendering with the canvas attached and set the full-target viewport
-        // and scissor; this must not do either itself.
-        nri::ClearAttachmentDesc clear = {};
-        clear.planes               = nri::PlaneBits::COLOR;
-        clear.colorAttachmentIndex = 0;
-        clear.value.color.f = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
-        core.CmdClearAttachments(context.cmd, &clear, 1, nullptr, 0);
-
+        // The canvas is already cleared to render.clearColor: AddBatch2DNode's
+        // setup (DeclareClearedCanvas) declares a CLEAR colour load op, which the
+        // executor applies when it begins rendering (F5 plan 1, Task 2).
+        // `clearColor` is therefore unused here; see the header.
         if (batch.spans.empty() || batch.vertices.empty() || batch.indices.empty())
             return;   // an empty frame is a cleared canvas, not an error
 
@@ -1615,18 +1609,65 @@ namespace Arcane
         }
     }
 
+    RgTexture DeclareClearedCanvas(RenderGraph& graph, RenderGraphBuilder& builder,
+                                   std::uint32_t width, std::uint32_t height)
+    {
+        const CVarColor clearColor = Settings<RenderSettings>().clearColor;
+        nri::ClearValue clear{};
+        clear.color.f = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
+
+        RgTextureDesc desc;
+        desc.format                 = GraphCanvasFormat();
+        desc.width                  = width;
+        desc.height                 = height;
+        desc.optimizedClearValue    = clear;
+        desc.hasOptimizedClearValue = true;
+        const RgTexture canvas = builder.CreateTexture("canvas", desc);
+        builder.Write(canvas, RgUsage::ColorWrite);
+        graph.SetColorAttachments(std::span<const RgTexture>(&canvas, 1));
+
+        RgAttachmentOp op;
+        op.load  = RgLoadOp::Clear;
+        op.clear = clear;
+        graph.SetColorAttachmentOps(std::span<const RgAttachmentOp>(&op, 1));
+        return canvas;
+    }
+
     RgTexture AddBatch2DNode(RenderGraph& graph, NriGraphContext* context,
                              std::uint32_t width, std::uint32_t height)
     {
-        // Drained at DECLARATION time on purpose: it is pure CPU work (sort +
-        // index/span build) with no ring allocation in it, and doing it here
-        // means the exec fn only touches the GPU. The returned spans view the
-        // batcher's own storage and stay valid until its next Begin(), which is
-        // a whole frame away.
+        // Resolved at DECLARATION time on purpose: it is pure CPU work with no
+        // ring allocation in it, and doing it here means the exec fn only
+        // touches the GPU.
+        //
+        // WITH A BOUND PACKET (F5 plan 1 Task 5) the batch is the packet's
+        // copy, which ExtractFrame drained out of the host's batcher: the
+        // spans view the packet's vectors, which live until FramesInFlight()
+        // later extracts recycle the slot, and nothing is drained again.
+        // Prepare still resolves the REGISTERED materials on CurrentBatch(),
+        // the same batcher extract submitted into (the hosts pass it as
+        // FrameDesc::batch), because that is where the registrations live.
+        //
+        // WITHOUT ONE (thumbnail harvest, shader preview) the batcher is
+        // drained here; those spans view the batcher's own storage and stay
+        // valid until its next Begin(), which is a whole frame away.
         const nri::Format canvasFormat = GraphCanvasFormat();
         const CVarColor clearColor = Settings<RenderSettings>().clearColor;   // once per frame; see the top of this file
         Batch2DDrained drained;
-        if (context)
+        if (context && context->Packet())
+        {
+            const RenderFramePacket* packet = context->Packet();
+            drained.vertices = packet->batchVertices;
+            drained.indices = packet->batchIndices;
+            drained.spans = packet->batchSpans;
+            drained.globals = &packet->globals;
+            drained.viewProjection = packet->viewProjection;
+            drained.viewport = glm::vec2(float(width), float(height));
+            if (Batcher2D* batcher = context->CurrentBatch())
+                if (Batch2DNode* node = context->Batch2D())
+                    node->Prepare(*batcher, drained, canvasFormat);
+        }
+        else if (context)
         {
             if (Batcher2D* batcher = context->CurrentBatch())
             {
@@ -1654,15 +1695,7 @@ namespace Arcane
         graph.AddNode("batch2d", RenderGraph::NodeKind::Raster,
             [&](RenderGraphBuilder& builder)
             {
-                RgTextureDesc desc;
-                desc.format = canvasFormat;
-                desc.width  = width;
-                desc.height = height;
-                desc.optimizedClearValue.color.f = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
-                desc.hasOptimizedClearValue = true;
-                canvas = builder.CreateTexture("canvas", desc);
-                builder.Write(canvas, RgUsage::ColorWrite);
-                graph.SetColorAttachments(std::span<const RgTexture>(&canvas, 1));
+                canvas = DeclareClearedCanvas(graph, builder, width, height);
             },
             [context, drained, canvasFormat, clearColor](RenderGraphNodeContext& nodeContext)
             {

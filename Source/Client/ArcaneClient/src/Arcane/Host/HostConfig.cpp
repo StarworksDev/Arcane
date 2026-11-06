@@ -3,7 +3,9 @@
 #include <Arcane/Host/HostVerifyHooks.hpp>
 #include <cmath>    // std::isfinite -- --max-diff-pixel-ratio's range refusal below
 #include <algorithm>   // std::find -- SanitizeRelaunchLine's strip-set lookups
+#include <charconv>    // std::from_chars -- --remote-idle-exit's whole-seconds parse
 #include <cstdio>
+#include <string>
 #include <format>
 #include <string_view>
 namespace Arcane
@@ -19,12 +21,18 @@ namespace Arcane
         // --bless and --max-diff-* have no meaning without a parent that is
         // already going, and --probe/--fixed-dt/--fixed-time cannot parse
         // without --headless.
+        //
+        // The Servitor remote flags (Task 10) are stripped too: a relaunch is
+        // a fresh SESSION, not a re-armed remote host, and the descriptor path
+        // is not the crash reporter's to repeat. Listed unconditionally -- a
+        // Dist Parse refuses them, so stripping costs nothing there.
         constexpr std::string_view kStripWithValue[] = {
             "crash-gpu", "hang-main", "frames", "report", "compare", "settle", "screenshot",
             "settle-timeout", "probe", "max-diff-pixels", "max-diff-pixel-ratio",
             "fixed-dt", "fixed-time", "pick-probe", "window-size",
+            "remote-descriptor", "remote-idle-exit", "client", "owner-pid",
         };
-        constexpr std::string_view kStripBareFlags[] = { "headless", "bless" };
+        constexpr std::string_view kStripBareFlags[] = { "headless", "bless", "remote" };
 
         [[nodiscard]] bool InSet(std::span<const std::string_view> set, std::string_view name)
         {
@@ -40,6 +48,40 @@ namespace Arcane
                 return arg;
             return "\"" + arg + "\"";
         }
+
+#if defined(ARC_BUILD_DIST)
+        // Dist: the remote surface is compiled out (the HostConfig fields with
+        // the rest of the non-Dist block, and every Arcane::Remote symbol), so
+        // the three flags are not registered. Scanned BEFORE Cli::Parse, which
+        // would otherwise refuse them as a generic "unknown argument" with a
+        // usage dump -- the caller should learn WHY, in one sentence. Both Cli
+        // spellings: "--name value" and "--name=value".
+        [[nodiscard]] bool NamesRemoteFlag(int argc, char** argv)
+        {
+            for (int i = 1; i < argc; ++i)
+            {
+                std::string_view arg(argv[i]);
+                if (!arg.starts_with("--"))
+                    continue;
+                arg.remove_prefix(2);
+                const std::string_view name = arg.substr(0, arg.find('='));
+                if (name == "remote" || name == "remote-descriptor" || name == "remote-idle-exit" || name == "client"
+                    || name == "owner-pid")
+                    return true;
+            }
+            return false;
+        }
+#else
+        // --remote-idle-exit <seconds>: a whole number that fits the field.
+        // from_chars over the WHOLE token refuses a sign, a fraction, an
+        // empty value and an out-of-range count alike.
+        [[nodiscard]] bool ParseIdleExitSeconds(const std::string& text, std::uint32_t& out)
+        {
+            const char* end = text.data() + text.size();
+            const auto r = std::from_chars(text.data(), end, out);
+            return !text.empty() && r.ec == std::errc{} && r.ptr == end;
+        }
+#endif
     }
 
     std::string SanitizeRelaunchLine(std::span<const std::string> argv)
@@ -81,6 +123,13 @@ namespace Arcane
 
     HostConfig::ParseOutcome HostConfig::Parse(int argc, char** argv)
     {
+#if defined(ARC_BUILD_DIST)
+        if (NamesRemoteFlag(argc, argv))
+        {
+            std::fprintf(stderr, "Servitor is compiled out of Dist builds\n");
+            return { std::nullopt, 2 };
+        }
+#endif
         Cli cli{ "Arcane Runtime", "standalone runtime host" };
         cli.Option("backend", kDefaultBackendCliName, "graphics backend: dx12|vulkan").Choices({ "dx12", "vulkan" });
         cli.Option("frames",  "0",           "render N frames then exit").Type(CliType::Uint);
@@ -182,6 +231,18 @@ namespace Arcane
         cli.Option("pick-probe", "",  "DEV: add the pick + JFA outline nodes, scripted "
                                       "onto the scene's first pickable entity, and print the entity id "
                                       "read back at canvas pixel x,y -- exit 0 on a hit, 1 on a miss");
+        // Servitor P0 (Task 10). Dist refuses all three before Cli::Parse
+        // (NamesRemoteFlag above); see HostConfig.hpp's remote block.
+        cli.Flag  ("remote",          std::string(kRemoteFlagHelp));   // states the AM1 hold (Task 29)
+        cli.Option("remote-descriptor", "", "DEV: write the remote attach descriptor to this path "
+                                            "(empty = under <project>/Saved/Remote/)");
+        cli.Option("remote-idle-exit", std::to_string(HostConfig{}.remoteIdleExitSeconds),
+                                      "DEV: with --remote, exit after this many seconds with no remote "
+                                      "request (0 = never)");
+        cli.Option("client", "", "DEV: with --remote, the caller name recorded in the attach descriptor "
+                                 "(servitor launch --client NAME; empty = unnamed)");
+        cli.Option("owner-pid", "0", "DEV: with --remote, exit when this process id is no longer running "
+                                     "(0 = watch none; opt-in, never defaulted)");
 #endif
 
         const Cli::Result r = cli.Parse(argc, argv);
@@ -272,6 +333,41 @@ namespace Arcane
 #if !defined(ARC_BUILD_DIST)
         cfg.crashGpuFrame = r.GetAs<std::uint64_t>("crash-gpu");
         cfg.hangMainFrame = r.GetAs<std::uint64_t>("hang-main");
+        cfg.remote           = r.Flag("remote");
+        cfg.remoteDescriptor = r.Get("remote-descriptor");
+        // Cli refuses a trailing --remote-descriptor itself, but takes the
+        // NEXT token as the value even when it is another flag, and accepts
+        // an explicit empty value. Neither is a path: refuse both (rule 3).
+        if (r.Supplied("remote-descriptor")
+            && (cfg.remoteDescriptor.empty() || cfg.remoteDescriptor.starts_with("--")))
+        {
+            std::fprintf(stderr, "error: --remote-descriptor wants a path (an empty value or another "
+                                 "flag is not a descriptor path)\n");
+            return { std::nullopt, 2 };
+        }
+        cfg.remoteClient     = r.Get("client");
+        // M2 (B7 fix round 1): Cli takes the NEXT token as the value even when
+        // it is another flag (--client --headless would swallow --headless).
+        if (r.Supplied("client") && (cfg.remoteClient.empty() || cfg.remoteClient.starts_with("--")))
+        {
+            std::fprintf(stderr, "error: --client wants a caller name (an empty value or another "
+                                 "flag is not a name)\n");
+            return { std::nullopt, 2 };
+        }
+        if (r.Supplied("owner-pid") && !ParseIdleExitSeconds(r.Get("owner-pid"), cfg.ownerPid))
+        {
+            std::fprintf(stderr, "error: --owner-pid wants a process id (a whole number, 0 = none), "
+                                 "got '%s'\n", r.Get("owner-pid").c_str());
+            return { std::nullopt, 2 };
+        }
+        cfg.remoteIdleExitSupplied = r.Supplied("remote-idle-exit");
+        if (cfg.remoteIdleExitSupplied
+            && !ParseIdleExitSeconds(r.Get("remote-idle-exit"), cfg.remoteIdleExitSeconds))
+        {
+            std::fprintf(stderr, "error: --remote-idle-exit wants a whole number of seconds "
+                                 "(0 = never), got '%s'\n", r.Get("remote-idle-exit").c_str());
+            return { std::nullopt, 2 };
+        }
 #endif
 
         // --window-size WxH (T3-D6 fix round 1). Parsed and range-checked
@@ -550,7 +646,17 @@ namespace Arcane
         // by any means it owns, and it will sit there until something else
         // reaps it. Refuse at parse time -- the same treatment, and the same
         // idiom, --probe and --screenshot already get one screen up.
-        if (cfg.headless && cfg.maxFrames == 0)
+        //
+        // EXCEPT under --remote (Servitor P0, Task 10): an armed host HAS a
+        // stop path (`servitor quit`) and ends itself after --remote-idle-exit
+        // seconds with no request, so the reason for the refusal is gone.
+        // Without --remote the refusal and its text stand unchanged.
+#if !defined(ARC_BUILD_DIST)
+        const bool remoteArmed = cfg.remote;
+#else
+        const bool remoteArmed = false;   // compiled out; Dist refused --remote above
+#endif
+        if (cfg.headless && cfg.maxFrames == 0 && !remoteArmed)
         {
             std::fprintf(stderr, "error: --headless requires --frames N (an unmapped window has no "
                                  "close button and cannot be focused for the quit action, so an "

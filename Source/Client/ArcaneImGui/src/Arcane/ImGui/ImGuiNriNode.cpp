@@ -16,6 +16,9 @@
 
 #undef ERROR
 
+#include <Arcane/ImGui/ImDrawSnapshot.hpp>       // ImDrawSnapshotRebuild (ruling PR-1)
+#include <Arcane/Render/RenderFramePacket.hpp>   // Packet()->imgui / gameUi
+
 namespace Arcane
 {
     std::unique_ptr<ImGuiNriNode> ImGuiNriNode::Create(NriGraphContext& context)
@@ -85,10 +88,24 @@ namespace Arcane
                 // rebuild destroys a texture keyed to THIS graph's fence, and
                 // a second context on the same device has a fence timeline
                 // whose values mean nothing to it.
-                node->PrepareFrame(gameUi ? context->CurrentGameUiDrawData()
-                                          : context->CurrentImGuiDrawData(),
-                                    context->Graves(),
-                                    context->Graph().DebugSubmitCount());
+                //
+                // A bound packet's snapshot names the same ImTextureData objects
+                // the live draw data does, so this declaration-time rebuild can
+                // SetTexID before the record lambda's own rebuild calls GetTexID.
+                // A preview graph has no packet and keeps the live pointers.
+                if (context->Packet())
+                {
+                    const ImDrawSnapshot& snap = gameUi ? context->Packet()->gameUi : context->Packet()->imgui;
+                    ImDrawSnapshotRebuild rebuilt(snap);
+                    node->PrepareFrame(rebuilt.Data(), context->Graves(), context->Graph().DebugSubmitCount());
+                }
+                else
+                {
+                    node->PrepareFrame(gameUi ? context->CurrentGameUiDrawData()
+                                              : context->CurrentImGuiDrawData(),
+                                       context->Graves(),
+                                       context->Graph().DebugSubmitCount());
+                }
             }
         }
 
@@ -107,10 +124,21 @@ namespace Arcane
                 if (!context)
                     return;   // device-less declaration-shape drive
                 if (RenderOverlayNode* node = gameUi ? context->ImGuiGame() : context->ImGuiHud())
-                    node->Record(nodeContext,
-                                 gameUi ? context->CurrentGameUiDrawData()
-                                        : context->CurrentImGuiDrawData(),
-                                 target);
+                {
+                    if (context->Packet())
+                    {
+                        const ImDrawSnapshot& snap = gameUi ? context->Packet()->gameUi : context->Packet()->imgui;
+                        ImDrawSnapshotRebuild rebuilt(snap);
+                        node->Record(nodeContext, rebuilt.Data(), target);
+                    }
+                    else
+                    {
+                        node->Record(nodeContext,
+                                     gameUi ? context->CurrentGameUiDrawData()
+                                            : context->CurrentImGuiDrawData(),
+                                     target);
+                    }
+                }
             });
     }
 }

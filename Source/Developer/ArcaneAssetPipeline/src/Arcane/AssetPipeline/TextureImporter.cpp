@@ -1,7 +1,7 @@
 #include "Arcane/AssetPipeline/TextureImporter.hpp"
 
 #include "Arcane/AssetPipeline/CookKey.hpp"
-#include "Arcane/AssetPipeline/SourceHash.hpp"
+#include <Arcane/Assets/ArtifactCodec.hpp>
 
 #include <stb_image.h>
 
@@ -139,12 +139,10 @@ namespace Arcane::AssetPipeline
             return chain;
         }
 
-        // HashSourceBytes itself now lives in SourceHash.hpp (extracted at F2c Task 7, when
-        // MeshImporter.cpp needed the SAME fingerprint over a different byte sequence -- see
-        // that header's own banner for the full rationale and why this call site's INPUT is
-        // unchanged by the move: a .png has no external buffers, so `pngBytes` below is exactly
-        // what this function always hashed, and every existing texture artifact keeps its exact
-        // on-disk sourceHash).
+        // HashSourceBytes lives in the ArcaneAssets codec (ArtifactCodec.hpp): the pipeline and
+        // the runtime reader share the one function. This call site hashes `pngBytes` alone
+        // (a .png has no external buffers), so every texture artifact keeps its on-disk
+        // sourceHash.
 
         // ---- BC7 encode (bc7enc_rdo, plain non-RDO encoder) ----------------------------------
         // Deterministic by construction (spec's determinism ruling, F2b Task 4): bc7enc.cpp has

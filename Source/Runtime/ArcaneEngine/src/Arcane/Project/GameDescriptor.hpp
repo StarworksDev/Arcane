@@ -18,10 +18,11 @@
 namespace Arcane
 {
     // Every Runtime + Client module (ArcaneClient's closure plus Net and
-    // Crypto), the ImGui vendor module and ArcaneImGui. The build-side twin is
+    // Crypto), the ImGui vendor module, ArcaneImGui and ArcanePhysics2D (the
+    // 2D sim hook: Engine no longer links it, a game that simulates does). The build-side twin is
     // ARC_GAME_DEFAULT_MODULES in build/modules.lua; keep the two equal.
-    inline constexpr std::array<std::string_view, 5> kDefaultGameModules{
-        "ArcaneClient", "ArcaneImGui", "ImGui", "ArcaneNet", "ArcaneCrypto",
+    inline constexpr std::array<std::string_view, 6> kDefaultGameModules{
+        "ArcaneClient", "ArcaneImGui", "ImGui", "ArcaneNet", "ArcaneCrypto", "ArcanePhysics2D",
     };
 
     // "<moduleName>.arcmodule".

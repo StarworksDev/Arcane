@@ -57,6 +57,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 namespace Arcane
 {
@@ -130,10 +131,15 @@ namespace Arcane
         };
 
         // This frame's facts. `now` is the compile service's clock (monotonic
-        // seconds); viewport extent sizes the material globals.
+        // seconds): material and post Requests debounce against it and the
+        // compile service polls on it, so it must keep running. `sceneTime`,
+        // when set (--fixed-time), is the Time the material globals report
+        // instead of `now`; pinning it never pins the compile clock.
+        // Viewport extent sizes the material globals.
         struct FrameInfo
         {
             double now = 0.0;
+            std::optional<double> sceneTime;
             double dt  = 0.0;
             float  viewportWidth  = 0.0f;
             float  viewportHeight = 0.0f;
@@ -157,8 +163,8 @@ namespace Arcane
         // THE per-frame call. Sweep -> request -> pump -> latch -> publish, in
         // that order (see the .cpp for why each step sits where it does).
         //
-        // Call it BEFORE the frame's Batcher2D::Begin and before
-        // RunLoop::SubmitRender: the drain REGISTERS materials with the batcher
+        // Call it BEFORE the frame's Batcher2D::Begin and before its
+        // ExtractFrame: the drain REGISTERS materials with the batcher
         // (pipeline + binding-set table mutation), which does not belong inside
         // a Begin..Drain recording, and the tables it publishes are what that
         // frame's submission reads.
@@ -263,8 +269,8 @@ namespace Arcane
         // WHEN THIS MAY BE CALLED IS A LIFETIME CONTRACT, not a preference.
         // GpuSceneSync still looks the Guid up in MeshTable to decide
         // whether the entity is drawable; MeshCache::Invalidate ERASES that
-        // entry. So this must never land between a host's PrepareSceneForRender
-        // call (Host/GpuSceneHost.hpp) and the RenderFrame call that consumes its output. Both call
+        // entry. So this must never land between a host's ExtractFrame
+        // (which publishes the GPU scene) and the RenderFrame call that consumes its output. Both call
         // sites today satisfy that by construction: MeshDocument::Save and
         // MeshDocument::ApplyMeshData run from the editor's document phases
         // (PumpEditorDocuments / DrawEditorUi), which are strictly AFTER phase

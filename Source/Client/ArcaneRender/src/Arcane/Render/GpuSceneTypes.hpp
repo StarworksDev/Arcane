@@ -289,6 +289,16 @@ namespace Arcane
         [[nodiscard]] bool HasDraws() const noexcept { return !batches.empty() || !transparentDraws.empty(); }
     };
 
+    // The figures the HUD and the shutdown report read. Hosts copy this out of
+    // the extract packet instead of the whole GpuSceneFrame, so the copy
+    // allocates nothing. The editor snapshots it at the viewport extract: the
+    // scene-save cover extracts again and must not replace those figures.
+    struct GpuSceneFrameStats
+    {
+        GpuSceneFrame::Stats stats{};
+        std::uint32_t transparentDraws = 0;
+    };
+
     // Mutable execution-order state shared by the sync, cull, and mesh graph
     // callbacks for one declared frame. Reserve runs before graph declaration;
     // Apply updates the ready bits inside the sync callback, and later callbacks

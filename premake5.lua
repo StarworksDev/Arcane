@@ -443,7 +443,7 @@ group ""
 group "Programs"
 project "ArcaneRuntimeHost"
     arc_module_consumer(engine_modules,
-        ARC_MONOLITHIC_LAYOUT and { "ArcaneImGui" } or { "ArcaneVerify", "ArcaneImGui" },
+        ARC_MONOLITHIC_LAYOUT and { "ArcaneImGui" } or { "ArcaneVerify", "ArcaneImGui", "ArcaneRemote" },
         { stage = false })
     location(ARC_MONOLITHIC_PROJECTS and path.join(ARC_MONOLITHIC_PROJECTS, "ArcaneRuntimeHost") or "Source/Programs/ArcaneRuntimeHost")
     kind "StaticLib"
@@ -613,6 +613,259 @@ project "arcbuild"
     -- The driver loads ArcaneCore.dll from its own directory (dev bin
     -- layout: Binaries/<cfg>/arcbuild/); a packaged layout ships it beside the
     -- editor, where the DLL already is.
+    postbuildcommands(arcane_cmds {
+    })
+
+    filter "system:windows"
+        systemversion "latest"
+        buildoptions { "/Zc:__cplusplus", "/bigobj" }
+        fatalwarnings { "4715" }   -- falling off a value-returning function is UB, not a warning
+
+    filter "configurations:Debug"
+        defines { "ARC_BUILD_DEBUG" }
+        runtime "Debug"
+        symbols "on"
+
+    filter "configurations:Release"
+        defines { "ARC_BUILD_RELEASE", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "on"
+
+    filter "configurations:Dist"
+        defines { "ARC_BUILD_DIST", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "off"
+    filter {}
+
+-- ============================================================================
+-- arcane-abi-digest: the compiler-derived plugin ABI digest tool (3D-readiness
+-- Plan B, Task 1). HEADER-ONLY consumer of every engine module (links only ArcaneCore): it includes Core/AbiManifest.hpp, which evaluates sizeof /
+-- alignof / offsetof of the game-facing by-value closure. `--write` writes
+-- build/abi-digest.txt, `--check` fails when that file or kGamePluginABIDigest
+-- disagrees (scripts/ci/build.* run it after the engine build). The prebuild
+-- step copies the Engine group manifest (Plugin/AbiManifestEngine.hpp) with a
+-- comment line appended into Intermediate/AbiDigest; AbiDigestCommented.cpp
+-- compiles that copy so the [abi] test can prove a comment-only edit does not
+-- move the mix. Flags mirror a game TU (build/arcane.lua): /arch:AVX2,
+-- /Zc:__cplusplus.
+-- ============================================================================
+group "Programs"
+project "arcane-abi-digest"
+    arc_module_consumer(engine_modules, engine_modules.order, { link = false, stage = false })
+    -- Debug keeps the inline header code that names ArcaneCore exports (Guid ctor,
+    -- settings-enum warnings), so ArcaneCore is linked and staged beside the exe.
+    arc_module_consumer(engine_modules, { "ArcaneCore" })
+    location "Source/Programs/arcane-abi-digest"
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++23"
+    staticruntime "off"
+
+    targetdir ("Binaries/" .. outputdir .. "/%{prj.name}")
+    objdir ("Intermediate/Build/" .. outputdir .. "/%{prj.name}")
+
+    files {
+        "%{prj.location}/src/**.hpp",
+        "%{prj.location}/src/**.cpp",
+    }
+
+    includedirs { "%{wks.location}/Intermediate/AbiDigest" }
+
+    defines {
+        "ARC_MODULE_NAME=ArcaneAbiDigest",
+        "_CRT_SECURE_NO_WARNINGS",
+        "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
+        "NOMINMAX",
+        "WIN32_LEAN_AND_MEAN",
+    }
+
+    prebuildcommands {
+        '{MKDIR} "%{wks.location}/Intermediate/AbiDigest"',
+        '{COPYFILE} "%{wks.location}/Source/Runtime/ArcaneEngine/src/Arcane/Plugin/AbiManifestEngine.hpp" "%{wks.location}/Intermediate/AbiDigest/AbiManifestEngine.commented.hpp"',
+        'echo // appended comment line, no code>> "%{wks.location}/Intermediate/AbiDigest/AbiManifestEngine.commented.hpp"',
+    }
+
+    filter "system:windows"
+        systemversion "latest"
+        buildoptions { "/utf-8", "/Zc:__cplusplus", "/bigobj", "/arch:AVX2" }
+        fatalwarnings { "4715" }
+    filter { "system:linux or system:macosx", "architecture:x86_64" }
+        buildoptions { "-mavx2", "-mfma" }
+    filter "system:not windows"
+        links { "dl", "pthread" }
+
+    filter "configurations:Debug"
+        defines { "ARC_BUILD_DEBUG" }
+        runtime "Debug"
+        symbols "on"
+
+    filter "configurations:Release"
+        defines { "ARC_BUILD_RELEASE", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "on"
+
+    filter "configurations:Dist"
+        defines { "ARC_BUILD_DIST", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "off"
+    filter {}
+
+-- ============================================================================
+-- arcane-abi-digest-mutants: the digest's mutation witness (Plan B Task 1, fix
+-- round 1). At GENERATE time premake writes shadow copies of three listed
+-- headers (ProcessContext.hpp, Aabb.hpp, ViewTransform.hpp) into
+-- Intermediate/AbiDigest/mutants, ahead of the real include dirs. Each shadow
+-- carries one mutation behind a macro (a private int before the first
+-- container; a same-size field swap) plus an unconditional comment line. One
+-- TU per macro bakes that variant's mix; the exe prints `name hex` per variant
+-- and AbiDigestTest.cpp requires base == the real mix (a comment moves
+-- nothing) and every mutant != base. An anchor that no longer matches fails
+-- the generate loudly: update the anchor, never the test. The shadows are
+-- written at GENERATE time: after editing any shadowed header, re-run premake
+-- (re-run premake: the shadow headers are stale otherwise, and the mutation
+-- case fails with base != the real mix). ClientRuntime.hpp and
+-- RuntimePresentation.hpp are shadowed too (a pointer before m_pres, an int
+-- before gameInput).
+-- ============================================================================
+local function abi_shadow(rel, edits)
+    local src = path.join(_MAIN_SCRIPT_DIR, rel)
+    local text = assert(io.readfile(src), "abi shadow: cannot read " .. src)
+    for _, e in ipairs(edits) do
+        local from, to = text:find(e[1], 1, true)
+        if not from then error("abi shadow: anchor not found in " .. rel .. ": " .. e[1]) end
+        text = text:sub(1, from - 1) .. e[2] .. text:sub(to + 1)
+    end
+    local name = rel:match("/src/(.*)$")
+    local dest = path.join(_MAIN_SCRIPT_DIR, "Intermediate/AbiDigest/mutants", name)
+    os.mkdir(path.getdirectory(dest))
+    assert(io.writefile(dest, text))
+end
+abi_shadow("Source/Runtime/ArcaneEngine/src/Arcane/Base/ProcessContext.hpp", {
+    { "std::unique_ptr<::Arcane::TypeContext> m_owned;",
+      "// abi mutant: a comment-only line, must not move the digest\n#ifdef ABI_MUT_PROCESS_PRIVATE\n        int m_abiProbe = 0;\n#endif\n        std::unique_ptr<::Arcane::TypeContext> m_owned;" },
+})
+abi_shadow("Source/Client/ArcaneClient/src/Arcane/Client/ClientRuntime.hpp", {
+    { "RuntimePresentation m_pres;",
+      "#ifdef ABI_MUT_CLIENT_PRIVATE\n        void* m_abiProbe = nullptr;\n#endif\n        RuntimePresentation m_pres;" },
+})
+abi_shadow("Source/Client/ArcaneClient/src/Arcane/Client/RuntimePresentation.hpp", {
+    { "LocalInputUser         gameInput;",
+      "#ifdef ABI_MUT_PRES_GAMEINPUT\n        int abiProbe = 0;\n#endif\n        LocalInputUser         gameInput;" },
+})
+abi_shadow("Source/Runtime/ArcaneCore/src/Arcane/Math/Aabb.hpp", {
+    { "glm::vec3 min{0.0f, 0.0f, 0.0f};",
+      "#ifndef ABI_MUT_AABB_SWAP\n        glm::vec3 min{0.0f, 0.0f, 0.0f};\n#endif" },
+    { "glm::vec3 max{0.0f, 0.0f, 0.0f};",
+      "glm::vec3 max{0.0f, 0.0f, 0.0f};\n#ifdef ABI_MUT_AABB_SWAP\n        glm::vec3 min{0.0f, 0.0f, 0.0f};\n#endif" },
+})
+abi_shadow("Source/Runtime/ArcaneScene/src/Arcane/Scene/ViewTransform.hpp", {
+    { "glm::mat4  view{1.0f};",
+      "#ifndef ABI_MUT_VIEW_SWAP\n        glm::mat4  view{1.0f};\n#endif" },
+    { "glm::mat4  projection{1.0f};",
+      "glm::mat4  projection{1.0f};\n#ifdef ABI_MUT_VIEW_SWAP\n        glm::mat4  view{1.0f};\n#endif" },
+})
+
+group "Programs"
+project "arcane-abi-digest-mutants"
+    includedirs { "%{wks.location}/Intermediate/AbiDigest/mutants" }   -- the shadow headers win
+    arc_module_consumer(engine_modules, engine_modules.order, { link = false, stage = false })
+    arc_module_consumer(engine_modules, { "ArcaneCore" })
+    location "Source/Programs/arcane-abi-digest-mutants"
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++23"
+    staticruntime "off"
+
+    targetdir ("Binaries/" .. outputdir .. "/%{prj.name}")
+    objdir ("Intermediate/Build/" .. outputdir .. "/%{prj.name}")
+
+    files {
+        "%{prj.location}/src/**.hpp",
+        "%{prj.location}/src/**.cpp",
+    }
+
+    defines {
+        "ARC_MODULE_NAME=ArcaneAbiDigestMutants",
+        "_CRT_SECURE_NO_WARNINGS",
+        "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
+        "NOMINMAX",
+        "WIN32_LEAN_AND_MEAN",
+    }
+
+    filter "system:windows"
+        systemversion "latest"
+        buildoptions { "/utf-8", "/Zc:__cplusplus", "/bigobj", "/arch:AVX2" }
+        fatalwarnings { "4715" }
+    filter { "system:linux or system:macosx", "architecture:x86_64" }
+        buildoptions { "-mavx2", "-mfma" }
+    filter "system:not windows"
+        links { "dl", "pthread" }
+
+    filter "configurations:Debug"
+        defines { "ARC_BUILD_DEBUG" }
+        runtime "Debug"
+        symbols "on"
+
+    filter "configurations:Release"
+        defines { "ARC_BUILD_RELEASE", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "on"
+
+    filter "configurations:Dist"
+        defines { "ARC_BUILD_DIST", "NDEBUG" }
+        runtime "Release"
+        optimize "speed"
+        symbols "off"
+    filter {}
+
+-- ============================================================================
+-- Servitor (servitor): the loopback CLI that attaches to running engine hosts
+-- (spec docs/superpowers/specs/2026-10-05-arc-cli-design.md, plan rev 8.3).
+-- The client is program code (namespace Servitor, no export macro) and links
+-- ONLY ArcaneCore, ArcaneNet and ArcaneRemoteProtocol (spec AM9, ruling V5):
+-- never ArcaneRemote or ArcaneEngine. arc_module_consumer stages that closure
+-- beside the exe (and adds the modules' public vendor include dirs), so there
+-- is no DLL copy here; ServitorBoundaryTest.cpp ([servitor][boundary]) checks
+-- the staged folder holds nothing else. The client sources (src/Servitor/**)
+-- also source-compile into ArcaneTests, the arcbuild precedent; main.cpp is
+-- the exe's alone. SERVITOR_OUTPUTDIR (V7) lets HostsDir map a source-checkout
+-- --engine root to this configuration's Binaries folder. Never on PATH: P0
+-- runs it from Binaries/.
+-- ============================================================================
+group "Programs"
+project "Servitor"
+    arc_module_consumer(engine_modules, { "ArcaneCore", "ArcaneNet", "ArcaneRemoteProtocol" })
+    location "Source/Programs/Servitor"
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++23"
+    staticruntime "off"
+    targetname "servitor"
+
+    targetdir ("Binaries/" .. outputdir .. "/%{prj.name}")
+    objdir ("Intermediate/Build/" .. outputdir .. "/%{prj.name}")
+
+    files {
+        "%{prj.location}/src/main.cpp",
+        "%{prj.location}/src/Servitor/**.hpp",
+        "%{prj.location}/src/Servitor/**.cpp",
+    }
+
+    includedirs {
+        "%{prj.location}/src",
+    }
+
+    defines {
+        "_CRT_SECURE_NO_WARNINGS",
+        "_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING",
+        "SERVITOR_OUTPUTDIR=\"" .. outputdir .. "\"",
+    }
+
     postbuildcommands(arcane_cmds {
     })
 
@@ -882,9 +1135,12 @@ end   -- ArcaneCrashReporter: Windows target only
 -- ============================================================================
 group "Programs"
 project "ArcaneServer"
-    -- Links Engine/Net/Crypto ONLY (P10) but STAGES a game module's full set: the
+    -- Links Engine/Net/Crypto ONLY (P10), plus ArcaneRemote (the Servitor listener,
+    -- a Runtime module, so still no Client module), but STAGES a game module's full set: the
     -- loader must resolve every module DLL a game module imports to MAP it at all.
-    arc_module_consumer(engine_modules, { "ArcaneEngine", "ArcaneNet", "ArcaneCrypto" }, { stage = ARC_GAME_DEFAULT_MODULES })
+    -- The stage list names ArcaneRemote too: the game set's closure does not hold
+    -- it (or ArcaneRemoteProtocol), and the exe imports it.
+    arc_module_consumer(engine_modules, { "ArcaneEngine", "ArcaneNet", "ArcaneCrypto", "ArcaneRemote", "ArcanePhysics2D" }, { stage = table.join(ARC_GAME_DEFAULT_MODULES, { "ArcaneRemote" }) })
     location "Source/Programs/ArcaneServer"
     kind "ConsoleApp"
     language "C++"
@@ -900,14 +1156,12 @@ project "ArcaneServer"
         "%{IncludeDir.glm}",
         "%{IncludeDir.Astra}",
         "%{IncludeDir.enkiTS}",
-        -- Mosaic/Manifold2D: HEADERS ONLY, same reasoning as ArcaneRuntime's own
-        -- NRI comment -- Arcane/Scene/PhysicsSystem.hpp (Core, header-only)
-        -- includes Manifold2D/Physics/*.hpp for its PhysicsSystem/PhysicsResource
-        -- types, and Astra's own headers reach Mosaic's IWorkScheduler alias. This
-        -- exe does not link either: every Manifold2D/Mosaic OBJECT it can reach
-        -- (the PhysicsWorld a project's scene mints, the JobSystem's scheduler) is
-        -- created and destroyed inside ArcaneCore.dll.
-        "%{IncludeDir.Manifold2D}",
+        -- Mosaic: HEADERS ONLY -- Astra's own headers reach Mosaic's IWorkScheduler
+        -- alias. This exe does not link it: every Mosaic OBJECT it can reach (the
+        -- JobSystem's scheduler) is created and destroyed inside ArcaneCore.dll.
+        -- No Manifold2D include dir since 3D-readiness Task 8: the 2D solver is
+        -- ArcanePhysics2D's (named in the consumer list above), and a stray
+        -- Manifold2D include in this exe now fails the compile.
         "%{IncludeDir.Mosaic}",
     }
     -- Links the Engine/Net/Crypto closure ONLY (P10: never a Client module). R30's
@@ -967,7 +1221,7 @@ project "ArcaneRuntime"
     -- module .so listed before the archive that references it is dropped.
     links { "ArcaneRuntimeHost" }
     includedirs { "%{wks.location}/Source/Programs/ArcaneRuntimeHost/src" }
-    arc_module_consumer(engine_modules, { "ArcaneVerify", "ArcaneImGui", "ArcaneNet", "ArcaneCrypto" })
+    arc_module_consumer(engine_modules, { "ArcaneVerify", "ArcaneImGui", "ArcaneNet", "ArcaneCrypto", "ArcaneRemote", "ArcanePhysics2D" })
     location "Source/Programs/ArcaneRuntime"
     kind "ConsoleApp"
     language "C++"
@@ -984,14 +1238,9 @@ project "ArcaneRuntime"
         "%{IncludeDir.imgui}",
         "%{IncludeDir.Astra}",
         "%{IncludeDir.enkiTS}",
-        -- Manifold2D: HEADERS ONLY, exactly as ArcaneServer takes it (see that
-        -- project's matching comment). Since 2026-09-16 RuntimeApp.cpp makes its
-        -- OWN VerifySharedTypeContext call, which expands the engine roster --
-        -- and the roster's physics third (RigidBody2D/Collider2D/PhysicsBodyRef,
-        -- Core's Scene/PhysicsComponents.hpp) is Manifold2D-typed. This exe does
-        -- not link Manifold2D: every object it can reach is created and
-        -- destroyed inside ArcaneCore.dll.
-        "%{IncludeDir.Manifold2D}",
+        -- No Manifold2D include dir (3D-readiness Task 8): the roster's physics third
+        -- (Scene's PhysicsComponents.hpp) is solver-free since the handle became a
+        -- uint64, and the solver is ArcanePhysics2D's, named in the consumer list.
         "%{IncludeDir.Mosaic}",
         -- NRI Phase 2, Task 7: RuntimeApp holds an Arcane::NriGraphContext (the
         -- --nri-graph vehicle), and that header is NRI-typed because the node
@@ -1232,6 +1481,11 @@ project "ArcaneTests"
     language "C++"
     cppdialect "C++23"
     staticruntime "off"
+    -- The test exe outgrew MSVC's incremental-link table: a Debug relink
+    -- fails with LNK1116 "cannot grow ilk file" (error 487) on the hosted
+    -- runner and intermittently on the desk. A full link every time is the
+    -- price.
+    incrementallink "Off"
 
     targetdir ("Binaries/" .. outputdir .. "/%{prj.name}")
     objdir ("Intermediate/Build/" .. outputdir .. "/%{prj.name}")
@@ -1255,6 +1509,10 @@ project "ArcaneTests"
         -- source-compiles into the test exe so the [editor] unit tests drive it
         -- directly, same pattern as ConsoleBuffer/ViewportInput above.
         "%{wks.location}/Source/Programs/ArcaneEditor/src/Panels/EntityList.cpp",
+        -- Servitor P0 Task 25: editor.selection.get (the editor program's
+        -- remote command over SelectionContext) source-compiles into the test
+        -- exe so the [remote][scene] cases drive it directly.
+        "%{wks.location}/Source/Programs/ArcaneEditor/src/Remote/SelectionCommand.cpp",
         -- Task 6: InspectorFields (reflected field classification + pure write-backs
         -- for the Inspector panel) source-compiles into the test exe so the
         -- [editor] unit tests drive it directly -- no ImGui dependency, same
@@ -1461,11 +1719,6 @@ project "ArcaneTests"
         -- handle's IsRunning/Stop) IS covered, because the editor calls Stop()
         -- unconditionally after every Play->Stop.
         "%{wks.location}/Source/Programs/ArcaneEditor/src/Project/ServerLaunch.cpp",
-        -- Diagnostics arc: DiagnosticStore (key -> current diagnostic set, the
-        -- publication-group replace semantics, filter/sort/count) source-compiles
-        -- into the test exe so the [diagnostics] units drive it directly -- no
-        -- ImGui in it at all, same pattern as SceneSession/EditorCamera above.
-        "%{wks.location}/Source/Programs/ArcaneEditor/src/Panels/DiagnosticStore.cpp",
         -- node-page phase s8.2: which Problems rows route, and how (pure, fake facts in LocatorRouteTest).
         "%{wks.location}/Source/Programs/ArcaneEditor/src/Panels/LocatorRoute.cpp",
         -- Diagnostics arc: ConsoleModel (category derivation from the engine's
@@ -1575,6 +1828,13 @@ project "ArcaneTests"
         -- prove real CreateProcessW quoting/streaming/handle-inheritance
         -- behavior end to end.
         "%{wks.location}/Source/Programs/arcbuild/src/Process.cpp",
+        -- Servitor P0 Task 14 (rev 8.3 V3): the Servitor client (namespace
+        -- Servitor -- Format, Client, Verbs and every later client TU) source-
+        -- compiles into the test exe the way arcbuild's core does above, so the
+        -- [servitor][client] units drive Render/ParseGlobals/Call directly. The
+        -- glob covers later client files with no further premake edit;
+        -- Source/Programs/Servitor/src/main.cpp sits outside it (the exe's own).
+        "%{wks.location}/Source/Programs/Servitor/src/Servitor/**.cpp",
         -- Core-DLL split Plan 1, Task 6: ArcaneServer's own CLI (ServerConfig,
         -- over the same Arcane::Cli arcbuild's Request.cpp above already
         -- source-compiles) and its `--report` census (ServerReport) source-
@@ -1776,6 +2036,7 @@ project "ArcaneTests"
         "%{wks.location}/Source/Programs/arcbuild/src",   -- Driver.hpp for the [build] units (arcbuild Task 2)
         "%{wks.location}/Source/Programs/ArcaneServer/src",   -- ServerConfig.hpp/ServerReport.hpp for the [server] units (Core-DLL split Task 6)
         "%{wks.location}/Source/Programs/ArcaneCrashReporter/src",   -- ReporterArgs.hpp for the [reporter] units (crash window plan 2, Task 4)
+        "%{wks.location}/Source/Programs/Servitor/src",   -- <Servitor/*.hpp> for the [servitor] units (Servitor P0 Task 14, rev 8.3 V3)
     }
 
     -- msdfgen, freetype, and NRI are static libs compiled separately; the smoke
@@ -1811,14 +2072,21 @@ project "ArcaneTests"
     -- their normal per-config behaviour.
     defines { "MOSAIC_ENABLE_ASSERTS" }
 
+    -- The source-compiled Servitor client reads the same define the Servitor
+    -- exe does (rev 8.3 V7: HostsDir's source-checkout mapping).
+    defines { "SERVITOR_OUTPUTDIR=\"" .. outputdir .. "\"" }
+
     -- arccook (F2b Task 5) must exist before this project's postbuild runs it.
+    -- Servitor (Servitor P0 Task 14) must be built and its closure staged before
+    -- ServitorBoundaryTest.cpp ([servitor][boundary]) lists ../Servitor/.
     -- arcbuild-process-fixture (Task 5, multibackend hardening) must exist
     -- before the [build] process-fixture integration tests can spawn it --
     -- this is the ONLY thing that makes that happen for a
     -- `/t:arcbuild,ArcaneTests` build (the fixture is not itself a named
     -- target there).
     dependson { "HotReloadPluginV1", "HotReloadPluginV2", "HotReloadPluginBad",
-                "HotReloadPluginInitFail", "ReferenceGameUnderTest", "TemplateSmokePlugin", "arccook" }
+                "HotReloadPluginInitFail", "ReferenceGameUnderTest", "TemplateSmokePlugin", "arccook",
+                "Servitor" }
 
     -- Task 6 (multibackend hardening): the fixture project exists only for a
     -- Windows target (see its own gate below), so only a Windows generation
@@ -1839,6 +2107,11 @@ project "ArcaneTests"
     -- "../ArcaneCrashReporter/ArcaneCrashReporter.exe" directly (Task 5).
     -- death-fixture builds for every target since the Diagnostics POSIX port.
     dependson { "death-fixture" }
+    -- AbiDigestTest.cpp ([abi]) runs arcane-abi-digest.exe and arcane-abi-digest-mutants.exe
+    -- (sibling dirs) for the comment-stability and mutation cases; build them first.
+    dependson { "arcane-abi-digest", "arcane-abi-digest-mutants" }
+    -- The digest-gate fixture DLLs and their child exe (Plan B Task 2).
+    dependson { "AbiDigestBits64", "AbiDigestStale", "AbiDigestOldEpoch", "AbiDigestNoExport", "AbiDigestChild" }
     if os.target() == "windows" then
         dependson { "arcbuild-process-fixture", "ArcaneCrashReporter" }
     end
@@ -2008,8 +2281,11 @@ end
 -- the SAME reader build/arcane.lua uses for a real game (engine modularization
 -- s4): link + include only the descriptor's closure, ARC_GAME_HAS_IMGUI and the
 -- ImGui import decoration only when ImGui is in it. Call inside a project.
-local function game_fixture_modules(descriptor, sourceRoot)
-    local game = arc_game_descriptor(engine_modules, path.join(_MAIN_SCRIPT_DIR, descriptor), path.join(_MAIN_SCRIPT_DIR, sourceRoot))
+local function game_fixture_modules(descriptor, sourceRoot, handWrittenExports)
+    -- handWrittenExports: the fixture hand-writes its GamePlugin_* exports (the
+    -- AbiDigest* fixtures must NOT use ARC_GAME_MODULE), so the descriptor's
+    -- "exactly one ARC_GAME_MODULE" source check does not apply.
+    local game = arc_game_descriptor(engine_modules, path.join(_MAIN_SCRIPT_DIR, descriptor), (not handWrittenExports) and path.join(_MAIN_SCRIPT_DIR, sourceRoot) or nil)
     if not game then error("[arcmodule] schema: missing game descriptor " .. descriptor, 0) end
     arc_module_consumer(engine_modules, game.modules, { stage = false })   -- loaded by a host that carries the modules
     for _, include in ipairs(game.thirdPartyIncludes) do includedirs { "%{wks.location}/" .. include } end
@@ -2072,6 +2348,88 @@ test_plugin("HotReloadPluginV1",  { "HOTRELOAD_STEP=1",          "_CRT_SECURE_NO
 test_plugin("HotReloadPluginV2",  { "HOTRELOAD_STEP=10",         "_CRT_SECURE_NO_WARNINGS" })
 test_plugin("HotReloadPluginBad", { "HOTRELOAD_ABI_OFFSET=999",  "_CRT_SECURE_NO_WARNINGS" })
 test_plugin("HotReloadPluginInitFail", { "HOTRELOAD_INIT_FAIL=1",  "_CRT_SECURE_NO_WARNINGS" })
+
+-- ============================================================================
+-- AbiDigestBits64 / AbiDigestStale / AbiDigestOldEpoch / AbiDigestNoExport /
+-- AbiDigestChild (3D-readiness Plan B Task 2): the plugin ABI-digest load gate's
+-- refusal witnesses. REAL game-module DLLs built from their ArcaneEngine-only
+-- descriptors (so their digest folds the committed Input / Client sub-digests,
+-- Plugin/AbiManifestGame.hpp). Bits64 and Stale have the host's epoch and a
+-- wrong digest (Bits64 is compiled with ASTRA_ENTITY_BITS=64 so its own
+-- AbiGameMix() differs; Stale returns a constant). OldEpoch (the previous epoch)
+-- and NoExport (the current epoch) export no digest at all: they pin the
+-- resolve order (epoch first, then the required digest export). A disposable
+-- child exe calls Plugin::Load on the path it is given. ArcaneTests spawns the
+-- child once per DLL ([abi]); no fixture DLL is ever loaded into
+-- ArcaneTests.exe (the 21 game headers' registrars and a 64-bit Entity would
+-- corrupt its TypeContext).
+-- ============================================================================
+local function abi_digest_fixture(name, defs)
+    group "Tests/Fixtures"
+    project(name)
+        game_fixture_modules("Tests/Fixtures/" .. name .. "/" .. name .. ".arcmodule", "Tests/Fixtures/" .. name, true)
+        location("Tests/Fixtures/" .. name)
+        kind "SharedLib"
+        language "C++"
+        cppdialect "C++23"
+        staticruntime "off"
+        targetname(name)
+        filter "system:not windows"
+            targetprefix ""
+            visibility "Hidden"
+            inlinesvisibility "Hidden"
+        filter { "system:not windows", "toolset:gcc" }
+            buildoptions { "-fno-gnu-unique" }
+        filter {}
+        macos_unloadable_module()
+        targetdir ("Binaries/" .. outputdir .. "/" .. name)
+        objdir ("Intermediate/Build/" .. outputdir .. "/" .. name)
+        files { "%{prj.location}/" .. name .. ".cpp" }
+        defines (defs)
+        filter "system:windows"
+            systemversion "latest"
+            buildoptions { "/utf-8", "/Zc:__cplusplus", "/bigobj" }
+            fatalwarnings { "4715" }
+        filter "configurations:Debug"   defines { "ARC_BUILD_DEBUG" }                    runtime "Debug"   symbols "on"
+        filter "configurations:Release" defines { "ARC_BUILD_RELEASE", "NDEBUG" }        runtime "Release" optimize "speed" symbols "on"
+        filter "configurations:Dist"    defines { "ARC_BUILD_DIST", "NDEBUG" }           runtime "Release" optimize "speed" symbols "off"
+        filter {}
+end
+
+abi_digest_fixture("AbiDigestBits64", { "ASTRA_ENTITY_BITS=64", "_CRT_SECURE_NO_WARNINGS" })
+abi_digest_fixture("AbiDigestStale",  { "_CRT_SECURE_NO_WARNINGS" })
+abi_digest_fixture("AbiDigestOldEpoch", { "_CRT_SECURE_NO_WARNINGS" })
+abi_digest_fixture("AbiDigestNoExport", { "_CRT_SECURE_NO_WARNINGS" })
+
+group "Tests/Fixtures"
+project "AbiDigestChild"
+    -- ArcanePhysics2D is STAGED beside the child, not linked (3D-readiness Plan A
+    -- Task 8 fix round 1): the --sim-hook mode loads a game module that imports it,
+    -- so it maps after ProcessContext::Create sealed the sim hooks -- the
+    -- [physics][hook] witness that a plugin-loaded hook module is refused.
+    arc_module_consumer(engine_modules, { "ArcaneEngine" }, { stage = { "ArcaneEngine", "ArcanePhysics2D" } })
+    location "Tests/Fixtures/AbiDigestChild"
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++23"
+    staticruntime "off"
+
+    targetdir ("Binaries/" .. outputdir .. "/%{prj.name}")
+    objdir ("Intermediate/Build/" .. outputdir .. "/%{prj.name}")
+
+    files { "%{prj.location}/AbiDigestChild.cpp" }
+
+    defines { "_CRT_SECURE_NO_WARNINGS", "NOMINMAX", "WIN32_LEAN_AND_MEAN" }
+
+    filter "system:windows"
+        systemversion "latest"
+        buildoptions { "/utf-8", "/Zc:__cplusplus", "/bigobj" }
+    filter "system:not windows"
+        links { "dl", "pthread" }
+    filter "configurations:Debug"   defines { "ARC_BUILD_DEBUG" }                    runtime "Debug"   symbols "on"
+    filter "configurations:Release" defines { "ARC_BUILD_RELEASE", "NDEBUG" }        runtime "Release" optimize "speed" symbols "on"
+    filter "configurations:Dist"    defines { "ARC_BUILD_DIST", "NDEBUG" }           runtime "Release" optimize "speed" symbols "off"
+    filter {}
 
 -- ============================================================================
 -- ReferenceGameUnderTest: ReferenceProject's REAL game-module sources

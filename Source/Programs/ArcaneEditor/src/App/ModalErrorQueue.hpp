@@ -33,4 +33,15 @@ namespace Arcane::Editor
     private:
         std::deque<ModalError> m_queue;
     };
+
+    // Servitor's "modal" host state (spec s4.3; final fix round 2, I-2): an
+    // error dialog is queued or a modal popup is open, AND someone can answer
+    // it -- only an editor with an interactive window. A headless editor's
+    // queued dialogs (a module that failed to load, a --project that did not
+    // open) are unattended: they stay log and Problems entries, and the host
+    // reads ready / playing / paused by its real state.
+    [[nodiscard]] inline bool ReportsModal(const ModalErrorQueue& queue, bool interactiveWindow, bool popupModalOpen)
+    {
+        return interactiveWindow && (queue.Front() != nullptr || popupModalOpen);
+    }
 }

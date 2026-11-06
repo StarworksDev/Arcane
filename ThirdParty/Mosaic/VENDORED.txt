@@ -3,8 +3,8 @@ change them in the Mosaic repo and re-run scripts\sync-vendor.ps1, or the next
 sync silently reverts your edit.
 
 source  : D:\dev\starworks\Mosaic
-commit  : c63a4b26780be6400aa539e402e0268557713f7a
-branch  : main
-subject : docs(license): copyright to Ethan Temprovich (Starworks); contributions sign off under the DCO (MIT unchanged)
-synced  : 2026-10-10 10:56:52
+commit  : a6e2a3682511523f7580e71325c8ecd87cf36668
+branch  : detached
+subject : feat: Mosaic::Result and Mosaic::AlignedStorage -- moved from Astra so Astra, Arcane and the other Starworks libraries share one value-or-error type (Arcane drops exceptions before 1.0)
+synced  : 2026-10-13 17:04:40
 scope   : include/ + src/ + LICENSE

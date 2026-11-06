@@ -200,7 +200,7 @@ namespace Arcane::Editor
             d->FlushGesture();
     }
 
-    void DocumentHost::DrawAll(unsigned int dockId)
+    void DocumentHost::DrawAll(unsigned int dockId, bool modalBlocked)
     {
         // Snapshot the pointers: a close request mutates m_docs after the loop.
         std::vector<EditorDocument*> toClose;
@@ -236,7 +236,7 @@ namespace Arcane::Editor
 
         // Deliberately NOT folded into EditorApp's ModalErrorQueue -- DocumentHost
         // is self-contained; see the architecture-pass spec sec 7.
-        if (m_pendingClose)
+        if (m_pendingClose && !modalBlocked)
         {
             ImGui::OpenPopup("Unsaved Changes##dochost");
             if (ImGui::BeginPopupModal("Unsaved Changes##dochost", nullptr,

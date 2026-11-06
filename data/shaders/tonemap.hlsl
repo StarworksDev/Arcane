@@ -12,6 +12,10 @@
 // post_process.glsl. That oracle is gone and byte-identity is explicitly not a
 // goal, so input and output no longer disagree about the transfer function.
 //
+// THE OPERATOR LIVES IN tonemap_operator.hlsl (F5 plan 1 Task 3), included
+// here and by overlay.hlsl, so the scene and a Linear overlay colour are
+// encoded by the same two functions.
+//
 // CURVE IS MIRRORED in two other places -- keep all three in step:
 //   Tests/src/TonemapTest.cpp   (CPU golden reference, same branchless form)
 //   Source/Programs/ArcaneEditor/src/EditorWidgets.cpp (LinearToSrgb, branching form)
@@ -33,21 +37,8 @@ VSOutput vs_main(uint vertexId : SV_VertexID)
 Texture2D    g_Scene   : register(t0);
 SamplerState g_Sampler : register(s0);
 
-// Narkowicz ACES filmic approximation (linear in -> [0,1] out).
-float3 ACESFilmic(float3 x)
-{
-    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
-}
-
-// Branchless sRGB encode, UE's form: below the knee the linear segment is the
-// smaller value, above it the power segment is, so min() selects correctly and
-// is continuous at 0.0031308. Input here is already saturated to [0,1] by
-// ACESFilmic, so no negative-base pow is reachable.
-float3 LinearToSrgb(float3 lin)
-{
-    return min(lin * 12.92, pow(max(lin, 0.0031308), 1.0 / 2.4) * 1.055 - 0.055);
-}
+// ACESFilmic + LinearToSrgb: the ONE operator, shared with overlay.hlsl.
+#include "tonemap_operator.hlsl"
 
 float4 ps_main(VSOutput input) : SV_Target0
 {

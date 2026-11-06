@@ -170,7 +170,8 @@ scripts\ci\local.ps1 -Full                   # windows-msvc + linux-gcc-14 + lin
   The rsync crosses Docker Desktop's Windows<->WSL file sharing and stats
   every file each run; the plan measures a no-change sync on the desk and, if
   it is slow, adds the large trees the Linux build never reads to the excludes.
-- **Seeds:** one by default (printed); `-Seeds 2` runs CI's pair.
+- **Seeds:** one by default (printed); `-Seeds 2` runs CI's pair, `N` and
+  `(N + 50021) mod 4294967296`.
 - **Legs run serially** (one at a time; Windows then Linux), so a leg owns the
   machine and the job count below is meaningful. A parallel mode is not in
   this spec.
@@ -192,16 +193,20 @@ One-time desk setup, idempotent:
 ### 1.6 `.github/workflows/ci.yml`
 
 - New first job **`ci-image`** (`ubuntu-24.04`): runs `image-tag.sh`;
-  `docker manifest inspect` the tag; when missing on a same-repo event,
-  `docker buildx build --target build --push`; when missing on a fork PR,
-  fails naming the tag ("a maintainer must build it from a branch"). Outputs:
-  `tag` and `digest` (the pushed image's, or the existing tag's resolved by
+  `docker buildx imagetools inspect` the tag. A published tag is reused.
+  Only a non-pull-request run on `main` builds a missing tag, verifies it,
+  and then pushes. A pull request whose image inputs changed builds and
+  verifies the image locally, does not push it, and writes an empty digest;
+  the Linux legs that need the registry image skip. A fork pull request
+  with a missing tag fails, naming the tag. Outputs: `tag` and `digest`
+  (empty on a local verify; otherwise the registry manifest's digest from
   `docker buildx imagetools inspect`). Permissions: `contents: read`,
   `packages: write` -- on this job only. Its `docker/setup-buildx-action` and
   `docker/login-action` (login with `GITHUB_TOKEN`) are pinned to commit SHAs,
   like every `uses:` (D26). A `concurrency` group keyed on the tag makes two
   runs that miss the same tag build it once (the second waits, then finds it).
-- **Linux legs:** `needs: ci-image`, `container: { image:
+- **Linux legs:** `needs: ci-image`, and only when the digest is non-empty.
+  `container: { image:
   ghcr.io/starworksdev/arcane-ci@${{ needs.ci-image.outputs.digest }},
   options: --init --shm-size=2g }` -- the immutable digest, never the tag; the
   container runs as root (the image default, s1.1). The apt / SDL3 / premake / DXC / validation-layer
@@ -215,8 +220,11 @@ One-time desk setup, idempotent:
 ## 2. Flows and failure handling
 
 **CI run.** `ci-image` (seconds when the tag exists; one ~20 min build when
-it does not) -> Linux legs in the container; Windows/macOS legs in parallel
-as today. Each Linux leg still pulls the full image (a few GB) at job start;
+it does not) -> Linux legs in the container when the digest is non-empty;
+Windows/macOS legs in parallel as today. A pull request that introduces a
+new tag verifies the image in `ci-image` and skips the Linux legs until a
+non-pull-request run on `main` publishes. Each Linux leg that runs still
+pulls the full image (a few GB) at job start;
 that pull replaces today's apt + SDL3 + tool steps and is part of the leg's
 time, not of `ci-image`'s. The image is **public** in GHCR (Arcane is public and the image
 holds no secrets), so hosted and local pulls need no credentials. (Aphelyon's
@@ -234,11 +242,11 @@ duration, log path; exit code non-zero if any leg failed.
 - Container OOM: exit 137 -> the summary names it and suggests `-Jobs`.
 - Ctrl-C: `--init` + `--rm` stop the container cleanly; the volumes persist
   for the next incremental run.
-- Fork PR + new image tag: `ci-image` fails with the reason (s1.6). The
-  remedy -- a maintainer re-running it from a branch -- executes fork-authored
-  Dockerfile and script content in the one job holding `packages: write`, so
-  the maintainer **reviews the Dockerfile and `scripts/` diff first**; this
-  is the only path by which fork content can reach a write token.
+- Fork PR + new image tag: `ci-image` fails with the reason (s1.6). A
+  same-repo pull request builds and verifies that tag locally and does not
+  push. The image is published by a non-pull-request run on `main` after
+  the change is reviewed and merged. The maintainer **reviews the Dockerfile
+  and `scripts/` diff first**: that `main` run is the push.
 - Bots: the repo has no Dependabot config today. If one is added, its PRs get
   a read-only token and fail `ci-image` on a new tag exactly like a fork PR.
 
@@ -298,9 +306,11 @@ edits rebase onto `scripts/ci/`).
 - A self-hosted Linux runner (B decides whether one is wanted).
 - Server-runtime / service images (C, D).
 - Retiring Jenkins (B).
-- GHCR retention: every Dockerfile change on any branch publishes a tag, and
-  nothing deletes old ones yet. A cleanup policy (e.g. keep tags referenced
-  by `main`'s last N runs) is deferred; the package's size is watched.
+- GHCR retention: an image-input change publishes a tag only from a
+  non-pull-request run on `main`. A pull request verifies locally and does
+  not publish. Nothing deletes old tags yet. A cleanup policy (e.g. keep
+  tags referenced by `main`'s last N runs) is deferred; the package's size
+  is watched.
 
 ## 7. Written-spec review (2026-10-12) -- dispositions
 
@@ -318,7 +328,7 @@ edits rebase onto `scripts/ci/`).
 | 10 | rsync carries Windows tools, `--delete` kills links | Accepted: tool locations excluded (s1.4) |
 | 11 | buildx/login actions unpinned | Accepted: SHA-pinned (s1.6) |
 | 12 | GHCR packages start private | Accepted: explicit rollout step (s5) |
-| 13 | fork Dockerfile reaches a write token via a maintainer re-run | Accepted: review-first rule documented (s2) |
+| 13 | fork Dockerfile reaches a write token via a maintainer re-run | Review-first stays (s2). As of review fix round 1 (2026-10-17), only a non-pull-request run on `main` publishes; a pull request verifies locally and does not push |
 | 14 | Dependabot read-only token | Noted: no Dependabot config today; same behavior as a fork PR if added (s2) |
 | 15 | GHCR tags accumulate | Deferred with a note (s6) |
 | - | build stops at the first failing step | Stated (s1.3) |

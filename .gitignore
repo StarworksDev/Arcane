@@ -119,9 +119,11 @@ vcpkg_installed/
 data/images/icons/
 
 # -- Agent/tool caches ---------------------------------------------------------
-# .claude/ is local agent state EXCEPT the project skills, which are checked in.
+# .claude/ is local agent state EXCEPT the project skills and the project settings
+# (settings.json enables the superpowers workflow plugin), which are checked in.
 .claude/*
 !.claude/skills/
+!.claude/settings.json
 .superpowers/
 graphify-out/
 ide-md/

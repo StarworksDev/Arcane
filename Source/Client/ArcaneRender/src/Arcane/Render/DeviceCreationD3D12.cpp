@@ -10,6 +10,8 @@
 
 #include <Arcane/Base/Diagnostics.hpp>
 #include <Arcane/Base/Log.hpp>
+#include <Arcane/Render/AgilitySdk.hpp>
+#include <Arcane/Render/D3D12DebugLayer.hpp>
 #include <Arcane/Render/DeviceCreationD3D12.hpp>
 #include <Arcane/Render/DeviceRemovedObservers.hpp>
 #include <Arcane/Render/GpuInstrumentation.hpp>   // NoteGpuDeviceLost -- the host's device-lost latch
@@ -25,6 +27,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <string>
 
@@ -51,7 +54,7 @@ namespace Arcane
         // already owns a live device: D3D12CreateDevice fails and the run
         // exits after 0 frames. That is observed behaviour, not a worry.
         //
-        // These two flags make the sequencing structural rather than a rule
+        // These flags make the sequencing structural rather than a rule
         // somebody has to remember at each new call site.
         //
         // MONOTONE ON PURPOSE, and the conservative direction:
@@ -61,10 +64,23 @@ namespace Arcane
         // deliberately not done, because the failure mode of being wrong here
         // is asymmetric. Skipping an enable that would have
         // been legal costs one diagnostic channel; making the call when it is
-        // NOT legal removes a live device. Nothing in the tree creates a
-        // second D3D12 device at all, so today this costs nothing.
+        // NOT legal removes a live device. Tests do create another device
+        // after the first has been destroyed (the capability probe, then each
+        // [gpu] case). The flag staying set is what drops the debug layer for
+        // all of them once that first device was created with the layer off.
+        // ForceD3D12DebugLayerForProcess is the opt-in that calls
+        // EnableDebugLayer before that first device, so the closed window no
+        // longer costs the channel. The flag is still never cleared: the
+        // runtime removes a device if EnableDebugLayer runs after one has
+        // existed, destroyed or not.
         std::atomic<bool> g_d3d12DeviceCreated{ false };
         std::atomic<bool> g_d3d12DebugLayerEnabled{ false };
+        // Set by ForceD3D12DebugLayerForProcess. Independent of "the layer is
+        // on": without this flag, a device whose enableD3D12DebugLayer is
+        // false skips the callback and DXGI_CREATE_FACTORY_DEBUG even after
+        // EnableDebugLayer has already run. With the flag, every later device
+        // is debug-layer-active.
+        std::atomic<bool> g_d3d12DebugLayerForced{ false };
 
         // The DXGI debug layer's info queue. PROCESS-GLOBAL like the layer
         // itself (DXGIGetDebugInterface1 hands out one queue per process, not
@@ -210,34 +226,99 @@ namespace Arcane
             NoteGpuDeviceLost();
         }
 
-        // WHICH d3d12SDKLayers.dll is
-        // servicing the debug layer is the one fact that separates the two
-        // ways ID3D12InfoQueue1 can be missing, and it is observable only in
-        // a live run -- hence logged at the failure site rather than assumed.
+        // A failed ID3D12InfoQueue1 QueryInterface is not "System32's
+        // d3d12SDKLayers.dll answered". That in-box binary (10.0.19041)
+        // does not contain IID_ID3D12InfoQueue1
+        // (2852dd88-b484-4c0c-b6b1-67168500e600). The vendored Agility
+        // 1.619.3 layers DLL does, and both D3D12Core.dll and
+        // d3d12SDKLayers.dll export D3D12SDKVersion 619, which is
+        // AgilitySdk::kVersion -- the handshake this exe publishes. A
+        // handshake miss fails device creation with
+        // D3D12_ERROR_INVALID_REDIST before this line.
         //
-        // Background, because the old WARN here guessed wrong: the vendored
-        // Agility redistributable (ThirdParty/AgilitySDK 1.619.3, copied to
-        // <exedir>/D3D12/ beside D3D12Core.dll) DOES implement the interface,
-        // while the Windows 10 in-box layer (C:\Windows\System32\
-        // d3d12SDKLayers.dll, 10.0.19041.x) does not carry it at all -- the
-        // IID does not appear anywhere in that binary. So a failed QI means
-        // the in-box layer answered, NOT that the D3D12 runtime is
-        // "pre-Agility" (NRI logs "Using ID3D12Device15" in the same run,
-        // which only the Agility runtime can satisfy).
-        std::string LoadedD3D12SDKLayersModule()
+        // What refuses the QI on Windows 10 is the OS build. The callback
+        // interface is exposed from build 20236 up (that preview shipped as
+        // Windows 11). Windows 10 is 1904x, and the Agility redist does not
+        // turn the interface on there: the staged layers DLL is mapped, the
+        // base ID3D12InfoQueue succeeds, InfoQueue1 still returns
+        // E_NOINTERFACE. No other create path on this OS makes the QI
+        // succeed. DrainD3D12DebugMessages in ~NriDevice is the delivery
+        // that works, which is why the suite listener samples the latch
+        // after the device is destroyed.
+        //
+        // The warning names the module that owns the device vtable and the
+        // module that owns the info-queue vtable, plus each exported
+        // D3D12SDKVersion. Those are address probes: GetModuleHandle by file
+        // name returns whichever copy loaded first once two can be mapped.
+        // The warning also logs that name probe for D3D12Core.dll, because
+        // the vtable here is the layers DLL and a path on disk is not the
+        // module the process loaded. An injected proxy shows up as a vtable
+        // outside D3D12Core.dll / d3d12SDKLayers.dll.
+        HMODULE ModuleContaining(const void* address)
         {
-            const HMODULE module = GetModuleHandleW(L"d3d12SDKLayers.dll");
-            if (!module)
-                return "d3d12SDKLayers.dll not loaded";
+            if (!address)
+                return nullptr;
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(address), &module))
+                return nullptr;
+            return module;
+        }
 
+        const void* ComVtable(IUnknown* object)
+        {
+            if (!object)
+                return nullptr;
+            const void* vtable = nullptr;
+            std::memcpy(&vtable, object, sizeof(vtable));
+            return vtable;
+        }
+
+        std::string ModulePathOr(HMODULE module, const char* fallback)
+        {
+            if (!module)
+                return fallback;
             wchar_t wide[MAX_PATH]{};
             if (GetModuleFileNameW(module, wide, static_cast<DWORD>(std::size(wide))) == 0)
-                return "d3d12SDKLayers.dll loaded, path unavailable";
-
+                return "path unavailable";
             char narrow[MAX_PATH * 2]{};
             size_t converted = 0;
             wcstombs_s(&converted, narrow, wide, _TRUNCATE);
             return narrow;
+        }
+
+        // -1: not loaded, or no D3D12SDKVersion export. The Agility core and
+        // layers export it; the System32 loader DLL does not.
+        int ExportedD3D12SdkVersion(HMODULE module)
+        {
+            if (!module)
+                return -1;
+            const auto* version =
+                reinterpret_cast<const unsigned*>(GetProcAddress(module, "D3D12SDKVersion"));
+            return version ? static_cast<int>(*version) : -1;
+        }
+
+        std::string SdkVersionText(int version)
+        {
+            return version < 0 ? std::string("absent") : std::to_string(version);
+        }
+
+        unsigned WindowsBuildNumber()
+        {
+            using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOEXW*);
+            const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            if (!ntdll)
+                return 0;
+            const auto rtlGetVersion =
+                reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+            if (!rtlGetVersion)
+                return 0;
+            OSVERSIONINFOEXW info{};
+            info.dwOSVersionInfoSize = sizeof(info);
+            if (rtlGetVersion(&info) != 0)
+                return 0;
+            return info.dwBuildNumber;
         }
 
         // NRI capability contract item 12: the D3D12 debug layer's own channel
@@ -296,6 +377,54 @@ namespace Arcane
     }
 
     // ----------------------------------------------------------------
+    // Process-wide force. See D3D12DebugLayer.hpp for the contract.
+    // ----------------------------------------------------------------
+    bool ForceD3D12DebugLayerForProcess()
+    {
+        // Refuse before touching the layer. EnableDebugLayer after any device
+        // has existed removes that device; a destroyed device does not reopen
+        // the window (g_d3d12DeviceCreated is monotone).
+        if (g_d3d12DeviceCreated.load(std::memory_order_acquire))
+        {
+            ARC_ERROR("ForceD3D12DebugLayerForProcess refused: a D3D12 device already exists in this "
+                      "process. EnableDebugLayer must run before the first device; calling it later "
+                      "removes that device.");
+            return false;
+        }
+
+        if (!g_d3d12DebugLayerEnabled.load(std::memory_order_acquire))
+        {
+            // Same check-then-act as CreateD3D12NativeDevice, tightened to the
+            // line above the call. Both are main-thread-only; a concurrent
+            // creator would need its own serialization.
+            if (g_d3d12DeviceCreated.load(std::memory_order_acquire))
+            {
+                ARC_ERROR("ForceD3D12DebugLayerForProcess refused: a D3D12 device already exists in this "
+                          "process. EnableDebugLayer must run before the first device; calling it later "
+                          "removes that device.");
+                return false;
+            }
+
+            ComPtr<ID3D12Debug> debug;
+            const HRESULT hr = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+            if (FAILED(hr) || !debug)
+            {
+                ARC_ERROR("ForceD3D12DebugLayerForProcess: D3D12 debug layer unavailable "
+                          "(D3D12GetDebugInterface hr=0x{:08X})",
+                          static_cast<uint32_t>(hr));
+                return false;
+            }
+            debug->EnableDebugLayer();
+            // Before the force flag, so a caller that observes the force flag
+            // also observes that EnableDebugLayer has already run.
+            g_d3d12DebugLayerEnabled.store(true, std::memory_order_release);
+        }
+
+        g_d3d12DebugLayerForced.store(true, std::memory_order_release);
+        return true;
+    }
+
+    // ----------------------------------------------------------------
     // The CREATION HALF.
     // ----------------------------------------------------------------
     // The member ORDER inside D3D12DeviceCreation is COM release order in
@@ -323,16 +452,22 @@ namespace Arcane
         // enabling unconditionally. `debugLayerActive` is what the rest of this
         // function keys off, because "the caller asked for the layer" and "the
         // layer is servicing this device" stopped being the same thing here.
+        // The process-wide force (ForceD3D12DebugLayerForProcess) is a third
+        // answer to the same question: this device is serviced even when its
+        // own enableD3D12DebugLayer is false.
+        const bool wantDebugLayer = desc.enableD3D12DebugLayer
+            || g_d3d12DebugLayerForced.load(std::memory_order_acquire);
         UINT factoryFlags     = 0;
         bool debugLayerActive = false;
-        if (desc.enableD3D12DebugLayer)
+        if (wantDebugLayer)
         {
             if (g_d3d12DebugLayerEnabled.load(std::memory_order_acquire))
             {
-                // Already on process-wide, from an earlier device's creation.
-                // Re-calling EnableDebugLayer is the illegal post-device call
-                // AND would buy nothing: the layer that is already loaded is
-                // the one that will service this device too.
+                // Already on process-wide: ForceD3D12DebugLayerForProcess, or an
+                // earlier device's creation. Re-calling EnableDebugLayer is the
+                // illegal post-device call AND would buy nothing: the layer
+                // that is already loaded is the one that will service this
+                // device too.
                 debugLayerActive = true;
                 factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             }
@@ -340,12 +475,21 @@ namespace Arcane
             {
                 // THE SECOND-DEVICE CASE, and the tradeoff stated out loud.
                 //
-                // NOTHING IN THE TREE REACHES THIS TODAY: the one graphics
-                // device this process creates is the FIRST, so it takes the
-                // else-branch below and does get the debug layer. The guard is
-                // general -- ANY second device that requests the layer lands
-                // here -- so the branch stays reachable by anything that adds
-                // one.
+                // THIS BRANCH IS LIVE. ArcaneTests' capability probe
+                // (Tests/ArcaneTests/src/Helpers/GpuCapability.cpp) creates the
+                // process's first D3D12 device with enableD3D12DebugLayer left
+                // false, which closes the EnableDebugLayer window
+                // (g_d3d12DeviceCreated is monotone and is not cleared when
+                // that device is destroyed). Every later device that asks for
+                // the layer lands here: the suite logs "D3D12 debug layer NOT
+                // enabled for this device" and D3D12DebugLayerCallback never
+                // runs, so a CPU validation error cannot fail RenderErrorCount.
+                // ArcaneTests closes that hole by calling
+                // ForceD3D12DebugLayerForProcess before any device, which
+                // takes the "already on" branch above instead. A process that
+                // does not force, and whose first device left the layer off,
+                // still lands here: a host with render.debug.d3d12DebugLayer
+                // false, or ArcaneTests under ARCANE_TESTS_NO_D3D12_DEBUG=1.
                 //
                 // Such a device gets NO D3D12 debug layer: enabling it would
                 // remove the live first device (and, observed at the desk,
@@ -354,20 +498,27 @@ namespace Arcane
                 // working device at all".
                 //
                 // WHAT IS LOST: D3D12 CPU validation messages for THIS device
-                // cannot reach D3D12DebugLayerCallback and therefore cannot fail
-                // the RenderErrorCount latch. NRI's own validation layer and (on
-                // Vulkan) the VK validation layers are unaffected -- they are
-                // per-device, not process-global. On the dev box the loss is
-                // currently nil: the in-box Win10 D3D12SDKLayers.dll implements
-                // no ID3D12InfoQueue1, so those messages reach nothing anyway
-                // (see the WARN further down).
+                // never enter an info queue, so neither D3D12DebugLayerCallback
+                // nor the stored-message drain can fail the RenderErrorCount
+                // latch. NRI's own validation layer and (on Vulkan) the VK
+                // validation layers are unaffected -- they are per-device, not
+                // process-global. The loss is real where the Agility SDK layers
+                // are loaded: ArcaneTests exports the handshake and stages
+                // D3D12/D3D12SDKLayers.dll, so once the layer is actually on
+                // those messages reach the latch -- through the InfoQueue1
+                // callback when that interface registers, and through
+                // DrainD3D12DebugMessages at device destruction when it does
+                // not. On Windows 10 that callback does not register even when
+                // the staged Agility layers are the ones loaded; the QI
+                // failure further down says why. The drain is the path that
+                // stays.
                 //
-                // HOW TO GET IT BACK, if a second device is ever added: the
-                // FIRST device in the process has to be the one that turns the
-                // layer on, i.e. its creator sets
-                // RenderDeviceDesc::enableD3D12DebugLayer -- and this branch
-                // would then never be reached, the first branch above taking
-                // it instead.
+                // HOW TO GET IT BACK: the layer has to be turned on before the
+                // first device. ForceD3D12DebugLayerForProcess does that for
+                // the whole process and then treats every later device as
+                // debug-layer-active, including one whose own flag is false.
+                // Setting enableD3D12DebugLayer on the first device only covers
+                // later devices that ask for the layer themselves.
                 ARC_WARN("D3D12 debug layer NOT enabled for this device: a D3D12 device already "
                          "exists in this process and EnableDebugLayer is documented to remove it "
                          "when called after device creation. This device's D3D12 validation "
@@ -537,10 +688,9 @@ namespace Arcane
                     ARC_WARN("ID3D12InfoQueue::PushStorageFilter failed; D3D12 INFO/MESSAGE "
                              "chatter will reach the debug-layer callback");
                 }
-                // Kept for the device's life: where ID3D12InfoQueue1 is
-                // missing (below), DrainD3D12DebugMessages reads the stored
-                // messages through this -- the only channel the in-box layer
-                // leaves open.
+                // Kept for the device's life. Where ID3D12InfoQueue1 does not
+                // register (below), DrainD3D12DebugMessages reads the stored
+                // messages through this.
                 out.infoQueueBase = infoQueue;
             }
 
@@ -549,8 +699,20 @@ namespace Arcane
             // ID3D12InfoQueue1::RegisterMessageCallback is what actually
             // delivers them (see D3D12DebugLayerCallback). Missing it is a
             // diagnostics degradation, never a create failure.
+            //
+            // The device QI is the documented path. When it fails, ask the
+            // info-queue object itself: a proxy that wraps the device and
+            // forwards ID3D12InfoQueue but not InfoQueue1 still holds an
+            // object whose own QI may succeed. On Windows 10 both fail.
             ComPtr<ID3D12InfoQueue1> infoQueue1;
-            const HRESULT infoQueue1Hr = out.device.As(&infoQueue1);
+            const HRESULT deviceQiHr = out.device.As(&infoQueue1);
+            HRESULT queueQiHr = S_OK;
+            if (FAILED(deviceQiHr))
+            {
+                infoQueue1.Reset();
+                queueQiHr = infoQueue ? infoQueue.As(&infoQueue1) : E_NOINTERFACE;
+            }
+            const HRESULT infoQueue1Hr = SUCCEEDED(deviceQiHr) ? deviceQiHr : queueQiHr;
             if (SUCCEEDED(infoQueue1Hr))
             {
                 DWORD         cookie     = 0;
@@ -564,16 +726,16 @@ namespace Arcane
                 else
                 {
                     ARC_WARN("ID3D12InfoQueue1::RegisterMessageCallback failed (hr=0x{:08X}); "
-                             "D3D12 debug-layer messages will not reach the log",
+                             "D3D12 debug-layer messages reach the latch when the device is destroyed",
                              static_cast<uint32_t>(registerHr));
                 }
             }
             else if (FAILED(infoQueueHr))
             {
-                // TRUE failure case 1: no info queue of any generation, i.e.
-                // the debug layer is not attached to this device. Either
-                // EnableDebugLayer above did not take effect for the runtime
-                // that created the device, or the device predates the enable.
+                // No info queue of any generation: the debug layer is not
+                // attached to this device. Either EnableDebugLayer above did
+                // not take effect for the runtime that created the device,
+                // or the device predates the enable.
                 ARC_WARN("the D3D12 debug layer is not active on this device (ID3D12InfoQueue "
                          "QueryInterface failed, hr=0x{:08X}); D3D12 debug-layer messages will "
                          "not reach the log",
@@ -581,16 +743,41 @@ namespace Arcane
             }
             else
             {
-                // TRUE failure case 2: the debug layer IS attached (the base
-                // interface resolved) but the SDK layers servicing it predate
-                // ID3D12InfoQueue1. The module path is the actionable half --
-                // <exedir>/D3D12/ is the vendored Agility layer, which has the
-                // interface; System32 is the Windows 10 in-box layer, which
-                // does not carry the IID at all.
-                ARC_WARN("the loaded D3D12 debug layer does not implement ID3D12InfoQueue1 "
-                         "(hr=0x{:08X}); D3D12 debug-layer messages will not reach the log. "
-                         "Layer servicing this device: {}",
-                         static_cast<uint32_t>(infoQueue1Hr), LoadedD3D12SDKLayersModule());
+                const HMODULE deviceModule = ModuleContaining(ComVtable(out.device.Get()));
+                const HMODULE queueModule  = ModuleContaining(ComVtable(infoQueue.Get()));
+                const HMODULE loadedCore   = GetModuleHandleW(L"D3D12Core.dll");
+                const int deviceSdk = ExportedD3D12SdkVersion(deviceModule);
+                const int queueSdk  = ExportedD3D12SdkVersion(queueModule);
+                const int coreSdk   = ExportedD3D12SdkVersion(loadedCore);
+                const unsigned requested = AgilitySdk::kVersion;
+                const unsigned osBuild   = WindowsBuildNumber();
+                const bool handshake = deviceSdk == static_cast<int>(requested) &&
+                                       queueSdk == static_cast<int>(requested);
+                const char* why;
+                if (!handshake)
+                    why = "SDK handshake does not match this exe's D3D12SDKVersion";
+                else if (osBuild != 0 && osBuild < 20236)
+                    why = "handshake matches; ID3D12InfoQueue1 is not exposed before OS build "
+                          "20236 (Windows 11). Stored messages are drained when the device is destroyed";
+                else
+                    why = "handshake matches and the OS build is new enough; the vtable module "
+                          "above is what refused the interface";
+                // The miss is identical for every device this process creates;
+                // log the sentence once. Execution falls through to the queue below.
+                static std::atomic<bool> logged{false};
+                if (!logged.exchange(true))
+                {
+                    ARC_WARN("ID3D12InfoQueue1 QueryInterface failed (device hr=0x{:08X}, info-queue hr=0x{:08X}). "
+                             "Loaded D3D12Core.dll: {} (D3D12SDKVersion {}). "
+                             "Device module: {} (D3D12SDKVersion {}). "
+                             "InfoQueue module: {} (D3D12SDKVersion {}). "
+                             "Exe requests {}. OS build {}. {}",
+                             static_cast<uint32_t>(deviceQiHr), static_cast<uint32_t>(queueQiHr),
+                             ModulePathOr(loadedCore, "not loaded"), SdkVersionText(coreSdk),
+                             ModulePathOr(deviceModule, "none"), SdkVersionText(deviceSdk),
+                             ModulePathOr(queueModule, "none"), SdkVersionText(queueSdk),
+                             requested, osBuild, why);
+                }
             }
         }
 

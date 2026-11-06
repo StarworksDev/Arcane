@@ -9,11 +9,19 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Arcane/Jobs/JobSystem.hpp>
+#include <Mosaic/Jobs/WorkScheduler.hpp>
+
+#include "Helpers/ConstantScan.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <fstream>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -21,6 +29,15 @@ using Arcane::JobSystem;
 
 namespace
 {
+    std::string ReadRepoFile(const char* relative)
+    {
+        std::ifstream in(Arcane::Test::RepoRoot() / relative, std::ios::binary);
+        REQUIRE(in.good());
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    }
+
     // Bounded spin-wait so a genuinely broken Submit() (task never runs) fails
     // the test loudly after a few seconds instead of hanging the whole suite
     // -- same "yield until a flag flips" shape ServiceThreadTest.cpp already
@@ -149,4 +166,35 @@ TEST_CASE("destruction drains every submitted task before returning", "[jobs]")
     }
 
     CHECK(completed.load(std::memory_order_relaxed) == kN);
+}
+
+TEST_CASE("~JobSystem shuts the scheduler down before it resets the adapter", "[jobs]")
+{
+    const auto text = ReadRepoFile("Source/Runtime/ArcaneCore/src/Arcane/Jobs/JobSystem.cpp");
+    const auto dtor = text.find("JobSystem::~JobSystem()");
+    REQUIRE(dtor != std::string::npos);
+    const auto end = text.find("JobSystem::WorkScheduler", dtor);
+    const auto body = text.substr(dtor, end - dtor);
+    const auto shut = body.find("WaitforAllAndShutdown");
+    const auto drop = body.find("adapter.reset");
+    REQUIRE(shut != std::string::npos);
+    REQUIRE(drop != std::string::npos);
+    CHECK(shut < drop);
+    CHECK(body.find("SetExecutor(nullptr)") != std::string::npos);
+}
+
+TEST_CASE("a WorkScheduler kept past ~JobSystem runs ParallelFor inline instead of faulting", "[jobs]")
+{
+    std::shared_ptr<Mosaic::IWorkScheduler> sched;
+    {
+        JobSystem jobs(2);
+        sched = jobs.WorkScheduler();
+    }
+    REQUIRE(sched);
+    std::size_t counter = 0;   // inline on this thread, so no atomic is needed
+    sched->ParallelFor(4, 1, [&](std::size_t b, std::size_t e, std::uint32_t)
+    {
+        counter += e - b;
+    });
+    CHECK(counter == 4);
 }

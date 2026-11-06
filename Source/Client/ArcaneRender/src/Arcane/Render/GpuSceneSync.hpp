@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -282,7 +283,35 @@ namespace Arcane
         reg.AdvanceTick();
     }
 
-    inline void BuildGpuSceneFrame(const GpuSceneMirror& m, const VisibleSet* vis, const MeshTable* meshes,
+    // One mesh section's index range, copied out of MeshTable so the frame
+    // builder does not keep the table. Inline, like every function here.
+    struct MeshSectionRange
+    {
+        Guid mesh{};
+        std::uint32_t section = 0;
+        std::uint32_t indexOffset = 0;
+        std::uint32_t indexCount = 0;
+    };
+
+    inline std::vector<MeshSectionRange> MeshSectionRanges(const MeshTable* table)
+    {
+        std::vector<MeshSectionRange> out;
+        if (!table || !table->meshes)
+            return out;
+        for (const auto& [guid, entry] : *table->meshes)
+        {
+            std::uint32_t section = 0;
+            for (const MeshSection& s : entry.data.sections)
+            {
+                out.push_back(MeshSectionRange{ guid, section, s.indexOffset, s.indexCount });
+                ++section;
+            }
+        }
+        return out;
+    }
+
+    inline void BuildGpuSceneFrame(const GpuSceneMirror& m, const VisibleSet* vis,
+                                   std::span<const MeshSectionRange> sections,
                                    const ViewTransform& view, GpuSceneFrame& out)
     {
         out.batches.clear();
@@ -318,12 +347,15 @@ namespace Arcane
             const GpuBatchKey& key = m.batchKeys[r.batch];
             if (key.blend == MaterialBlendMode::Transparent)
             {
-                const MeshEntry* entry = meshes ? meshes->Resolve(key.mesh) : nullptr;
-                if (!entry || key.section >= entry->data.sections.size()) continue;
-                const MeshSection& section = entry->data.sections[key.section];
+                const MeshSectionRange* section = nullptr;
+                for (const MeshSectionRange& candidate : sections)
+                    if (candidate.mesh == key.mesh && candidate.section == key.section)
+                        section = &candidate;
+                if (!section)
+                    continue;
                 const glm::vec3 viewCenter = glm::vec3(view.view * glm::vec4(r.boundsCenter, 1.0f));
                 out.transparentDraws.push_back(TransparentDraw{
-                    row, key.mesh, key.section, section.indexOffset, section.indexCount,
+                    row, key.mesh, key.section, section->indexOffset, section->indexCount,
                     key.blend, key.twoSided, r.renderOrder,
                     -viewCenter.z + r.depthSortBias, r.entity,
                 });
@@ -358,22 +390,25 @@ namespace Arcane
         for (std::uint32_t b : emitted)
         {
             const GpuBatchKey& key = m.batchKeys[b];
-            const MeshEntry* entry = meshes ? meshes->Resolve(key.mesh) : nullptr;
-            if (!entry || key.section >= entry->data.sections.size()) continue;
-            const MeshSection& section = entry->data.sections[key.section];
+            const MeshSectionRange* section = nullptr;
+            for (const MeshSectionRange& candidate : sections)
+                if (candidate.mesh == key.mesh && candidate.section == key.section)
+                    section = &candidate;
+            if (!section)
+                continue;
             // The section's range VERBATIM (the retired CollectMeshInstances rule):
             // MeshData's contract (Mesh/MeshBuilder.hpp) has no "empty section
             // draws everything" fallback, and inventing one here would read past
             // the index buffer for a zero-count section with a non-zero offset.
-            const std::uint32_t indexCount = section.indexCount;
+            const std::uint32_t indexCount = section->indexCount;
             GpuBatchDraw d;
             d.mesh = key.mesh; d.section = key.section;
-            d.indexOffset = section.indexOffset; d.indexCount = indexCount;
+            d.indexOffset = section->indexOffset; d.indexCount = indexCount;
             d.firstOutput = firstOutput[b]; d.capacity = m.batchRowCount[b];
             d.argIndex = static_cast<std::uint32_t>(out.args.size());
             d.blend = key.blend; d.twoSided = key.twoSided; d.nearDepth = nearDepth[b];
             out.batches.push_back(d);
-            out.args.push_back(DrawIndexedArgs{ indexCount, 0, section.indexOffset, 0, 0 });
+            out.args.push_back(DrawIndexedArgs{ indexCount, 0, section->indexOffset, 0, 0 });
             out.cullBatches[b].argIndex = d.argIndex;
             out.cullBatches[b].emitted  = 1u;
         }

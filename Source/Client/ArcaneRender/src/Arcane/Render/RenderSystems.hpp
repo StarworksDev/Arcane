@@ -3,8 +3,9 @@
 // RenderSubmissionSystem: reads WorldTransform + SpriteRenderer, submits one
 // WORLD-space quad per sprite to the Batcher2D held in the RenderContext2D
 // resource. Read-only w.r.t. ECS; the side effect (batcher submission) is
-// external. Runs in the Render phase, single-threaded (Batcher2D is not
-// thread-safe).
+// external. Run by the frame extract (ExtractFrame.hpp), once per frame and
+// single-threaded (Batcher2D is not thread-safe) -- never by a scheduler: the
+// Render phase is retired (F5 plan 1 Task 5).
 //
 // THE SYSTEM PROJECTS NOTHING (F4 plan 1 T5). A sprite's four corners come
 // from its FULL world basis through SpriteWorldQuad (SpriteGeometry.hpp) in

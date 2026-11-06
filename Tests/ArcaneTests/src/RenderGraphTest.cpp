@@ -43,6 +43,8 @@
 #include <Arcane/Material/MaterialSource.hpp>  // kSceneInput
 #include <Arcane/Render/FramePacing.hpp>         // FramesInFlight()
 #include <Arcane/Render/RenderBudgetSettings.hpp>  // render.batch2d/post/imgui defaults -- the caps the nodes latch
+#include <Arcane/Render/DepthConventionMap.hpp>    // DepthClearValue -- the mesh depth load op (F5 plan 1 T2)
+#include "Helpers/ConstantScan.hpp"                // Arcane::Test::RepoRoot -- the source-scan cases
 
 // AFTER the NRI + engine headers, deliberately: this file's include-order note
 // above pins NRI first, and imgui.h is an ordinary header with no ERROR clash.
@@ -52,9 +54,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <fstream>
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -266,6 +270,44 @@ namespace
         nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT, nri::StageBits::COLOR_ATTACHMENT };
     constexpr nri::AccessLayoutStage kPresentState{
         nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE };
+
+    std::vector<std::string> NodeNames(const Arcane::RenderGraph& graph)
+    {
+        std::vector<std::string> names;
+        names.reserve(graph.NodeCount());
+        for (std::size_t i = 0; i < graph.NodeCount(); ++i)
+            names.emplace_back(graph.NodeName(i));
+        return names;
+    }
+
+    std::size_t NodeIndexOrNpos(const Arcane::RenderGraph& graph, const char* name)
+    {
+        for (std::size_t i = 0; i < graph.NodeCount(); ++i)
+            if (std::string(graph.NodeName(i)) == name)
+                return i;
+        return static_cast<std::size_t>(-1);
+    }
+
+    std::size_t NodeIndex(const Arcane::RenderGraph& graph, const char* name)
+    {
+        const std::size_t i = NodeIndexOrNpos(graph, name);
+        REQUIRE(i != static_cast<std::size_t>(-1));
+        return i;
+    }
+
+    // Today's world-frame name list, with the three empty slots inserted.
+    // Chrome does not use this helper: chrome sets world=false and expects letterbox.
+    std::vector<std::string> WithReservedSlots(std::vector<std::string> today)
+    {
+        std::vector<std::string> out{ "gbuffer", "lighting" };
+        for (const std::string& name : today)
+        {
+            if (name == "tonemap")
+                out.emplace_back("taa");
+            out.push_back(name);
+        }
+        return out;
+    }
 }
 
 TEST_CASE("rendergraph: CreateTexture/CreateBuffer handles are unique and their names are retrievable", "[nri]")
@@ -2859,7 +2901,8 @@ TEST_CASE("rendergraph exec: a graph with no nodes still submits and advances th
     CHECK(Arcane::RenderErrorCount() == before);
 }
 
-TEST_CASE("rendergraph exec: a swapchain-importing node refuses a null swapChain", "[nri]")
+TEST_CASE("rendergraph exec: a swapchain-importing node refuses a null swapChain",
+          "[nri][expects-render-errors]")
 {
     const std::uint64_t before = Arcane::RenderErrorCount();
 
@@ -3148,7 +3191,7 @@ TEST_CASE("rendergraph exec: two graphs on one device bury into their OWN lanes,
 }
 
 TEST_CASE("rendergraph exec: a second Graveyard lane is refused on a graph that already buried "
-          "into another", "[nri]")
+          "into another", "[nri][expects-render-errors]")
 {
     // The lane's half of the "one graph belongs to one device" refusal. Every
     // burial already pending sits in the FIRST lane, keyed to this graph's
@@ -3236,7 +3279,7 @@ TEST_CASE("rendergraph exec: a graph whose Execute was never ENTERED buries noth
         shape.canvasHeight    = 200;
         shape.offscreenOutput = reinterpret_cast<nri::Texture*>(0x0FF5C1EE);
         Arcane::DeclareGraphFrame(graph, shape, nullptr);
-        CHECK(graph.NodeCount() == 2);
+        CHECK(graph.NodeCount() == 5);
 
         // Nothing was realized, so there is nothing to release -- and no lane
         // was latched to release it into.
@@ -3261,7 +3304,7 @@ TEST_CASE("rendergraph exec: a graph whose Execute was never ENTERED buries noth
 }
 
 TEST_CASE("rendergraph exec: a graph whose Execute ENTERED and FAILED buries its tail in its own "
-          "lane, at fence 0, past a sibling lane already at 4096", "[nri]")
+          "lane, at fence 0, past a sibling lane already at 4096", "[nri][expects-render-errors]")
 {
     // HEADER WINDOW (b2) -- the sharpest edge, and the one the lane exists for.
     //
@@ -3742,7 +3785,8 @@ TEST_CASE("imgui-nri: Release stamps the ADOPTED context's atlas, never whicheve
     CHECK(Arcane::RenderErrorCount() == before);
 }
 
-TEST_CASE("rendergraph exec: an RgCompiled from before a Reset is refused", "[nri]")
+TEST_CASE("rendergraph exec: an RgCompiled from before a Reset is refused",
+          "[nri][expects-render-errors]")
 {
     const std::uint64_t before = Arcane::RenderErrorCount();
 
@@ -3779,7 +3823,8 @@ TEST_CASE("rendergraph exec: an RgCompiled from before a Reset is refused", "[nr
     Arcane::ResetRenderErrorCount();
 }
 
-TEST_CASE("rendergraph exec: an out-of-range frame slot is refused", "[nri]")
+TEST_CASE("rendergraph exec: an out-of-range frame slot is refused",
+          "[nri][expects-render-errors]")
 {
     const std::uint64_t before = Arcane::RenderErrorCount();
 
@@ -4132,9 +4177,9 @@ TEST_CASE("nri graph frame: batch -> tonemap derives canvas colour -> shader-rea
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 2);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 5);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+    CHECK(std::string(graph.NodeName(2)) == "batch2d");
 
     // The canvas is a TRANSIENT the graph owns; the backbuffer is the imported
     // swapchain texture. That split is the whole point of the two nodes.
@@ -4146,24 +4191,24 @@ TEST_CASE("nri graph frame: batch -> tonemap derives canvas colour -> shader-rea
     CHECK(std::string(graph.NameOf(handles.backbuffer)) == "backbuffer");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 2);
+    REQUIRE(compiled.nodes.size() == 5);
 
-    // Node 0 (batch2d): the canvas transient's pool slot starts undefined and
+    // Node 2 (batch2d): the canvas transient's pool slot starts undefined and
     // becomes a colour attachment. On the FIRST frame that `before` is
     // Compile()'s discarding {NONE, UNDEFINED, ALL}.
-    REQUIRE(compiled.nodes[0].preBarriers.size() == 1);
-    CHECK(compiled.nodes[0].preBarriers[0].isTexture);
-    CheckState(compiled.nodes[0].preBarriers[0].before, kUnknownState);
-    CheckState(compiled.nodes[0].preBarriers[0].after, kColorState);
+    REQUIRE(compiled.nodes[2].preBarriers.size() == 1);
+    CHECK(compiled.nodes[2].preBarriers[0].isTexture);
+    CheckState(compiled.nodes[2].preBarriers[0].before, kUnknownState);
+    CheckState(compiled.nodes[2].preBarriers[0].after, kColorState);
 
-    // Node 1 (tonemap): TWO transitions, and neither is hand-written anywhere
+    // Node 4 (tonemap): TWO transitions, and neither is hand-written anywhere
     // -- the canvas COLOR_ATTACHMENT -> SHADER_RESOURCE (so the fullscreen
     // triangle can sample it) and the freshly acquired backbuffer's discarding
     // entry -> COLOR_ATTACHMENT.
-    REQUIRE(compiled.nodes[1].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes[4].preBarriers.size() == 2);
     bool sawCanvasRead = false;
     bool sawBackbufferWrite = false;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[1].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[4].preBarriers)
     {
         REQUIRE(barrier.isTexture);
         if (static_cast<std::uint32_t>(barrier.after.layout)
@@ -4209,25 +4254,25 @@ TEST_CASE("nri graph frame: a capture frame copies the backbuffer BEFORE it pres
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 3);
-    CHECK(std::string(graph.NodeName(2)) == "capture");
+    REQUIRE(graph.NodeCount() == 6);
+    CHECK(std::string(graph.NodeName(5)) == "capture");
     REQUIRE(graph.IsHandleValid(handles.capture));
     CHECK_FALSE(graph.IsTransient(handles.capture));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 3);
+    REQUIRE(compiled.nodes.size() == 6);
 
-    // Node 2: the backbuffer becomes a copy SOURCE while it is still the
+    // Node 5 (capture): the backbuffer becomes a copy SOURCE while it is still the
     // graph's -- the copy is recorded before the present, not after it. The
     // imported staging buffer transitions to COPY_DESTINATION, and a buffer
     // barrier's layout is meaningless by contract (hence UNDEFINED).
-    REQUIRE(compiled.nodes[2].preBarriers.size() == 2);
-    const Arcane::RgBarrier& textureBarrier = compiled.nodes[2].preBarriers[0].isTexture
-                                                ? compiled.nodes[2].preBarriers[0]
-                                                : compiled.nodes[2].preBarriers[1];
-    const Arcane::RgBarrier& bufferBarrier  = compiled.nodes[2].preBarriers[0].isTexture
-                                                ? compiled.nodes[2].preBarriers[1]
-                                                : compiled.nodes[2].preBarriers[0];
+    REQUIRE(compiled.nodes[5].preBarriers.size() == 2);
+    const Arcane::RgBarrier& textureBarrier = compiled.nodes[5].preBarriers[0].isTexture
+                                                ? compiled.nodes[5].preBarriers[0]
+                                                : compiled.nodes[5].preBarriers[1];
+    const Arcane::RgBarrier& bufferBarrier  = compiled.nodes[5].preBarriers[0].isTexture
+                                                ? compiled.nodes[5].preBarriers[1]
+                                                : compiled.nodes[5].preBarriers[0];
     CHECK(textureBarrier.isTexture);
     CheckState(textureBarrier.before, kColorState);
     CheckState(textureBarrier.after,
@@ -4310,9 +4355,9 @@ TEST_CASE("nri graph frame: an OFFSCREEN frame tonemaps into the imported output
 
     // Node for node the presenting frame's -- only what the tonemap writes
     // changed.
-    REQUIRE(graph.NodeCount() == 2);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 5);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+    CHECK(std::string(graph.NodeName(4)) == "tonemap");
 
     // The output is IMPORTED (the vehicle owns it and it survives every frame),
     // not a transient the graph would recycle through its pool -- and it is
@@ -4322,9 +4367,9 @@ TEST_CASE("nri graph frame: an OFFSCREEN frame tonemaps into the imported output
     CHECK(std::string(graph.NameOf(handles.backbuffer)) == "offscreen");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 2);
+    REQUIRE(compiled.nodes.size() == 5);
 
-    // Node 1 (tonemap): the SAME two transitions the presenting frame derives
+    // Node 4 (tonemap): the SAME two transitions the presenting frame derives
     // -- the canvas COLOR_ATTACHMENT -> SHADER_RESOURCE, and the output's
     // contents-discarding entry -> COLOR_ATTACHMENT. The discarding entry is
     // what makes frame 1 (a freshly created texture, genuinely undefined) and
@@ -4332,10 +4377,10 @@ TEST_CASE("nri graph frame: an OFFSCREEN frame tonemaps into the imported output
     // rather than two: the tonemap's opaque fullscreen triangle writes every
     // pixel, so nothing is lost by discarding, and {NONE, UNDEFINED, ALL} is
     // the one entry that is D3D12-enhanced-barrier legal unconditionally.
-    REQUIRE(compiled.nodes[1].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes[4].preBarriers.size() == 2);
     bool sawCanvasRead = false;
     bool sawOutputWrite = false;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[1].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[4].preBarriers)
     {
         REQUIRE(barrier.isTexture);
         if (static_cast<std::uint32_t>(barrier.after.layout)
@@ -4458,17 +4503,17 @@ TEST_CASE("nri graph frame: an offscreen capture frame copies the output BEFORE 
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 3);
-    CHECK(std::string(graph.NodeName(2)) == "capture");
+    REQUIRE(graph.NodeCount() == 6);
+    CHECK(std::string(graph.NodeName(5)) == "capture");
     REQUIRE(graph.IsHandleValid(handles.capture));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 3);
-    REQUIRE(compiled.nodes[2].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes.size() == 6);
+    REQUIRE(compiled.nodes[5].preBarriers.size() == 2);
 
-    const Arcane::RgBarrier& textureBarrier = compiled.nodes[2].preBarriers[0].isTexture
-                                                ? compiled.nodes[2].preBarriers[0]
-                                                : compiled.nodes[2].preBarriers[1];
+    const Arcane::RgBarrier& textureBarrier = compiled.nodes[5].preBarriers[0].isTexture
+                                                ? compiled.nodes[5].preBarriers[0]
+                                                : compiled.nodes[5].preBarriers[1];
     CheckState(textureBarrier.before, kColorState);
     CheckState(textureBarrier.after,
                nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY);
@@ -4484,7 +4529,7 @@ TEST_CASE("nri graph frame: an offscreen capture frame copies the output BEFORE 
 }
 
 TEST_CASE("nri graph frame: a zero-extent canvas COMPILES but is a latched refusal at Execute",
-          "[nri]")
+          "[nri][expects-render-errors]")
 {
     // Fix round 1, finding 1 -- the two halves of why NriGraphContext::
     // RenderFrame skips a zero-sized surface BEFORE it declares anything.
@@ -4653,11 +4698,11 @@ TEST_CASE("nri graph frame: the post chain inserts one node per pass between the
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 4);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "post0");
-    CHECK(std::string(graph.NodeName(2)) == "post1");
-    CHECK(std::string(graph.NodeName(3)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 7);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "post0", "post1", "tonemap" }));
+    CHECK(std::string(graph.NodeName(3)) == "post0");
+    CHECK(std::string(graph.NodeName(4)) == "post1");
+    CHECK(std::string(graph.NodeName(6)) == "tonemap");
 
     CHECK(handles.postPassCount == 2);
     REQUIRE(graph.IsHandleValid(handles.post));
@@ -4665,14 +4710,14 @@ TEST_CASE("nri graph frame: the post chain inserts one node per pass between the
     CHECK(std::string(graph.NameOf(handles.post)) == "post1");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 4);
+    REQUIRE(compiled.nodes.size() == 7);
 
-    // Node 1 (post0): reads the CANVAS the batch node just wrote, writes its
+    // Node 3 (post0): reads the CANVAS the batch node just wrote, writes its
     // own target. NEITHER transition is hand-written anywhere -- the node
     // declares Read(scene)/Write(target) and the executor derives both.
-    REQUIRE(compiled.nodes[1].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes[3].preBarriers.size() == 2);
     bool sawCanvasRead = false;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[1].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[3].preBarriers)
     {
         REQUIRE(barrier.isTexture);
         if (static_cast<std::uint32_t>(barrier.after.layout)
@@ -4686,10 +4731,10 @@ TEST_CASE("nri graph frame: the post chain inserts one node per pass between the
     }
     CHECK(sawCanvasRead);
     // Pass 0's own target is a fresh pool slot: the discarding entry.
-    CheckState(ColorWriteBarrier(compiled.nodes[1]).before, kUnknownState);
-    CheckState(ColorWriteBarrier(compiled.nodes[1]).after, kColorState);
+    CheckState(ColorWriteBarrier(compiled.nodes[3]).before, kUnknownState);
+    CheckState(ColorWriteBarrier(compiled.nodes[3]).after, kColorState);
 
-    // Node 2 (post1): reads pass 0's target -- and writes a target whose pool
+    // Node 4 (post1): reads pass 0's target -- and writes a target whose pool
     // slot the CANVAS just vacated, which is the ping-pong showing up as a
     // handover rather than as an allocation. `before` therefore carries the
     // canvas's OUTGOING state in full -- SHADER_RESOURCE access, layout AND
@@ -4698,16 +4743,16 @@ TEST_CASE("nri graph frame: the post chain inserts one node per pass between the
     // {UNDEFINED, non-NONE access} is an illegal D3D12 enhanced barrier that
     // fails Close(); losing the discard hint costs nothing here, since the
     // pass fully overwrites its target.)
-    REQUIRE(compiled.nodes[2].preBarriers.size() == 2);
-    CheckState(ColorWriteBarrier(compiled.nodes[2]).before,
+    REQUIRE(compiled.nodes[4].preBarriers.size() == 2);
+    CheckState(ColorWriteBarrier(compiled.nodes[4]).before,
                nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE, kShaderReadStages);
-    CheckState(ColorWriteBarrier(compiled.nodes[2]).after, kColorState);
+    CheckState(ColorWriteBarrier(compiled.nodes[4]).after, kColorState);
 
-    // Node 3 (tonemap): samples pass 1's target (NOT the canvas) and writes
+    // Node 6 (tonemap): samples pass 1's target (NOT the canvas) and writes
     // the freshly acquired backbuffer.
-    REQUIRE(compiled.nodes[3].preBarriers.size() == 2);
-    CheckState(ColorWriteBarrier(compiled.nodes[3]).before, kUnknownState);   // the backbuffer
-    CheckState(ColorWriteBarrier(compiled.nodes[3]).after, kColorState);
+    REQUIRE(compiled.nodes[6].preBarriers.size() == 2);
+    CheckState(ColorWriteBarrier(compiled.nodes[6]).before, kUnknownState);   // the backbuffer
+    CheckState(ColorWriteBarrier(compiled.nodes[6]).after, kColorState);
 
     // ...and the graph still leaves the backbuffer present-ready, alone.
     REQUIRE(compiled.exitBarriers.size() == 1);
@@ -4737,8 +4782,8 @@ TEST_CASE("nri graph frame: a null post chain drops the post nodes; a chain inse
     const Arcane::PostChainDesc chain = MakeLinearChain(2);
 
     const struct { const Arcane::PostChainDesc* post; std::size_t nodes; std::uint32_t passes; } cases[] = {
-        { nullptr, 2, 0 },
-        { &chain,  4, 2 },
+        { nullptr, 5, 0 },
+        { &chain,  7, 2 },
     };
 
     for (const auto& expected : cases)
@@ -4764,7 +4809,7 @@ TEST_CASE("nri graph frame: a null post chain drops the post nodes; a chain inse
     shape.canvasWidth  = 320;
     shape.canvasHeight = 200;
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
-    CHECK(graph.NodeCount() == 2);
+    CHECK(graph.NodeCount() == 5);
     CHECK(handles.postPassCount == 0);
     CHECK_FALSE(graph.IsHandleValid(handles.post));
 }
@@ -4786,7 +4831,7 @@ TEST_CASE("nri graph frame: a four-pass post chain runs THREE tenants through on
     shape.post         = &chain;
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
-    REQUIRE(graph.NodeCount() == 6);   // batch2d, post0..post3, tonemap
+    REQUIRE(graph.NodeCount() == 9);   // gbuffer, lighting, batch2d, post0..post3, taa, tonemap
     CHECK(handles.postPassCount == 4);
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
@@ -4815,7 +4860,7 @@ TEST_CASE("nri graph frame: a four-pass post chain runs THREE tenants through on
     // when a node declares no transition into COLOR_ATTACHMENT, so this loop
     // is also the "every handover emits a barrier" assertion for a 3-tenant
     // chain.
-    for (const std::size_t node : { std::size_t(2), std::size_t(3), std::size_t(4) })
+    for (const std::size_t node : { std::size_t(4), std::size_t(5), std::size_t(6) })
     {
         INFO("post pass node index " << node);
         CheckState(ColorWriteBarrier(compiled.nodes[node]).before,
@@ -4823,7 +4868,7 @@ TEST_CASE("nri graph frame: a four-pass post chain runs THREE tenants through on
     }
     // ...while the FIRST tenant of each slot still starts from the discarding
     // entry, which is what makes the three assertions above meaningful.
-    CheckState(ColorWriteBarrier(compiled.nodes[1]).before, kUnknownState);
+    CheckState(ColorWriteBarrier(compiled.nodes[3]).before, kUnknownState);
 }
 
 TEST_CASE("nri graph frame: a post chain whose base reads the scene keeps the canvas alive past "
@@ -4846,7 +4891,7 @@ TEST_CASE("nri graph frame: a post chain whose base reads the scene keeps the ca
     shape.post         = &chain;
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
-    REQUIRE(graph.NodeCount() == 4);
+    REQUIRE(graph.NodeCount() == 7);
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
     // THREE pool slots now, not two: the canvas is still live at node 2, so
@@ -4878,8 +4923,8 @@ TEST_CASE("nri graph frame: a post chain whose base reads the scene keeps the ca
     // Pass 1 declares TWO reads (pass 0's target and the canvas) plus its own
     // write -- but the canvas is ALREADY in SHADER_RESOURCE from node 1, so no
     // barrier is emitted for it a second time.
-    REQUIRE(compiled.nodes[2].preBarriers.size() == 2);
-    CheckState(ColorWriteBarrier(compiled.nodes[2]).before, kUnknownState);
+    REQUIRE(compiled.nodes[4].preBarriers.size() == 2);
+    CheckState(ColorWriteBarrier(compiled.nodes[4]).before, kUnknownState);
 }
 
 // ======================================================================
@@ -5111,7 +5156,7 @@ TEST_CASE("nri pipeline cache: GetCompute creates once per key and serves the re
 }
 
 TEST_CASE("nri pipeline cache: GetCompute refuses an unbound cache or unregistered layoutId "
-          "without invoking fill, and never caches the refusal", "[nri]")
+          "without invoking fill, and never caches the refusal", "[nri][expects-render-errors]")
 {
     const std::uint64_t before = Arcane::RenderErrorCount();
 
@@ -5202,7 +5247,8 @@ TEST_CASE("nri pipeline cache: Clear buries everything at one fence and reissues
     CHECK(Arcane::RenderErrorCount() == before);
 }
 
-TEST_CASE("nri pipeline cache: caller-contract breaches are refused and latched, not served", "[nri]")
+TEST_CASE("nri pipeline cache: caller-contract breaches are refused and latched, not served",
+          "[nri][expects-render-errors]")
 {
     const std::uint64_t before = Arcane::RenderErrorCount();
 
@@ -5784,16 +5830,16 @@ TEST_CASE("nri graph frame: the pick + outline chain is absent unless the frame 
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 2);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 5);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+    CHECK(std::string(graph.NodeName(4)) == "tonemap");
     CHECK_FALSE(graph.IsHandleValid(handles.pickIds));
     CHECK_FALSE(graph.IsHandleValid(handles.pickReadback));
     CHECK_FALSE(graph.IsHandleValid(handles.outlineField));
     CHECK(handles.jfaStepCount == 0);
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    CHECK(compiled.nodes.size() == 2);
+    CHECK(compiled.nodes.size() == 5);
     CHECK(compiled.transients.size() == 1);   // the canvas, and nothing else
     CHECK(compiled.poolSlotCount == 1);
 }
@@ -5817,20 +5863,24 @@ TEST_CASE("nri graph frame: the pick + outline chain lands between the tonemap a
     REQUIRE(steps == 7);
     CHECK(handles.jfaStepCount == steps);
 
-    // SIX fixed nodes -- batch2d, tonemap, pick, pickreadback, outlineseed,
-    // outlinecomposite -- plus one outlinejfa per step.
-    REQUIRE(graph.NodeCount() == 6u + steps);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "tonemap");
-    CHECK(std::string(graph.NodeName(2)) == "pick");
-    CHECK(std::string(graph.NodeName(3)) == "pickreadback");
-    CHECK(std::string(graph.NodeName(4)) == "outlineseed");
+    // NINE fixed nodes -- gbuffer, lighting, batch2d, taa, tonemap, pick,
+    // pickreadback, outlineseed, outlinecomposite (the first two and taa are
+    // the empty D1 slots, F5 plan 1 T2) -- plus one outlinejfa per step.
+    REQUIRE(graph.NodeCount() == 9u + steps);
+    CHECK(std::string(graph.NodeName(0)) == "gbuffer");
+    CHECK(std::string(graph.NodeName(1)) == "lighting");
+    CHECK(std::string(graph.NodeName(2)) == "batch2d");
+    CHECK(std::string(graph.NodeName(3)) == "taa");
+    CHECK(std::string(graph.NodeName(4)) == "tonemap");
+    CHECK(std::string(graph.NodeName(5)) == "pick");
+    CHECK(std::string(graph.NodeName(6)) == "pickreadback");
+    CHECK(std::string(graph.NodeName(7)) == "outlineseed");
     for (std::uint32_t step = 0; step < steps; ++step)
-        CHECK(std::string(graph.NodeName(5 + step)) == "outlinejfa" + std::to_string(step));
+        CHECK(std::string(graph.NodeName(8 + step)) == "outlinejfa" + std::to_string(step));
     // THE COMPOSITING ORDER: the composite is the LAST node, so it draws onto
     // the backbuffer the tonemap already wrote -- and, on a capture frame,
     // before the copy that reads it (a later case).
-    CHECK(std::string(graph.NodeName(5 + steps)) == "outlinecomposite");
+    CHECK(std::string(graph.NodeName(8 + steps)) == "outlinecomposite");
 
     // The id target is a graph TRANSIENT; the readback staging buffer is an
     // IMPORT, because the graph realizes transients in DEVICE memory and those
@@ -5870,19 +5920,19 @@ TEST_CASE("nri graph frame: the pick chain's barriers are derived, including the
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
     const std::uint32_t steps = handles.jfaStepCount;
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 6u + steps);
+    REQUIRE(compiled.nodes.size() == 9u + steps);
 
     constexpr nri::AccessLayoutStage kShaderReadState{
         nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE, kShaderReadStages };
     constexpr nri::AccessLayoutStage kCopySrcState{
         nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE, nri::StageBits::COPY };
 
-    // Node 2 (pick): TWO pre-barriers -- the id transient's pool slot -> colour
+    // Node 5 (pick): TWO pre-barriers -- the id transient's pool slot -> colour
     // attachment, and the pass-local depth transient's -> depth write (F4 plan
     // 2: the mesh half of the id pass is depth-tested against it).
-    REQUIRE(compiled.nodes[2].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes[5].preBarriers.size() == 2);
     bool sawIdWrite = false, sawDepthWrite = false;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[2].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[5].preBarriers)
     {
         REQUIRE(barrier.isTexture);
         if (static_cast<std::uint32_t>(barrier.after.layout)
@@ -5901,17 +5951,17 @@ TEST_CASE("nri graph frame: the pick chain's barriers are derived, including the
     CHECK(sawIdWrite);
     CHECK(sawDepthWrite);
 
-    // Node 3 (pickreadback): the id target becomes a copy SOURCE and the
+    // Node 6 (pickreadback): the id target becomes a copy SOURCE and the
     // IMPORTED staging buffer a copy DESTINATION. A buffer barrier's layout is
     // meaningless by contract, hence UNDEFINED -- and RgUsage::ReadbackHost
     // deriving the same state as CopyDst is by design, not an accident.
-    REQUIRE(compiled.nodes[3].preBarriers.size() == 2);
-    const Arcane::RgBarrier& idToCopy = compiled.nodes[3].preBarriers[0].isTexture
-                                          ? compiled.nodes[3].preBarriers[0]
-                                          : compiled.nodes[3].preBarriers[1];
-    const Arcane::RgBarrier& stagingBarrier = compiled.nodes[3].preBarriers[0].isTexture
-                                          ? compiled.nodes[3].preBarriers[1]
-                                          : compiled.nodes[3].preBarriers[0];
+    REQUIRE(compiled.nodes[6].preBarriers.size() == 2);
+    const Arcane::RgBarrier& idToCopy = compiled.nodes[6].preBarriers[0].isTexture
+                                          ? compiled.nodes[6].preBarriers[0]
+                                          : compiled.nodes[6].preBarriers[1];
+    const Arcane::RgBarrier& stagingBarrier = compiled.nodes[6].preBarriers[0].isTexture
+                                          ? compiled.nodes[6].preBarriers[1]
+                                          : compiled.nodes[6].preBarriers[0];
     CHECK(idToCopy.isTexture);
     CheckState(idToCopy.before, kColorState);
     CheckState(idToCopy.after, kCopySrcState);
@@ -5919,11 +5969,11 @@ TEST_CASE("nri graph frame: the pick chain's barriers are derived, including the
     CheckState(stagingBarrier.after,
                nri::AccessBits::COPY_DESTINATION, nri::Layout::UNDEFINED, nri::StageBits::COPY);
 
-    // Node 4 (outlineseed): the id target goes COPY_SOURCE -> SHADER_RESOURCE
+    // Node 7 (outlineseed): the id target goes COPY_SOURCE -> SHADER_RESOURCE
     // (the readback ran first), and the seed target becomes an attachment.
-    REQUIRE(compiled.nodes[4].preBarriers.size() == 2);
+    REQUIRE(compiled.nodes[7].preBarriers.size() == 2);
     bool sawIdRead = false, sawSeedWrite = false;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[4].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[7].preBarriers)
     {
         REQUIRE(barrier.isTexture);
         if (static_cast<std::uint32_t>(barrier.after.layout)
@@ -5946,7 +5996,7 @@ TEST_CASE("nri graph frame: the pick chain's barriers are derived, including the
     // every time, with no hand-written ping-pong anywhere.
     for (std::uint32_t step = 0; step < steps; ++step)
     {
-        const Arcane::RgCompiledNode& node = compiled.nodes[5 + step];
+        const Arcane::RgCompiledNode& node = compiled.nodes[8 + step];
         REQUIRE(node.preBarriers.size() == 2);
         bool read = false, write = false;
         for (const Arcane::RgBarrier& barrier : node.preBarriers)
@@ -5973,7 +6023,7 @@ TEST_CASE("nri graph frame: the pick chain's barriers are derived, including the
     // SHADER_RESOURCE. The backbuffer gets none, and that is DERIVED rather
     // than forgotten -- the tonemap already left it in COLOR_ATTACHMENT and a
     // consecutive same-state declaration produces no transition.
-    const Arcane::RgCompiledNode& composite = compiled.nodes[5 + steps];
+    const Arcane::RgCompiledNode& composite = compiled.nodes[8 + steps];
     REQUIRE(composite.preBarriers.size() == 1);
     CHECK(composite.preBarriers[0].isTexture);
     CheckState(composite.preBarriers[0].before, kColorState);
@@ -6046,12 +6096,12 @@ TEST_CASE("nri graph frame: a capture frame copies the backbuffer AFTER the outl
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
     const std::uint32_t steps = handles.jfaStepCount;
 
-    REQUIRE(graph.NodeCount() == 7u + steps);
-    CHECK(std::string(graph.NodeName(5 + steps)) == "outlinecomposite");
-    CHECK(std::string(graph.NodeName(6 + steps)) == "capture");
+    REQUIRE(graph.NodeCount() == 10u + steps);
+    CHECK(std::string(graph.NodeName(8 + steps)) == "outlinecomposite");
+    CHECK(std::string(graph.NodeName(9 + steps)) == "capture");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    const Arcane::RgCompiledNode& capture = compiled.nodes[6 + steps];
+    const Arcane::RgCompiledNode& capture = compiled.nodes[9 + steps];
 
     // The backbuffer transitions COLOR_ATTACHMENT -> COPY_SOURCE at the CAPTURE
     // node, i.e. it was still an attachment through the composite.
@@ -6096,9 +6146,9 @@ TEST_CASE("nri graph frame: the pick + outline chain composes with a post chain"
 
     // batch2d + 3 post + tonemap + pick + pickreadback + seed + composite,
     // plus one node per jump-flood step.
-    CHECK(graph.NodeCount() == 9u + handles.jfaStepCount);
-    CHECK(std::string(graph.NodeName(4)) == "tonemap");
-    CHECK(std::string(graph.NodeName(5)) == "pick");
+    CHECK(graph.NodeCount() == 12u + handles.jfaStepCount);
+    CHECK(std::string(graph.NodeName(7)) == "tonemap");
+    CHECK(std::string(graph.NodeName(8)) == "pick");
     CHECK(std::string(graph.NodeName(graph.NodeCount() - 1)) == "outlinecomposite");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
@@ -6123,12 +6173,12 @@ TEST_CASE("nri graph frame: the HUD node is absent unless the frame carries draw
 
         Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 2);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 5);
+        CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
-        CHECK(compiled.nodes.size() == 2);
+        CHECK(compiled.nodes.size() == 5);
         CHECK(compiled.transients.size() == 1);   // the canvas, and nothing else
         CHECK(compiled.poolSlotCount == 1);
     }
@@ -6146,12 +6196,12 @@ TEST_CASE("nri graph frame: the HUD node is absent unless the frame carries draw
 
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 3);
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
-        CHECK(std::string(graph.NodeName(2)) == "imgui");
+        REQUIRE(graph.NodeCount() == 6);
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        CHECK(std::string(graph.NodeName(5)) == "imgui");
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
-        REQUIRE(compiled.nodes.size() == 3);
+        REQUIRE(compiled.nodes.size() == 6);
         CHECK(compiled.transients.size() == 1);
         CHECK(compiled.poolSlotCount == 1);
 
@@ -6165,7 +6215,7 @@ TEST_CASE("nri graph frame: the HUD node is absent unless the frame carries draw
         // same-state transitions. That is deliberately identical to what the
         // outline composite does; the ROP's destination read for the alpha blend
         // is inside AccessBits::COLOR_ATTACHMENT.
-        CHECK(compiled.nodes[2].preBarriers.empty());
+        CHECK(compiled.nodes[5].preBarriers.empty());
 
         // The graph -- not the node -- still leaves the backbuffer
         // present-ready, and the HUD did not add a second exit barrier.
@@ -6183,8 +6233,9 @@ TEST_CASE("nri graph frame: an imgui-only shape (the editor's chrome) declares c
     // batcher, no post chain, no pick/outline, no game HUD, no capture.
     //
     // ===== WHAT THIS CASE DOES AND DOES NOT PIN. READ BEFORE TRUSTING IT. ====
-    // It pins the ENGINE SIDE of the arrangement: given an imgui-only shape,
-    // DeclareGraphFrame emits exactly batch2d/tonemap/imgui, imports (rather
+    // It pins the ENGINE SIDE of the arrangement: given an imgui-only
+    // world == false shape, DeclareGraphFrame emits exactly
+    // letterbox/tonemap/imgui (F5 plan 1 T2), imports (rather
     // than creates) the backbuffer, adds no capture node, and costs one
     // transient in one pool slot. That is drift protection for
     // DeclareGraphFrame, and it is real -- an engine edit that started
@@ -6207,15 +6258,18 @@ TEST_CASE("nri graph frame: an imgui-only shape (the editor's chrome) declares c
     Arcane::RgFrameShape shape;
     shape.canvasWidth  = 1280;
     shape.canvasHeight = 720;
-    // Transcribed from PresentChromeFrame's FrameDesc, which sets `imgui` and
-    // leaves everything else default -- a TRANSCRIPTION, with all the drift
-    // risk that word carries, not a linkage. See the block above.
+    // Transcribed from PresentChromeFrame's FrameDesc, which sets `world =
+    // false` and `imgui` and leaves everything else default -- a
+    // TRANSCRIPTION, with all the drift risk that word carries, not a
+    // linkage. See the block above. (The `world = false` line itself is
+    // pinned by the "PresentChromeFrame sets frame.world = false" source scan.)
     shape.imgui        = true;
+    shape.world        = false;
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
     REQUIRE(graph.NodeCount() == 3);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
+    CHECK(std::string(graph.NodeName(0)) == "letterbox");
     CHECK(std::string(graph.NodeName(1)) == "tonemap");
     CHECK(std::string(graph.NodeName(2)) == "imgui");
 
@@ -6275,21 +6329,21 @@ TEST_CASE("nri graph frame: a capture frame copies the backbuffer AFTER the HUD 
 
     Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 4);
-    CHECK(std::string(graph.NodeName(2)) == "imgui");
-    CHECK(std::string(graph.NodeName(3)) == "capture");
+    REQUIRE(graph.NodeCount() == 7);
+    CHECK(std::string(graph.NodeName(5)) == "imgui");
+    CHECK(std::string(graph.NodeName(6)) == "capture");
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 4);
+    REQUIRE(compiled.nodes.size() == 7);
 
     // The backbuffer is still a COLOUR ATTACHMENT when the HUD runs and only
     // becomes a copy SOURCE at the capture node -- i.e. the HUD's pixels are in
     // the artifact.
-    CHECK(compiled.nodes[2].preBarriers.empty());
-    REQUIRE(compiled.nodes[3].preBarriers.size() == 2);
-    const Arcane::RgBarrier& textureBarrier = compiled.nodes[3].preBarriers[0].isTexture
-                                                ? compiled.nodes[3].preBarriers[0]
-                                                : compiled.nodes[3].preBarriers[1];
+    CHECK(compiled.nodes[5].preBarriers.empty());
+    REQUIRE(compiled.nodes[6].preBarriers.size() == 2);
+    const Arcane::RgBarrier& textureBarrier = compiled.nodes[6].preBarriers[0].isTexture
+                                                ? compiled.nodes[6].preBarriers[0]
+                                                : compiled.nodes[6].preBarriers[1];
     CHECK(textureBarrier.isTexture);
     CheckState(textureBarrier.before, kColorState);
     CheckState(textureBarrier.after,
@@ -6307,8 +6361,8 @@ TEST_CASE("nri graph frame: a null imgui drops the HUD node; a non-null one keep
     // that switch -- without it a difference in the chrome reads as a scene
     // regression.
     const struct { bool imgui; std::size_t nodes; bool hud; } cases[] = {
-        { false, 2, false },
-        { true,  3, true  },
+        { false, 5, false },
+        { true,  6, true  },
     };
 
     for (const auto& expected : cases)
@@ -6353,8 +6407,8 @@ TEST_CASE("nri graph frame: the HUD composes with the post chain and the outline
 
     // batch2d + 2 post + tonemap + pick + pickreadback + outlineseed + N jfa
     // + outlinecomposite + imgui + capture.
-    REQUIRE(graph.NodeCount() == 10u + steps);
-    CHECK(std::string(graph.NodeName(3)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 13u + steps);
+    CHECK(std::string(graph.NodeName(6)) == "tonemap");
     CHECK(std::string(graph.NodeName(graph.NodeCount() - 3)) == "outlinecomposite");
     CHECK(std::string(graph.NodeName(graph.NodeCount() - 2)) == "imgui");
     CHECK(std::string(graph.NodeName(graph.NodeCount() - 1)) == "capture");
@@ -6397,17 +6451,17 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
 
         Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 3);
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
-        CHECK(std::string(graph.NodeName(2)) == "gameui");
+        REQUIRE(graph.NodeCount() == 6);
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        CHECK(std::string(graph.NodeName(5)) == "gameui");
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
-        REQUIRE(compiled.nodes.size() == 3);
+        REQUIRE(compiled.nodes.size() == 6);
         CHECK(compiled.transients.size() == 1);   // the canvas, and nothing else
         CHECK(compiled.poolSlotCount == 1);
         // Same ColorWrite the tonemap declared -> no derived transition, exactly
         // like the host HUD's and the outline composite's.
-        CHECK(compiled.nodes[2].preBarriers.empty());
+        CHECK(compiled.nodes[5].preBarriers.empty());
     }
 
     {
@@ -6424,10 +6478,10 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
 
         // batch2d + tonemap + gameui + pick + pickreadback + outlineseed
         // + N jfa + outlinecomposite.
-        REQUIRE(graph.NodeCount() == 7u + steps);
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
-        CHECK(std::string(graph.NodeName(2)) == "gameui");
-        CHECK(std::string(graph.NodeName(3)) == "pick");
+        REQUIRE(graph.NodeCount() == 10u + steps);
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        CHECK(std::string(graph.NodeName(5)) == "gameui");
+        CHECK(std::string(graph.NodeName(6)) == "pick");
         CHECK(std::string(graph.NodeName(graph.NodeCount() - 1)) == "outlinecomposite");
     }
 
@@ -6451,8 +6505,8 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
         const std::uint32_t steps = handles.jfaStepCount;
 
-        REQUIRE(graph.NodeCount() == 9u + steps);
-        CHECK(std::string(graph.NodeName(2)) == "gameui");
+        REQUIRE(graph.NodeCount() == 12u + steps);
+        CHECK(std::string(graph.NodeName(5)) == "gameui");
         CHECK(std::string(graph.NodeName(graph.NodeCount() - 3)) == "outlinecomposite");
         CHECK(std::string(graph.NodeName(graph.NodeCount() - 2)) == "imgui");
         CHECK(std::string(graph.NodeName(graph.NodeCount() - 1)) == "capture");
@@ -6461,7 +6515,7 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
         // FOUR consecutive ColorWrite declarations on the backbuffer (tonemap,
         // gameui, outlinecomposite, imgui) still derive exactly one transition
         // out of it, and none between them.
-        CHECK(compiled.nodes[2].preBarriers.empty());
+        CHECK(compiled.nodes[5].preBarriers.empty());
         REQUIRE(compiled.exitBarriers.size() == 1);
         CheckState(compiled.exitBarriers[0].after, kPresentState);
         // The game HUD adds no pool slot -- its atlas is node-owned, not a
@@ -6491,8 +6545,8 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
             shape.gameUi       = false;   // no game HUD this frame
 
             Arcane::DeclareGraphFrame(graph, shape, nullptr);
-            REQUIRE(graph.NodeCount() == 2);   // batch2d + tonemap only -- no gameui node
-            CHECK(std::string(graph.NodeName(1)) == "tonemap");
+            REQUIRE(graph.NodeCount() == 5);   // gbuffer, lighting, batch2d, taa, tonemap only -- no gameui node
+            CHECK(std::string(graph.NodeName(4)) == "tonemap");
         }
 
         Arcane::RenderGraph graph;
@@ -6502,8 +6556,8 @@ TEST_CASE("nri graph frame: the GAME UI node sits between the tonemap and the ou
         shape.gameUi       = true;
 
         Arcane::DeclareGraphFrame(graph, shape, nullptr);
-        REQUIRE(graph.NodeCount() == 3);
-        CHECK(std::string(graph.NodeName(2)) == "gameui");
+        REQUIRE(graph.NodeCount() == 6);
+        CHECK(std::string(graph.NodeName(5)) == "gameui");
     }
 }
 
@@ -6535,13 +6589,13 @@ TEST_CASE("nri graph frame: (T4P4) depth=false leaves the frame byte-for-byte th
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 2);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 5);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+    CHECK(std::string(graph.NodeName(4)) == "tonemap");
     CHECK_FALSE(graph.IsHandleValid(handles.depth));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    CHECK(compiled.nodes.size() == 2);
+    CHECK(compiled.nodes.size() == 5);
     CHECK(compiled.transients.size() == 1);   // the canvas, and nothing else
     CHECK(compiled.poolSlotCount == 1);
 }
@@ -6559,10 +6613,10 @@ TEST_CASE("nri graph frame: (T4P4) depth=true declares a D32_SFLOAT depth transi
 
     // batch2d, depth, tonemap -- declared right after the canvas, per
     // DeclareGraphFrame's own placement comment on the depth block.
-    REQUIRE(graph.NodeCount() == 3);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "depth");
-    CHECK(std::string(graph.NodeName(2)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 6);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "depth", "tonemap" }));
+    CHECK(std::string(graph.NodeName(3)) == "depth");
+    CHECK(std::string(graph.NodeName(5)) == "tonemap");
 
     REQUIRE(graph.IsHandleValid(handles.depth));
     CHECK(graph.IsTransient(handles.depth));
@@ -6573,7 +6627,7 @@ TEST_CASE("nri graph frame: (T4P4) depth=true declares a D32_SFLOAT depth transi
     CHECK_FALSE(graph.WasWritten(handles.depth));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    CHECK(compiled.nodes.size() == 3);
+    CHECK(compiled.nodes.size() == 6);
     // Compile() enumerates EVERY declared transient regardless of whether any
     // node touches it (RenderGraph.cpp Pass 3), so depth gets a `transients`
     // entry same as canvas -- but only canvas gets a pool slot: "a transient
@@ -6614,9 +6668,9 @@ TEST_CASE("nri graph frame: (T4P4) a node that declares DepthWrite against the f
     CHECK(graph.WasWritten(handles.depth));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 4);   // batch2d, depth, tonemap, test-depth-consumer
-    REQUIRE(compiled.nodes[3].preBarriers.size() == 1);
-    const Arcane::RgBarrier& barrier = compiled.nodes[3].preBarriers[0];
+    REQUIRE(compiled.nodes.size() == 7);   // gbuffer, lighting, batch2d, depth, taa, tonemap, test-depth-consumer
+    REQUIRE(compiled.nodes[6].preBarriers.size() == 1);
+    const Arcane::RgBarrier& barrier = compiled.nodes[6].preBarriers[0];
     CHECK(barrier.isTexture);
     CHECK(barrier.resourceIndex == 1u);   // the depth texture's decoded slot (canvas is 0)
     CheckState(barrier.before, kUnknownState);   // first use -- the transient's contents were undefined
@@ -6660,9 +6714,9 @@ TEST_CASE("nri graph frame: (T7P4) a frame with no mesh scene is byte-for-byte T
 
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 2);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 5);
+        CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
         CHECK_FALSE(graph.IsHandleValid(handles.depth));
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
@@ -6680,10 +6734,10 @@ TEST_CASE("nri graph frame: (T7P4) a frame with no mesh scene is byte-for-byte T
 
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 3);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "depth");
-        CHECK(std::string(graph.NodeName(2)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 6);
+        CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "depth", "tonemap" }));
+        CHECK(std::string(graph.NodeName(3)) == "depth");
+        CHECK(std::string(graph.NodeName(5)) == "tonemap");
         REQUIRE(graph.IsHandleValid(handles.depth));
         // Still unconsumed: the placeholder creates the resource and nothing
         // else, exactly as Task 4 left it.
@@ -6719,12 +6773,12 @@ TEST_CASE("nri graph frame: (T7P4) a mesh scene declares 'mesh' between the canv
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    REQUIRE(graph.NodeCount() == 5);
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
-    CHECK(std::string(graph.NodeName(1)) == "gpuscene-sync");
-    CHECK(std::string(graph.NodeName(2)) == "mesh-cull");
-    CHECK(std::string(graph.NodeName(3)) == "mesh");
-    CHECK(std::string(graph.NodeName(4)) == "tonemap");
+    REQUIRE(graph.NodeCount() == 8);
+    CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "gpuscene-sync", "mesh-cull", "mesh", "tonemap" }));
+    CHECK(std::string(graph.NodeName(3)) == "gpuscene-sync");
+    CHECK(std::string(graph.NodeName(4)) == "mesh-cull");
+    CHECK(std::string(graph.NodeName(5)) == "mesh");
+    CHECK(std::string(graph.NodeName(7)) == "tonemap");
 
     // ONE "depth" texture in the graph, minted by the mesh node itself -- not
     // by Task 4's placeholder, which is not declared at all on this frame
@@ -6737,7 +6791,7 @@ TEST_CASE("nri graph frame: (T7P4) a mesh scene declares 'mesh' between the canv
     CHECK(graph.WasWritten(handles.canvas));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
-    REQUIRE(compiled.nodes.size() == 5);
+    REQUIRE(compiled.nodes.size() == 8);
 
     // THE DERIVED CHAIN. batch2d took the canvas UNDEFINED ->
     // COLOR_ATTACHMENT; the mesh node declares the SAME state for it, and
@@ -6745,9 +6799,9 @@ TEST_CASE("nri graph frame: (T7P4) a mesh scene declares 'mesh' between the canv
     // -- so the mesh node's ONE TEXTURE barrier is the depth target's first
     // use (its visible/args BUFFER barriers come from the cull output). A mesh node
     // that declared the canvas as ShaderRead instead would carry two.
-    REQUIRE(compiled.nodes[3].preBarriers.size() == 3);
+    REQUIRE(compiled.nodes[5].preBarriers.size() == 3);
     const Arcane::RgBarrier* depthBarrier = nullptr;
-    for (const Arcane::RgBarrier& barrier : compiled.nodes[3].preBarriers)
+    for (const Arcane::RgBarrier& barrier : compiled.nodes[5].preBarriers)
         if (barrier.isTexture)
         {
             CHECK(depthBarrier == nullptr);   // exactly one texture barrier
@@ -7004,12 +7058,12 @@ TEST_CASE("nri graph frame (T6F3/T7): a registry-backed scene declares 'gpuscene
         shape.canvasHeight = 200;
         shape.mesh         = &scene;
         (void)Arcane::DeclareGraphFrame(graph, shape, nullptr);
-        REQUIRE(graph.NodeCount() == 5);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "gpuscene-sync");   // IMMEDIATELY before mesh
-        CHECK(std::string(graph.NodeName(2)) == "mesh-cull");
-        CHECK(std::string(graph.NodeName(3)) == "mesh");
-        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 8);
+        CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "gpuscene-sync", "mesh-cull", "mesh", "tonemap" }));
+        CHECK(std::string(graph.NodeName(3)) == "gpuscene-sync");   // IMMEDIATELY before mesh
+        CHECK(std::string(graph.NodeName(4)) == "mesh-cull");
+        CHECK(std::string(graph.NodeName(5)) == "mesh");
+        CHECK(std::string(graph.NodeName(7)) == "tonemap");
     };
 
     SECTION("(a) draws, no instances: the pass is declared, sync ahead of mesh")
@@ -7051,31 +7105,27 @@ TEST_CASE("nri graph frame (T6F3/T7): a registry-backed scene declares 'gpuscene
         shape.canvasHeight = 200;
         shape.mesh         = &scene;
         (void)Arcane::DeclareGraphFrame(graph, shape, nullptr);
-        REQUIRE(graph.NodeCount() == 2);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 5);
+        CHECK(NodeNames(graph) == WithReservedSlots({ "batch2d", "tonemap" }));
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
     }
 }
 
 // =========================================================================
-// F4 plan 1 Task 10 (spec s5.2): THE 3D REFERENCE GRID -- GridNode, the
-// analytic depth-tested ground grid, declared AFTER the mesh pass and READING
-// its depth transient as a depth attachment it tests against but never writes
-// (the PSO's depth.write = false; the graph-level declaration is still
-// DepthWrite, the only barrier state a bound depth attachment has).
+// F4 plan 1 Task 10 (spec s5.2): THE 3D REFERENCE GRID -- since F5 plan 1
+// Task 3 drawn by the post-tonemap OVERLAY node, declared right AFTER the
+// tonemap. There is no node named "grid" on the frame any more. The overlay
+// SAMPLES the mesh pass's depth transient (Read as ShaderRead) instead of
+// attaching it, so it declares no depth load op and carries one barrier: the
+// depth moving from the mesh pass's attachment state to shader-read.
 //
-// THE SPEC S14 LIFETIME RISK, pinned here: GridNode consumes the depth
-// transient MeshNode minted, so that transient must outlive MeshNode's own
-// record. That is a DECLARATION fact, not an ownership one -- Compile()
-// derives every transient's lifetime as [first node that touches it, LAST
-// node that touches it] (RgCompiled::Lifetime), so the grid node's Write
-// alone extends the depth transient's pool tenancy through the grid node.
-// No resource moved and MeshNode is untouched; the cases below assert the
-// lifetime directly.
+// THE SPEC S14 LIFETIME, still a declaration fact: the overlay's Read extends
+// the depth transient's pool tenancy from the mesh node (first toucher)
+// through the overlay node (last toucher).
 // =========================================================================
 
-TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'grid' after 'mesh', "
-          "reading the mesh depth as its depth attachment", "[nri][graph]")
+TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'overlay' after 'tonemap', "
+          "sampling the mesh depth", "[nri][graph]")
 {
     Arcane::MeshInstance one;
     one.mesh = Arcane::Guid{ 1, 1 };
@@ -7086,7 +7136,7 @@ TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'grid' af
 
     Arcane::GridSceneDesc grid;   // XZ plane; the tunables are zero (MakeGridScene fills them) -- the declaration shape does not read them
 
-    SECTION("with a mesh scene: batch2d, gpuscene-sync, mesh-cull, mesh, grid, tonemap -- one shared depth transient")
+    SECTION("with a mesh scene: ... mesh, taa, tonemap, overlay -- one shared depth transient, read by the overlay")
     {
         Arcane::RenderGraph graph;
         Arcane::RgFrameShape shape;
@@ -7097,46 +7147,46 @@ TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'grid' af
 
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        // F3 plan 1 T6: the GPU scene's Copy node rides ahead of mesh.
-        REQUIRE(graph.NodeCount() == 6);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "gpuscene-sync");
-        CHECK(std::string(graph.NodeName(2)) == "mesh-cull");
-        CHECK(std::string(graph.NodeName(3)) == "mesh");
-        CHECK(std::string(graph.NodeName(4)) == "grid");
-        CHECK(std::string(graph.NodeName(5)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 9);
+        CHECK(NodeNames(graph) == std::vector<std::string>{ "gbuffer", "lighting", "batch2d", "gpuscene-sync",
+                                                            "mesh-cull", "mesh", "taa", "tonemap", "overlay" });
+        CHECK(std::string(graph.NodeName(3)) == "gpuscene-sync");
+        CHECK(std::string(graph.NodeName(4)) == "mesh-cull");
+        CHECK(std::string(graph.NodeName(5)) == "mesh");
+        CHECK(std::string(graph.NodeName(7)) == "tonemap");
+        CHECK(std::string(graph.NodeName(8)) == "overlay");
 
-        // ONE depth transient, minted by the mesh node; the grid node did not
-        // mint a second one.
+        // ONE depth transient, minted by the mesh node and READ by the overlay.
         REQUIRE(graph.IsHandleValid(handles.depth));
         CHECK(std::string(graph.NameOf(handles.depth)) == "depth");
         CHECK(graph.WasWritten(handles.depth));
+        CHECK(graph.WasRead(handles.depth));
         CHECK(graph.WasWritten(handles.canvas));
+        CHECK(graph.DepthLoadOp(8) == nullptr);   // sampled, not attached
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
-        REQUIRE(compiled.nodes.size() == 6);
-        REQUIRE(compiled.transients.size() == 2);   // canvas + the ONE depth (imported buffers are not transients)
+        REQUIRE(compiled.nodes.size() == 9);
+        REQUIRE(compiled.transients.size() == 2);   // canvas + the ONE depth (the backbuffer is imported)
 
-        // THE LIFETIME (spec s14): the depth transient is texture slot 1 and
-        // its tenancy runs from the mesh node (first toucher) THROUGH the
-        // grid node (last toucher) -- which is the whole of "the depth
-        // outlives MeshNode's record".
+        // THE LIFETIME (spec s14): mesh (first toucher) through overlay (last).
         CHECK(compiled.transients[1].resourceIndex == 1u);
-        CHECK(compiled.transientLifetimes[1].first == 3u);   // mesh
-        CHECK(compiled.transientLifetimes[1].last  == 4u);   // grid
+        CHECK(compiled.transientLifetimes[1].first == 5u);   // mesh
+        CHECK(compiled.transientLifetimes[1].last  == 8u);   // overlay
         CHECK(compiled.transientPoolSlot[1] != Arcane::kRgNoPoolSlot);
         CHECK(compiled.poolSlotCount == 2);
 
-        // THE BARRIERS: the grid node declares the SAME state the mesh node
-        // left both targets in (canvas COLOR_ATTACHMENT, depth
-        // DEPTH_STENCIL_ATTACHMENT), and consecutive same-state declarations
-        // derive NO barrier -- so the grid node carries none. A grid node that
-        // read the depth as ShaderRead (a texture, not an attachment) would
-        // carry one, and that is exactly the shape spec s5.2 does NOT want.
-        CHECK(compiled.nodes[4].preBarriers.empty());
+        // THE BARRIERS: exactly one -- the depth moving to the shader-read
+        // state. The backbuffer is already in the ColorWrite state the
+        // tonemap left, so it contributes none.
+        REQUIRE(compiled.nodes[8].preBarriers.size() == 1u);
+        const Arcane::RgBarrier& depthBarrier = compiled.nodes[8].preBarriers[0];
+        CHECK(depthBarrier.isTexture);
+        CHECK(depthBarrier.resourceIndex == 1u);   // the depth texture's slot (transients[1] above)
+        CHECK(depthBarrier.after.layout == nri::Layout::SHADER_RESOURCE);
+        CHECK(depthBarrier.after.access == nri::AccessBits::SHADER_RESOURCE);
     }
 
-    SECTION("with no mesh scene: 'grid' is still declared, with no depth attachment")
+    SECTION("with no mesh scene: 'overlay' is still declared, reading no depth")
     {
         Arcane::RenderGraph graph;
         Arcane::RgFrameShape shape;
@@ -7146,21 +7196,22 @@ TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'grid' af
 
         const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-        REQUIRE(graph.NodeCount() == 3);
-        CHECK(std::string(graph.NodeName(0)) == "batch2d");
-        CHECK(std::string(graph.NodeName(1)) == "grid");
-        CHECK(std::string(graph.NodeName(2)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 6);
+        CHECK(NodeNames(graph) == std::vector<std::string>{ "gbuffer", "lighting", "batch2d", "taa", "tonemap",
+                                                            "overlay" });
+        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        CHECK(std::string(graph.NodeName(5)) == "overlay");
         CHECK_FALSE(graph.IsHandleValid(handles.depth));
         CHECK(graph.WasWritten(handles.canvas));
 
         const Arcane::RgCompiled compiled = CompileOk(graph);
-        REQUIRE(compiled.nodes.size() == 3);
+        REQUIRE(compiled.nodes.size() == 6);
         CHECK(compiled.transients.size() == 1);   // the canvas, and nothing else
         CHECK(compiled.poolSlotCount == 1);
-        CHECK(compiled.nodes[1].preBarriers.empty());   // canvas already COLOR_ATTACHMENT
+        CHECK(compiled.nodes[5].preBarriers.empty());   // backbuffer already ColorWrite
     }
 
-    SECTION("with no grid scene: the frame is byte-for-byte the pre-T10 mesh frame")
+    SECTION("with no grid scene: the frame is byte-for-byte the pre-T10 mesh frame, no overlay")
     {
         Arcane::RenderGraph graph;
         Arcane::RgFrameShape shape;
@@ -7169,11 +7220,13 @@ TEST_CASE("nri graph frame: (T10F4) a frame with a grid scene declares 'grid' af
         shape.mesh         = &scene;
 
         (void)Arcane::DeclareGraphFrame(graph, shape, nullptr);
-        REQUIRE(graph.NodeCount() == 5);   // batch2d, gpuscene-sync, mesh-cull, mesh, tonemap
-        CHECK(std::string(graph.NodeName(1)) == "gpuscene-sync");
-        CHECK(std::string(graph.NodeName(2)) == "mesh-cull");
-        CHECK(std::string(graph.NodeName(3)) == "mesh");
-        CHECK(std::string(graph.NodeName(4)) == "tonemap");
+        REQUIRE(graph.NodeCount() == 8);   // gbuffer, lighting, batch2d, gpuscene-sync, mesh-cull, mesh, taa, tonemap
+        CHECK(std::string(graph.NodeName(3)) == "gpuscene-sync");
+        CHECK(std::string(graph.NodeName(4)) == "mesh-cull");
+        CHECK(std::string(graph.NodeName(5)) == "mesh");
+        CHECK(std::string(graph.NodeName(7)) == "tonemap");
+        for (std::size_t i = 0; i < graph.NodeCount(); ++i)
+            CHECK(std::string(graph.NodeName(i)) != "overlay");
     }
 }
 
@@ -7591,8 +7644,8 @@ TEST_CASE("nri graph frame: the batch stage declares one canvas transient and no
 
     const Arcane::RgFrameHandles handles = Arcane::DeclareGraphFrame(graph, shape, nullptr);
 
-    CHECK(graph.NodeCount() == 2);                  // batch2d, tonemap
-    CHECK(std::string(graph.NodeName(0)) == "batch2d");
+    CHECK(graph.NodeCount() == 5);                  // gbuffer, lighting, batch2d, taa, tonemap
+    CHECK(std::string(graph.NodeName(2)) == "batch2d");
     CHECK(graph.IsTransient(handles.canvas));
 
     const Arcane::RgCompiled compiled = CompileOk(graph);
@@ -7601,7 +7654,7 @@ TEST_CASE("nri graph frame: the batch stage declares one canvas transient and no
     CHECK(compiled.transients.size() == 1);
     CHECK(compiled.poolSlotCount == 1);
     // The batch node transitions exactly one resource: the canvas it writes.
-    CHECK(compiled.nodes[0].preBarriers.size() == 1);
+    CHECK(compiled.nodes[2].preBarriers.size() == 1);
 }
 
 TEST_CASE("nri graph frame: the batch's descriptor-set count is its distinct texture count",
@@ -7712,3 +7765,144 @@ TEST_CASE("nri graph frame: the batch node's descriptor pool covers what its cap
         CHECK(pool.descriptorSetMaxNum >= matSlots * frames);
     }
 }
+
+// ===== F5 plan 1, Task 2: declarative load ops, empty D1 slots, chrome letterbox =====
+
+TEST_CASE("batch2d colour load-op clears to render.clearColor and mesh loads colour", "[nri][loadop]")
+{
+    Arcane::RenderGraph graph;
+    Arcane::RgFrameShape shape;
+    shape.canvasWidth  = 64;
+    shape.canvasHeight = 64;
+    Arcane::MeshInstance one;
+    one.mesh = Arcane::Guid{ 1, 1 };
+    const Arcane::MeshInstance instances[] = { one };
+    Arcane::MeshSceneDesc scene;
+    scene.instances = instances;   // span, not a vector (MeshNode.hpp:283)
+    shape.mesh = &scene;
+    Arcane::DeclareGraphFrame(graph, shape, nullptr);
+
+    const std::size_t batch = NodeIndex(graph, "batch2d");
+    const Arcane::RgAttachmentOp* color = graph.ColorLoadOp(batch, 0);
+    REQUIRE(color != nullptr);
+    CHECK(color->load == Arcane::RgLoadOp::Clear);
+    const Arcane::CVarColor expected = Arcane::Settings<Arcane::RenderSettings>().clearColor;
+    CHECK(color->clear.color.f.x == expected.r);
+    CHECK(color->clear.color.f.y == expected.g);
+    CHECK(color->clear.color.f.z == expected.b);
+    CHECK(color->clear.color.f.w == expected.a);
+
+    const std::size_t mesh = NodeIndex(graph, "mesh");
+    const Arcane::RgAttachmentOp* meshColor = graph.ColorLoadOp(mesh, 0);
+    REQUIRE(meshColor != nullptr);
+    CHECK(meshColor->load == Arcane::RgLoadOp::Load);
+    const Arcane::RgAttachmentOp* meshDepth = graph.DepthLoadOp(mesh);
+    REQUIRE(meshDepth != nullptr);
+    CHECK(meshDepth->load == Arcane::RgLoadOp::Clear);
+    CHECK(meshDepth->clear.depthStencil.depth ==
+          Arcane::DepthClearValue(Arcane::kSelectedDepthConvention));
+
+    const std::size_t gbuffer = NodeIndex(graph, "gbuffer");
+    CHECK(graph.ColorLoadOp(gbuffer, 0) == nullptr);
+    CHECK(graph.DepthLoadOp(gbuffer) == nullptr);
+}
+
+TEST_CASE("reserved D1 slots are empty and sit around the world nodes", "[nri][loadop]")
+{
+    Arcane::RenderGraph graph;
+    Arcane::RgFrameShape shape;
+    shape.canvasWidth  = 64;
+    shape.canvasHeight = 64;
+    Arcane::DeclareGraphFrame(graph, shape, nullptr);
+
+    const std::vector<std::string> names = NodeNames(graph);
+    CHECK(names == std::vector<std::string>{ "gbuffer", "lighting", "batch2d", "taa", "tonemap" });
+
+    for (const char* empty : { "gbuffer", "lighting", "taa" })
+    {
+        const std::size_t i = NodeIndex(graph, empty);
+        CHECK(graph.ColorLoadOp(i, 0) == nullptr);
+        CHECK(graph.DepthLoadOp(i) == nullptr);
+    }
+}
+
+// Review Focus 1.
+TEST_CASE("chrome world=false is letterbox, tonemap, imgui", "[nri][loadop]")
+{
+    Arcane::RenderGraph graph;
+    Arcane::RgFrameShape shape;
+    shape.canvasWidth  = 1280;
+    shape.canvasHeight = 720;
+    shape.imgui        = true;
+    shape.world        = false;
+    Arcane::DeclareGraphFrame(graph, shape, nullptr);
+
+    CHECK(NodeNames(graph) == std::vector<std::string>{ "letterbox", "tonemap", "imgui" });
+    const std::size_t letter = NodeIndex(graph, "letterbox");
+    const Arcane::RgAttachmentOp* clear = graph.ColorLoadOp(letter, 0);
+    REQUIRE(clear != nullptr);
+    CHECK(clear->load == Arcane::RgLoadOp::Clear);
+    const Arcane::CVarColor expected = Arcane::Settings<Arcane::RenderSettings>().clearColor;
+    CHECK(clear->clear.color.f.x == expected.r);
+
+    for (const char* banned : { "batch2d", "mesh", "grid", "overlay", "gbuffer",
+                                "lighting", "taa", "gpuscene-sync", "mesh-cull" })
+        CHECK(NodeIndexOrNpos(graph, banned) == static_cast<std::size_t>(-1));
+}
+
+TEST_CASE("an empty world batcher still declares batch2d", "[nri][loadop]")
+{
+    Arcane::RenderGraph graph;
+    Arcane::RgFrameShape shape;
+    shape.canvasWidth  = 32;
+    shape.canvasHeight = 32;
+    // world defaults true. No batcher pointer on the shape: declaration only.
+    Arcane::DeclareGraphFrame(graph, shape, nullptr);
+    CHECK(NodeIndexOrNpos(graph, "batch2d") != static_cast<std::size_t>(-1));
+    CHECK(NodeIndexOrNpos(graph, "letterbox") == static_cast<std::size_t>(-1));
+}
+
+TEST_CASE("PresentChromeFrame sets frame.world = false", "[nri][loadop]")
+{
+    std::ifstream in(Arcane::Test::RepoRoot() / "Source/Programs/ArcaneEditor/src/App/EditorAppFrame.cpp");
+    REQUIRE(in.good());
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    const std::size_t fn = text.find("EditorApp::PresentChromeFrame()");
+    REQUIRE(fn != std::string::npos);
+    // Member definitions are indented four spaces inside `namespace Arcane::Editor`
+    // (EditorAppFrame.cpp:4026), so the body ends at the first four-space `}` line.
+    const std::size_t next = text.find("\n    }\n", fn + 1);
+    REQUIRE(next != std::string::npos);
+    const std::string body = text.substr(fn, next - fn);
+    CHECK(body.find("frame.world = false;") != std::string::npos);
+}
+
+TEST_CASE("batch2d and mesh Record no longer call CmdClearAttachments", "[nri][loadop]")
+{
+    auto read = [](const char* rel) {
+        std::ifstream in(Arcane::Test::RepoRoot() / rel);
+        REQUIRE(in.good());
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    };
+    auto recordBody = [](const std::string& text, const char* sig) {
+        const std::size_t fn = text.find(sig);
+        REQUIRE(fn != std::string::npos);
+        return text.substr(fn, 2500);
+    };
+    const std::string batch = recordBody(
+        read("Source/Client/ArcaneRender/src/Arcane/Render/Nri/nodes/Batch2DNode.cpp"),
+        "void Batch2DNode::Record(");
+    const std::string mesh = recordBody(
+        read("Source/Client/ArcaneRender/src/Arcane/Render/Nri/nodes/MeshNode.cpp"),
+        "void MeshNode::Record(");
+    CHECK(batch.find("CmdClearAttachments") == std::string::npos);
+    CHECK(mesh.find("CmdClearAttachments") == std::string::npos);
+    // Pick keeps its own clear. This scan is the guard that the deletion stayed local.
+    const std::string pick = read("Source/Client/ArcaneRender/src/Arcane/Render/Nri/nodes/PickOutlineNodes.cpp");
+    CHECK(pick.find("CmdClearAttachments") != std::string::npos);
+}
+

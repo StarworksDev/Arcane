@@ -8,7 +8,7 @@
 
 #include <Arcane/Base/ProcessContext.hpp>
 #include <Arcane/Base/Runtime.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>      // Arcane::PhysicsWorld2D
+#include <Arcane/Scene/Physics2DWorld.hpp>      // Arcane::PhysicsWorld2D
 #include <Arcane/Scene/SceneResources.hpp>     // SceneRoot / Arcane::PhysicsInterpBuffer2D / the four tables
 #include <Arcane/Scene/TransformSystems.hpp>   // TransformOrder
 
@@ -58,7 +58,10 @@ TEST_CASE("ProcessContext::Create leaves every engine resource type resolved and
         CHECK(first != Astra::INVALID_COMPONENT);
         CHECK(Astra::TypeID<T>::Value() == first);
     };
-    // The list must track EngineResourceTypes.cpp's.
+    // The list tracks EngineResourceTypes.cpp's, plus PhysicsWorld2D: the 2D physics
+    // hook's Prewarm touches it (ProcessContext::Create), so it is no longer in
+    // EngineResourceTypes.cpp but stays pinned here. Presence and stability only;
+    // the id order of resource types is not asserted.
     pin(std::type_identity<Arcane::SceneRoot>{});
     pin(std::type_identity<Arcane::PhysicsInterpBuffer2D>{});
     pin(std::type_identity<Arcane::SpriteTable>{});

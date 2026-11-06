@@ -6,7 +6,7 @@
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Platform/Paths.hpp>   // Arcane::Paths -- Saved/Diagnostics and editor.lock resolve through it (settings spec s11.0)
 #include <Arcane/Plugin/PluginABI.hpp>   // Arcane::kGamePluginABIVersion
-#include <Arcane/Platform/Process.hpp>   // Platform::QueryProcess -- EditorLock liveness off-Windows
+#include <Arcane/Platform/Process.hpp>   // Platform::IsProcessLive (EditorLock::IsLive), QueryProcess (Self off-Windows)
 #include <Arcane/Project/ProjectPaths.hpp>   // PathsConfigFor, kDistBuild
 #include <Arcane/Project/GameDescriptor.hpp>   // Create writes the default game descriptor
 
@@ -785,11 +785,10 @@ namespace Arcane
 #ifndef _WIN32
         namespace
         {
-            // The liveness oracle (Linux: /proc/<pid>/stat; macOS:
-            // proc_pidinfo -- Arcane/Platform/Process.hpp): the pid exists,
-            // its creation stamp (a recycled pid has a different one), and
-            // whether it has exited awaiting its parent's reap -- the POSIX
-            // twin of Windows' lingering process OBJECT.
+            // The process-table snapshot (Linux: /proc/<pid>/stat; macOS:
+            // proc_pidinfo -- Arcane/Platform/Process.hpp). Self() takes its
+            // creation stamp (a recycled pid has a different one); the
+            // liveness tells over the same query are Platform::IsProcessLive.
             Platform::ProcessStat ReadProcStat(uint32_t pid)
             {
                 return Platform::QueryProcess(pid);
@@ -844,49 +843,14 @@ namespace Arcane
             const auto info = Parse(text);
             if (!info)
                 return std::nullopt;
-#ifdef _WIN32
-            // The validation that defeats staleness, in THREE tells -- all of
-            // which must hold before the lock is believed:
-            //   1. the pid still OPENS (a pid nobody holds is simply gone),
-            //   2. its creation time MATCHES what the lock recorded (a
-            //      recycled pid has a different birth; a crashed editor has
-            //      none), and
-            //   3. it has NOT exited -- zero exit time.
-            HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, info->pid);
-            if (!h)
-                return std::nullopt;
-            FILETIME created{}, exited{}, kernel{}, user{};
-            const bool ok = ::GetProcessTimes(h, &created, &exited, &kernel, &user);
-            ::CloseHandle(h);
-            if (!ok)
-                return std::nullopt;
-            const uint64_t start = (static_cast<uint64_t>(created.dwHighDateTime) << 32) |
-                                   created.dwLowDateTime;
-            if (info->start != 0 && info->start != start)
-                return std::nullopt;
-            // Tell 3, and why tells 1+2 alone were not enough (2026-09-08 desk
-            // pass): a process OBJECT outlives its process for as long as any
-            // handle to it survives, and the pid is reserved that whole time.
-            // A parent holding a dead editor's handle -- the Hub does exactly
-            // this -- kept OpenProcess succeeding with the ORIGINAL creation
-            // time intact, so the project read as "already open" forever. Exit
-            // time is the tell that cannot be faked by a lingering handle:
-            // nonzero means it exited, however many handles remain.
-            if (exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0)
-                return std::nullopt;
-            return info->pid;
-#else
-            // The same three tells via the OS process table (see ReadProcStat): the pid still
-            // has a stat entry, its start time matches, and it is not a zombie.
-            const Platform::ProcessStat st = ReadProcStat(info->pid);
-            if (!st.found)
-                return std::nullopt;
-            if (info->start != 0 && info->start != st.start)
-                return std::nullopt;
-            if (st.exited)
-                return std::nullopt;
-            return info->pid;
-#endif
+            // The three tells (pid opens, creation time matches, not exited)
+            // live in Platform::IsProcessLive, both platforms.
+            return IsLive(*info) ? std::optional<uint32_t>(info->pid) : std::nullopt;
+        }
+
+        bool IsLive(const Info& info)
+        {
+            return Platform::IsProcessLive(info.pid, info.start);
         }
 
         std::optional<uint32_t> RivalPid(const std::filesystem::path& projectRoot)

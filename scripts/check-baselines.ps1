@@ -18,9 +18,10 @@
 # regression that deleted a thousand non-GPU assertions would still have
 # reported a rise and exited 0 -- the guard was live and effectively inert on
 # the lane that matters most. Making the invocation part of the match means a
-# mismatched lane falls through to "NO BASELINE -- not checked", loudly, instead
-# of passing on slack it never earned. Not-checked-loudly beats
-# cannot-fail-silently.
+# mismatched lane has NO BASELINE and FAILS (exit 1) instead of passing on
+# slack it never earned, unless scripts/baseline-exemptions.json names that
+# (configuration, invocation) pair with a reason. Fail-closed beats
+# not-checked-loudly beats cannot-fail-silently.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReportPath,
@@ -106,6 +107,12 @@ if ($assertions -le 0 -or $cases -le 0) {
     exit 1
 }
 
+$exemptions = @()
+$exemptionPath = Join-Path (Split-Path -Parent $BaselinePath) 'baseline-exemptions.json'
+if (Test-Path $exemptionPath) {
+    $exemptions = @((Get-Content $exemptionPath -Raw | ConvertFrom-Json).exemptions)
+}
+
 $failed = $false
 foreach ($metric in @(
     @{ Name = 'arcanetests.assertions'; Actual = $assertions; Unit = 'assertions' },
@@ -113,7 +120,7 @@ foreach ($metric in @(
 )) {
     # NAME *AND* CONFIGURATION *AND* INVOCATION. An entry with no `invocation`
     # field never matches: [string]$null is '' and no lane passes an empty
-    # -Invocation, so an un-migrated baseline file reports "not checked" rather
+    # -Invocation, so an un-migrated baseline file fails (no baseline) rather
     # than silently comparing counts taken a different way.
     $entry = $baseline.baselines | Where-Object {
         $_.name -eq $metric.Name -and
@@ -121,7 +128,19 @@ foreach ($metric in @(
         [string]$_.invocation -eq $Invocation
     }
     if (-not $entry) {
-        Write-Host "telemetry: $($metric.Name) [$Configuration/$Invocation] = $($metric.Actual) $($metric.Unit) (NO BASELINE -- not checked)" -ForegroundColor Yellow
+        # FAIL CLOSED. A lane with no measured baseline proves nothing, so it exits 1
+        # unless scripts/baseline-exemptions.json names this (configuration, invocation)
+        # pair with a non-empty reason.
+        $exempt = $exemptions | Where-Object {
+            $_.configuration -eq $Configuration -and [string]$_.invocation -eq $Invocation -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.reason)
+        } | Select-Object -First 1
+        if ($exempt) {
+            Write-Host "telemetry: $($metric.Name) [$Configuration/$Invocation] = $($metric.Actual) $($metric.Unit) (EXEMPT -- not checked: $($exempt.reason))" -ForegroundColor Yellow
+            continue
+        }
+        Write-Host "telemetry: $($metric.Name) [$Configuration/$Invocation] = $($metric.Actual) $($metric.Unit) -- NO BASELINE and no entry in scripts/baseline-exemptions.json. Measure it and commit a row, or exempt it with a reason." -ForegroundColor Red
+        $failed = $true
         continue
     }
     $delta = $metric.Actual - [int]$entry.value

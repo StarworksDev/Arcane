@@ -1364,12 +1364,23 @@ namespace Arcane
             bool rendering = false;
             if (node.kind == NodeKind::Raster)
             {
+                // Load ops are declarative (RenderGraph::SetColorAttachmentOps /
+                // SetDepthAttachmentOp): an attachment with no declared op, or a
+                // colour-op span shorter than the attachment span, LOADs. The
+                // zero-initialized storeOp is STORE.
                 m_scratchColorAttachments.clear();
+                std::size_t colorIndex = 0;
                 for (const RgTexture& color : node.colorAttachments)
                 {
                     nri::AttachmentDesc attachment = {};
                     attachment.descriptor = attachmentView(color, /*depth=*/false);
+                    if (colorIndex < node.colorOps.size() && node.colorOps[colorIndex].load == RgLoadOp::Clear)
+                    {
+                        attachment.loadOp     = nri::LoadOp::CLEAR;
+                        attachment.clearValue = node.colorOps[colorIndex].clear;
+                    }
                     m_scratchColorAttachments.push_back(attachment);
+                    ++colorIndex;
                 }
 
                 nri::RenderingDesc renderingDesc = {};
@@ -1378,6 +1389,11 @@ namespace Arcane
                 renderingDesc.colorNum = static_cast<std::uint32_t>(m_scratchColorAttachments.size());
                 if (node.depthAttachment.index != kInvalid)
                     renderingDesc.depth.descriptor = attachmentView(node.depthAttachment, /*depth=*/true);
+                if (node.hasDepthOp && node.depthOp.load == RgLoadOp::Clear)
+                {
+                    renderingDesc.depth.loadOp     = nri::LoadOp::CLEAR;
+                    renderingDesc.depth.clearValue = node.depthOp.clear;
+                }
 
                 core.CmdBeginRendering(cmd, renderingDesc);
                 rendering = true;

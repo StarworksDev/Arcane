@@ -3,7 +3,8 @@
 # .github/workflows/ci.yml and scripts/ci/local.ps1 run exactly this. The
 # Windows twin is scripts/ci/build.ps1 (same steps, same log names).
 #   1. generate  premake5 --cc=<gcc|clang> gmake      (family from $CC)
-#   2. engine    make -k  ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient
+#   2. engine    make -k  ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest
+#      abi       arcane-abi-digest --check (build/abi-digest.txt + kGamePluginABIDigest)
 #   3. game      arcbuild build --project ReferenceProject --config <cfg> --sdk <checkout>
 #   4. hosts     make -k  ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests
 #                (their postbuild stages ReferenceProject, Binaries/ included)
@@ -86,7 +87,8 @@ step() {   # step <name> <log> <command...>
 
 step generate build-generate.log ThirdParty/premake5/premake5 --cc="$PREMAKE_CC" gmake
 step engine build-engine.log make -k -j"$JOBS" config="$config_lc" \
-    ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient
+    ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest
+step abi build-abi.log "$bindir/arcane-abi-digest/arcane-abi-digest" --check --root "$ROOT"
 step game build-referencegame.log "$bindir/arcbuild/arcbuild" build --project ReferenceProject \
     --config "$CONFIG" --sdk "$ROOT"
 ls -l ReferenceProject/Binaries/

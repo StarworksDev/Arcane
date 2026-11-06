@@ -46,15 +46,18 @@ function Resolve-LocalRuns {
     return ,$runs
 }
 
-# One seed, or CI's pair: SEED_A = N, SEED_B = "<N>50021" (ci.yml). Catch2's
-# --rng-seed is 32-bit, so a pair that overflows is refused.
+# One seed, or CI's pair: SEED_A = N, SEED_B = (N + 50021) mod 4294967296
+# (ci.yml derives the same pair in bash). Catch2's --rng-seed is uint32, so
+# a seed that does not itself fit uint32 is refused. The added seed always fits.
 function Get-SeedList {
     param([Parameter(Mandatory)][string]$Seed, [ValidateSet(1, 2)][int]$Seeds = 1)
     if ($Seed -notmatch '^[0-9]+$') { throw "local: -Seed must be a non-negative integer (got '$Seed')" }
+    if ([decimal]$Seed -gt 4294967295) { throw "local: seed $Seed does not fit Catch2's 32-bit --rng-seed" }
     $list = @($Seed)
-    if ($Seeds -eq 2) { $list += "${Seed}50021" }
-    foreach ($s in $list) {
-        if ([decimal]$s -gt 4294967295) { throw "local: seed $s does not fit Catch2's 32-bit --rng-seed (with -Seeds 2 keep -Seed below 42950)" }
+    if ($Seeds -eq 2) {
+        $sum = [uint64]$Seed + 50021
+        while ($sum -gt 4294967295) { $sum -= 4294967296 }
+        $list += "$sum"
     }
     return ,$list
 }
@@ -336,6 +339,7 @@ function New-LegResult {
             $desc = $parts -join ', '
         } else {
             $desc = 'no Catch2 summary in the log'
+            $passed = $false   # a seed that printed no summary proved nothing
         }
         if ([int]$Status[$key] -ne 0) { $passed = $false; $desc = "FAILED ($($Status[$key])): $desc" }
         $tests.Add("seed ${s}: $desc")

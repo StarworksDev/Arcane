@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace Arcane::Editor
@@ -75,6 +76,15 @@ namespace Arcane::Editor
         // unchanged). Never called by production code (EditorApp always
         // gets the real importer via CookSession's own default).
         void SetImporterForTesting(Arcane::AssetPipeline::CookSession::ImporterFn fn);
+
+#if !defined(ARC_BUILD_DIST)
+        // Test-only seam: runs on the pass's own thread at the one instant RunOnePass has
+        // decided to go idle (m_running already false, mutex released), just before the job
+        // returns. The worker copies the hook under the lock before m_running clears and calls the copy,
+        // since the queue may be destroyed the instant m_running is false. A test calls NoteChanged() from it to prove an edit landing in that window
+        // is cooked, not dropped. Compiled out of Dist; never set by production code.
+        void SetPassExitHookForTesting(std::function<void()> fn) { m_passExitHook = std::move(fn); }
+#endif
 
         // Fires from INSIDE Pump() (see the class comment's threading
         // contract), once per CookResult a finished background pass
@@ -134,5 +144,8 @@ namespace Arcane::Editor
         bool m_dirty = false;     // guarded by m_mutex -- "run one more pass before going idle"
         Arcane::AssetPipeline::TextureMetaSettings m_textureDefaults{};   // guarded by m_mutex (S6-6)
         std::vector<Arcane::AssetPipeline::CookResult> m_results;   // guarded by m_mutex
+#if !defined(ARC_BUILD_DIST)
+        std::function<void()> m_passExitHook;   // test seam, see SetPassExitHookForTesting
+#endif
     };
 }

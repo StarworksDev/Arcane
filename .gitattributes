@@ -95,3 +95,7 @@ ArcaneHub/crates/arcane_release/tests/golden/** -text
 ArcaneHub/crates/arcane_release/keys/** -text
 # release scripts: the fake aws (no extension) and its recorded responses are replayed byte for byte
 scripts/release/tests/fake-aws/** text eol=lf
+
+# 3D-readiness Plan A baselines: compared byte-for-byte, so never eol-converted.
+Tests/ArcaneTests/data/physics/*   -text
+Tests/ArcaneTests/data/artifacts/* -text

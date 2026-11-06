@@ -3,8 +3,9 @@
 // The CPU coarse visibility stage (F3, spec s4): one VisibleSet per view,
 // linear over every WorldBounds. A registry RESOURCE (SceneVisibility)
 // because RenderSubmissionSystem is an Astra::System and must read it; the
-// host builds views[0] between the fixed and render schedulers
-// (Sim/SystemSchedulers.hpp) from the viewport's ViewTransform.
+// host builds views[0] between the fixed scheduler (Sim/SystemSchedulers.hpp)
+// and the frame extract's sprite sweep (ExtractFrame.hpp) from the
+// viewport's ViewTransform.
 //
 // NO RESOURCE => NOTHING IS CULLED. Every consumer (the sprite sweep,
 // CollectPickables, the GPU batch builder) reads MainVisibleSet() and treats
@@ -23,6 +24,7 @@
 // BuildVisibleSet above 0.5 ms (spec s4).
 #include <Arcane/Math/Aabb.hpp>
 #include <Arcane/Render/RenderLookSettings.hpp>
+#include <Arcane/Render/VisibleSet.hpp>        // VisibleEntry / VisibleSet (their own header, F5 plan 1 Task 4)
 #include <Arcane/Scene/Components.hpp>
 #include <Arcane/Scene/Frustum.hpp>
 #include <Arcane/Scene/ViewTransform.hpp>
@@ -44,44 +46,6 @@ namespace Arcane
     {
         return Settings<RenderCullSettings>().frustumSlackMeters;
     }
-
-    struct VisibleEntry
-    {
-        Astra::Entity entity{};
-        Aabb          box;
-        float         nearDepth = 0.0f;   // view-space distance to the box's nearest point along -Z, clamped >= 0
-    };
-
-    struct VisibleSet
-    {
-        ViewTransform              view;
-        Frustum                    frustum;   // already Widened(VisibilitySlackMeters())
-        std::vector<VisibleEntry>  entries;
-        std::vector<std::uint64_t> members;   // bitset by entity index
-
-        [[nodiscard]] bool Contains(Astra::Entity e) const noexcept
-        {
-            const std::uint32_t idx = static_cast<std::uint32_t>(e.GetID());
-            const std::size_t word = idx / 64u;
-            return word < members.size() && ((members[word] >> (idx % 64u)) & 1ull);
-        }
-
-        void Clear()
-        {
-            entries.clear();
-            std::fill(members.begin(), members.end(), 0ull);
-        }
-
-        void Insert(Astra::Entity e, const Aabb& box, float nearDepth)
-        {
-            const std::uint32_t idx = static_cast<std::uint32_t>(e.GetID());
-            const std::size_t word = idx / 64u;
-            if (word >= members.size())
-                members.resize(word + 1, 0ull);
-            members[word] |= (1ull << (idx % 64u));
-            entries.push_back(VisibleEntry{ e, box, nearDepth });
-        }
-    };
 
     struct SceneVisibility
     {

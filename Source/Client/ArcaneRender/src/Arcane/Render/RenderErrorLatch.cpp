@@ -13,6 +13,11 @@ namespace Arcane
         return RenderErrorLatch::Instance().ErrorCount();
     }
 
+    uint64_t RenderErrorTotal()
+    {
+        return RenderErrorLatch::Instance().ErrorTotal();
+    }
+
     void ResetRenderErrorCount()
     {
         RenderErrorLatch::Instance().ResetForTest();
