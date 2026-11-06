@@ -32,6 +32,7 @@
 #include <Arcane/Project/Project.hpp>
 #include <Arcane/Scene/Components.hpp>            // Arcane::Transform (VerifySharedTypeContextFor's default probe)
 #include <Arcane/Scene/EngineRoster.hpp>          // EngineComponentRoster (VerifySharedTypeContext checks EVERY roster type)
+#include <Arcane/Scene/PhysicsComponents.hpp>    // PhysicsComponentRoster2D (the second half of the thirteen; Scene header, no physics module include)
 #include <Arcane/Serialization/SceneAsset.hpp>    // ReadSceneFile/ApplySceneDocument/CreateEmpty (BootScene)
 
 #include <Astra/Component/ComponentRegistry.hpp>  // GetComponentIDFromHash (VerifySharedTypeContext)
@@ -116,10 +117,13 @@ namespace Arcane::ProjectHost
     // The boot check every host calls FROM ITS OWN TRANSLATION UNIT (being inline,
     // it asks about the calling module's caches and no other -- ArcaneClient.dll's
     // call in ProjectBoot.cpp cannot answer for ArcaneEditor.exe). Checks all thirteen
-    // engine component types named in Scene/EngineRoster.hpp.
+    // engine component types: the ten in Scene/EngineRoster.hpp plus the three of
+    // PhysicsComponentRoster2D (Scene/PhysicsComponents.hpp).
     inline bool VerifySharedTypeContext(const Astra::Registry& reg, const char* moduleName)
     {
-        return Detail::VerifyRoster(reg, moduleName, Arcane::EngineComponentRoster{});
+        const bool scene = Detail::VerifyRoster(reg, moduleName, Arcane::EngineComponentRoster{});
+        const bool physics = Detail::VerifyRoster(reg, moduleName, Arcane::PhysicsComponentRoster2D{});
+        return scene && physics;
     }
 
     // The game module to host: the project's gameModule when a project is open and it

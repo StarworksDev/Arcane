@@ -4,6 +4,7 @@
 // IsRunningDedicatedServer vs NetMode).
 #include <catch2/catch_test_macros.hpp>
 #include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
+#include <Arcane/Base/Log.hpp>
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Plugin/GameSystems.hpp>
 #include <Arcane/Plugin/PluginHost.hpp>
@@ -13,8 +14,13 @@
 #include "../../Fixtures/HotReloadPlugin/HotReloadShared.hpp"
 #include <Astra/Component/ComponentRegistry.hpp>   // GetComponentDescriptor (the shared-registry proof)
 #include <Astra/Core/TypeID.hpp>
+#include <spdlog/sinks/callback_sink.h>
+#include <algorithm>
 #include <filesystem>
+#include <memory>
+#include <string>
 #include <type_traits>
+#include <vector>
 using namespace Arcane::HotReloadTest;
 
 namespace
@@ -76,6 +82,61 @@ TEST_CASE("one module cannot register the same system twice in one phase",
     table.Add(entry(Arcane::RoleMask::Client, Arcane::SystemPhase::Update));
     CHECK(table.Size() == 2);
     table.EndOwner();
+}
+
+TEST_CASE("a Render-phase registration is accepted, inert, and warns once per system name that F5 retired the phase",
+          "[runtime][netmode][systems]")
+{
+    // Every engine WARN that names the retired phase, captured off the engine
+    // logger (the LogCapture shape CVarAliasTest uses).
+    std::vector<std::string> warnings;
+    auto sink = std::make_shared<spdlog::sinks::callback_sink_mt>([&](const spdlog::details::log_msg& m) {
+        const std::string text(m.payload.data(), m.payload.size());
+        if (m.level == spdlog::level::warn && text.find("Render phase") != std::string::npos)
+            warnings.push_back(text);
+    });
+    Arcane::Log::Engine()->sinks().push_back(sink);
+    struct SinkRemoval   // a failed REQUIRE must not leave a sink holding `warnings`
+    {
+        std::shared_ptr<spdlog::sinks::callback_sink_mt> sink;
+        ~SinkRemoval()
+        {
+            auto& sinks = Arcane::Log::Engine()->sinks();
+            sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+        }
+    } removal{ sink };
+
+    const auto entry = [](const char* name, Arcane::SystemPhase phase)
+    {
+        return Arcane::SystemFactoryEntry{
+            name, Arcane::RoleMask::Both, phase,
+            [](Astra::SystemScheduler&) {}, nullptr };
+    };
+    // Names no other case registers: the once-per-name memory is process-wide,
+    // so a hot reload re-registering the same module stays quiet.
+    Arcane::SystemFactoryTable table;
+    const int owner = 3;
+    table.BeginOwner(&owner);
+    table.Add(entry("RetiredRenderProbeA", Arcane::SystemPhase::Render));
+    table.Add(entry("RetiredRenderProbeA", Arcane::SystemPhase::Update));   // another phase: no warning
+    table.EndOwner();
+    CHECK(table.Size() == 2);   // accepted -- old modules still load
+    REQUIRE(warnings.size() == 1u);
+    CHECK(warnings[0].find("RetiredRenderProbeA") != std::string::npos);
+    CHECK(warnings[0].find("never run") != std::string::npos);
+    CHECK(warnings[0].find("extract") != std::string::npos);
+
+    table.BeginOwner(&owner);   // the hot-reload re-registration: BeginOwner clears, Init re-adds
+    table.Add(entry("RetiredRenderProbeA", Arcane::SystemPhase::Render));
+    table.Add(entry("RetiredRenderProbeB", Arcane::SystemPhase::Render));
+    table.EndOwner();
+    REQUIRE(warnings.size() == 2u);   // A stayed quiet, B warned once
+    CHECK(warnings[1].find("RetiredRenderProbeB") != std::string::npos);
+
+    // Inert, not refused: both still instantiate (into the render scheduler,
+    // which no host runs).
+    Arcane::SystemSchedulers worlds(nullptr);
+    CHECK(table.InstantiateInto(worlds, Arcane::NetMode::Standalone) == 2);
 }
 
 TEST_CASE("HasAuthority: every mode but Client", "[runtime][netmode]")

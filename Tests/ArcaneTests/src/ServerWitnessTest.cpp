@@ -46,6 +46,9 @@ TEST_CASE("S1: ArcaneServer opens the project, loads the module, ticks N frames 
     CHECK(r.at("module").at("loaded") == true);
     CHECK(r.at("framesTicked") == 30);
     CHECK(r.at("systems").at("hasPhysics") == true);
+    // The world itself, not the scheduler entry: absent or false means the 2D sim hook never ran.
+    REQUIRE(r.at("systems").contains("hasPhysicsWorld"));
+    CHECK(r.at("systems").at("hasPhysicsWorld") == true);
     CHECK(r.at("systems").at("hasPropagation") == true);
     CHECK(r.at("systems").at("hasRenderSubmission") == false);
     CHECK(r.at("systems").at("render") == 0);

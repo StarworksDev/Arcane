@@ -39,12 +39,14 @@
 //     sees an already-resolved nri::Descriptor* through AddMaterial.
 //
 // WHERE IT SITS IN THE FRAME: after `batch2d`, before the post chain and the
-// tonemap. The canvas is MINTED AND CLEARED by AddBatch2DNode, so the mesh
-// pass is necessarily the canvas's second writer -- it clears the DEPTH plane
-// (which is a fresh pool slot with undefined contents) and never the colour
-// one, or it would wipe the 2D content that ran before it. Rendering 3D UNDER
-// the 2D layer instead is a clear-seam question (NriGraphContext::
-// DeclareGraphFrame's THE CLEAR SEAM block), not this node's.
+// tonemap. The canvas is MINTED AND CLEARED by AddBatch2DNode (its CLEAR
+// colour load op), so the mesh pass is necessarily the canvas's second writer
+// -- AddMeshNode declares a LOAD colour op and a CLEAR depth op (the depth is a
+// fresh pool slot with undefined contents, cleared to
+// DepthClearValue(kSelectedDepthConvention)) and never clears the colour, or
+// it would wipe the 2D content that ran before it. Rendering 3D UNDER the 2D
+// layer instead is a frame-order question (NriGraphContext::
+// DeclareGraphFrame's THE CLEAR IS DECLARATIVE block), not this node's.
 //
 // WHAT THIS NODE OWNS (all persistent, all created once at Create()):
 //   * the BINDLESS MATERIAL TABLE (Task 8/10) -- a BindlessTable of

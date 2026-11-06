@@ -197,6 +197,11 @@ namespace Arcane
         // keeps a dead pid reserved, so "opens" alone proves nothing).
         ARC_ENGINE_API std::optional<uint32_t> ReadLive(const std::filesystem::path& projectRoot);
 
+        // The liveness half of ReadLive on its own: `info` names a process
+        // that is STILL running with that creation time. One line over
+        // Platform::IsProcessLive (ArcaneCore), which holds the three tells.
+        ARC_ENGINE_API bool IsLive(const Info& info);
+
         // ReadLive minus ourselves: the pid of ANOTHER live editor holding this
         // project, or nullopt. The direct-launch guard rides this -- the editor
         // refuses to double-open a rival's project (main.cpp boot gate, exit 3;

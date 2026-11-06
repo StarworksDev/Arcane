@@ -16,19 +16,21 @@
 #include <Arcane/Base/Log.hpp>
 #include <Arcane/Host/HostSettings.hpp>       // app.window.minimizedSleepMs
 #include <Arcane/Host/RuntimeSettings.hpp>    // runtime.hud.show (BuildHud)
-#include <Arcane/Host/GpuSceneHost.hpp>   // PrepareSceneForRender (F3 plan 1 T8): visible set(s) + GPU-scene sync + the mesh pass's frame
+#include <Arcane/Host/GpuSceneHost.hpp>   // GpuSceneInvalidate (R-F) and the HUD's GpuSceneVisibleRows
 #if defined(ARC_RUNTIME_HOST_VERIFY)
 #include <Arcane/Host/VerifyReport.hpp>   // Arcane::FirstPickProbe (Task 9: pick@x,y -> FrameDesc::pickPixel)
 #endif
 #include <Arcane/Input/InputActions.hpp>
 #include <Arcane/Input/InputSnapshot.hpp>
-#include <Arcane/Render/Batcher2D.hpp>              // Arcane::Batch2DStats (BuildHud's HUD text, CaptureTail's perf tick)
+#include <Arcane/Render/Batcher2D.hpp>
+#include <Arcane/Render/ExtractFrame.hpp>            // ExtractFrame / ExtractRequest -- RenderGraph's one extract (F5 plan 1 Task 5)
 #include <Arcane/Render/GraphicsBackend.hpp>                 // Arcane::GraphicsBackend / ToString (BuildHud's HUD text)
 #include <Arcane/Render/GpuInstrumentation.hpp>     // Arcane::GpuDeviceLostObserved (PumpAndResize)
 #include <Arcane/Render/Nri/NriDiagnostics.hpp>      // dev-only --crash-gpu N (RenderGraph)
 #include <Arcane/Render/PickEmit.hpp>                // CollectPickables (RenderGraph's --pick-probe)
+#include <Arcane/Scene/BoundsSystem.hpp>              // PresentDerivedState (the Hold branch)
+#include <Arcane/Scene/TransformSystems.hpp>
 #include <Arcane/Render/RenderLookSettings.hpp>       // render.mesh.defaultLight.* (the scene light, Live)
-#include <Arcane/Scene/SceneCamera.hpp>              // ActivePerspectiveSceneCamera (the SAME guarded path MeshSceneDesc's comment requires)
 #include <Arcane/Sim/SimSettings.hpp>   // ClampFrameDelta / ApplySimStepCap
 
 #include <imgui.h>
@@ -43,6 +45,15 @@
 namespace
 {
     bool g_runtimeConsoleOpen = false;
+
+    // A held frame still presents the scene: propagate world transforms and
+    // refresh world bounds, the same pair EditModeSchedule runs outside Play.
+    // Not a sim step: no RunLoop::Advance, no frameCount, no physics.
+    void PresentDerivedState(Astra::Registry& reg)
+    {
+        Arcane::TransformPropagationSystem{}.operator()(reg);
+        Arcane::BoundsSystem{}.operator()(reg);
+    }
 }
 
 namespace
@@ -195,7 +206,7 @@ bool PumpAndResize(FrameIo& io)
     return false;
 }
 
-void AdvanceSim(FrameIo& io)
+void AdvanceSim(FrameIo& io, SimPace pace)
 {
     Arcane::CVarRegistry::Get().Publish();
     io.perf.FrameStart();
@@ -210,10 +221,33 @@ void AdvanceSim(FrameIo& io)
     // PulseSpeed)`), so an UN-frozen clock would make every settle-hold
     // frame legitimately differ from the last regardless of whether the
     // compile race has resolved, and CaptureTail's byte-equal comparison
-    // would never converge on anything. Computed once, read by both the
-    // frameDt and simDt branches below.
-    const bool settleHold = io.config.headless && io.config.settleAttempts != 0 &&
-                             io.config.maxFrames != 0 && io.frameCount >= io.config.maxFrames;
+    // would never converge on anything. Computed once, read by the Hold pass
+    // and by both the frameDt and simDt branches below.
+    //
+    // Task 30 fix round 1: a remote `wait settled` in its capture phase holds
+    // the same freeze (io.remoteSettleHold), on a held, running, headless or
+    // windowed runtime alike: spec s4.7's frozen-clock captures.
+    const bool settleHold = io.remoteSettleHold ||
+                            (io.config.headless && io.config.settleAttempts != 0 &&
+                             io.config.maxFrames != 0 && io.frameCount >= io.config.maxFrames);
+
+    // AM1 Hold (the remote tick gate is Idle): see SimPace's comment in the
+    // header. The host clock advances by wall time even under --headless (a
+    // held run has no fixed cadence to stand in for it), and the frame dt the
+    // material globals read is that same wall delta, so Time and DeltaTime
+    // stay consistent -- except under the settle hold, which freezes it.
+    // No input, no RunLoop::Advance, no audio tick.
+    if (pace == SimPace::Hold)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double wallDt = settleHold ? 0.0 : std::chrono::duration<double>(now - io.lastFrameTime).count();
+        io.lastFrameTime = now;
+        io.simPrev       = now;
+        io.lastFrameDt   = wallDt;
+        io.hostClock    += wallDt;
+        PresentDerivedState(io.runtime->Registry());
+        return;
+    }
 
     // Input: sample SDL state, evaluate actions. Must precede ImGui BeginFrame
     // so capture flags are set before the evaluator reads them.
@@ -234,6 +268,10 @@ void AdvanceSim(FrameIo& io)
         if (settleHold)
         {
             frameDt = 0.0;   // see settleHold's own comment above
+            // A remote settle hold ends (Task 30): a windowed clock resumes
+            // from here, not with the whole hold as one frame's dt.
+            if (!io.config.headless)
+                io.lastFrameTime = std::chrono::steady_clock::now();
         }
         else if (io.config.headless)
         {
@@ -280,9 +318,22 @@ void AdvanceSim(FrameIo& io)
         // positive (HostConfig.cpp) and is a deliberate per-run choice, not a
         // stall to guard against.
         double simDt;
-        if (settleHold)
+        if (pace == SimPace::SingleTick)
+        {
+            // AM1 Step: exactly one canonical fixed step. RequestSingleStep runs
+            // one tick without touching the accumulator (RunLoop::StepFixed), so
+            // neither a wall-clock dt nor a leftover backlog nor the time scale
+            // can turn it into zero or two; Update sees one fixed dt.
+            io.runtime->Loop().RequestSingleStep();
+            simDt = 1.0 / io.runtime->Loop().FixedHz();
+            if (!io.config.headless)
+                io.simPrev = std::chrono::steady_clock::now();   // the next Run step starts from here
+        }
+        else if (settleHold)
         {
             simDt = 0.0;   // see settleHold's own comment above AdvanceSim's input block
+            if (!io.config.headless)
+                io.simPrev = std::chrono::steady_clock::now();   // as frameDt's hold branch
         }
         else if (io.config.headless)
         {
@@ -320,14 +371,24 @@ void BuildHud(FrameIo& io)
         // the HUD reads the backend out of the config it was selected with.
         ImGui::Text("Backend: %s", Arcane::ToString(io.config.backend));
         ImGui::Text("Plugin gen: %u", io.plugin->Generation());
-        const Arcane::Batch2DStats s = io.gpu->Batch().Stats();
-        ImGui::Text("Quads: %u  Draws: %u", s.quads, s.drawCalls);
+        // The last extracted packet's sprite batch (F5 plan 1 Task 5): draws
+        // are its spans, quads its vertices / 4. io.frameCount > 0 means a
+        // frame has been extracted and presented; before that there is no
+        // packet and the counts are 0.
+        std::uint32_t quads = 0, draws = 0;
+        if (io.frameCount > 0)
+        {
+            const Arcane::RenderFramePacket& last = io.packetRing.Slot(0);
+            quads = static_cast<std::uint32_t>(last.batchVertices.size() / 4u);
+            draws = static_cast<std::uint32_t>(last.batchSpans.size());
+        }
+        ImGui::Text("Quads: %u  Draws: %u", quads, draws);
 
         // THE 3D PASS'S VISIBILITY, beside the 2D batcher's counts (F3 plan 2
         // T5): the CPU's own figures, then what the GPU CULL PASS itself
         // emitted. Both describe the LAST frame, not this one -- the HUD is
-        // built before PrepareSceneForRender rebuilds `gpuSceneFrame` and the
-        // GPU's answer is asynchronous by construction -- which is the same
+        // built before this frame's extract copies the GPU-scene stats, and
+        // the GPU's answer is asynchronous by construction -- which is the same
         // one-frame lag the batcher's counts above already carry.
         //
         // This host arms the ring at boot, UNCONDITIONALLY (RuntimeApp's own
@@ -340,16 +401,32 @@ void BuildHud(FrameIo& io)
         // all. A HUD that printed the coarse count there instead would be
         // showing the CPU's expectation under the GPU's name -- exactly the
         // conflation this arc removed from the report.
-        const Arcane::GpuSceneFrame::Stats& vis = io.gpuSceneFrame.stats;
+        const Arcane::GpuSceneFrame::Stats& vis = io.gpuSceneStats.stats;
         ImGui::Text("Rows: %u  Coarse: %u  Batches: %u  Draws: %u (+%u transparent)",
                     vis.total, vis.coarseVisible, vis.batches, vis.draws,
-                    static_cast<std::uint32_t>(io.gpuSceneFrame.transparentDraws.size()));
+                    io.gpuSceneStats.transparentDraws);
         if (const std::optional<std::uint32_t> gpuVisible =
                 Arcane::GpuSceneVisibleRows(io.graph ? io.graph->Scene() : nullptr))
             ImGui::Text("GPU visible: %u", *gpuVisible);
         else
             ImGui::TextUnformatted("GPU visible: unavailable");
         ImGui::End();
+    }
+
+    // DrawUI reads ClientRuntime::View(). Resolve this frame's scene camera
+    // the way RenderGraph's ExtractFrame will -- no editor view, this frame's
+    // extent -- and push it first. warn is false, so the no-camera,
+    // multi-camera, and degenerate-basis diagnostics still fire once, inside
+    // ExtractFrame. No scene camera leaves a plugin-driven view alone.
+    {
+        std::uint32_t viewW = 0, viewH = 0;
+        FrameExtent(io, viewW, viewH);
+        Arcane::ExtractRequest viewReq;
+        viewReq.viewport = { viewW, viewH };
+        const Arcane::ResolvedFrameViews views =
+            Arcane::ResolveFrameViews(io.runtime->Registry(), viewReq, false);
+        if (views.spriteViewFromScene && views.spriteView)
+            io.runtime->SetView(views.spriteView->view);
     }
 
     // ABI v2: the game module + any secondary plugins draw their own ImGui between
@@ -388,7 +465,7 @@ void BuildHud(FrameIo& io)
 void PrepareFrame(FrameIo& io)
 {
     // Scene asset resolution, BEFORE the batcher's Begin and before
-    // SubmitRender: the drain inside registers compiled materials with the
+    // ExtractFrame: the drain inside registers compiled materials with the
     // batcher (a pipeline/binding-set table mutation that does not belong
     // inside a recording), and the SpriteTable/SpriteMaterialTable it
     // publishes are what THIS frame's submission reads. Without this call the
@@ -402,12 +479,13 @@ void PrepareFrame(FrameIo& io)
         FrameExtent(io, width, height);
 
         Arcane::SceneRenderResolver::FrameInfo frame;
-        // --fixed-time overrides ONLY what the scene sees. io.hostClock keeps
-        // accumulating untouched, because it is also the clock the shader
+        // --fixed-time overrides ONLY what the scene sees (sceneTime). now is
+        // io.hostClock, untouched, because it is also the clock the shader
         // compile service debounces against (see this file's dispatch gate) --
-        // a frozen accumulator would stall that, which is not what pinning
-        // scene time means.
-        frame.now            = io.config.fixedTimeSeconds.value_or(io.hostClock);
+        // a pinned compile clock would stall every compile, which is not what
+        // pinning scene time means.
+        frame.now            = io.hostClock;
+        frame.sceneTime      = io.config.fixedTimeSeconds;
         frame.dt             = io.lastFrameDt;
         frame.viewportWidth  = (float)width;
         frame.viewportHeight = (float)height;
@@ -435,10 +513,11 @@ void PrepareFrame(FrameIo& io)
 // thing this function owes it is calling the right member of the
 // RenderFrame/RenderFrameOffscreen pair. See that call below.
 //
-// The plugin's RENDER submission: the batcher is Begin()'d with the
-// canvas extent alone, SubmitRender fills it, and the graph's
-// Batch2DNode DRAINS it -- one batcher, one batching algorithm, one
-// recorder. End() is deliberately NOT called: that batcher is
+// The RENDER submission: the batcher is Begin()'d with the canvas
+// extent alone, ExtractFrame runs the sprite sweep into it and copies
+// the drained batch into this frame's packet, and the graph's
+// Batch2DNode draws the bound packet -- one batcher, one batching
+// algorithm, one recorder. End() is deliberately NOT called: that batcher is
 // DEVICE-LESS by construction (GpuContext::Create builds no render
 // device), so End() would refuse anyway and records nothing.
 //
@@ -522,170 +601,11 @@ Arcane::NriGraphContext::FrameOutcome RenderGraph(FrameIo& io)
     // batch reaches the GPU through the graph's Batch2DNode, which drains it.
     io.gpu->Batch().Begin(frameWidth, frameHeight);
     io.gpu->Batch().SetGlobals(io.frameGlobals);
-    io.app.PushSceneCamera((float)frameWidth, (float)frameHeight);
-    // The frame's view-projection for the WORLD-space spans (F4 plan 1 T5):
-    // sprites submit world METRES through QuadWorld/CircleWorld and the vertex
-    // shader projects them. AFTER PushSceneCamera, which is what installs this
-    // frame's view -- before it the stored view is last frame's -- and before
-    // the submit that records against it. Sticky within this Begin() bracket.
-    io.gpu->Batch().SetViewProjection(io.runtime->View().ViewProjection());
-
-    // F3 (plan 1 T8): the CPU visible set(s), the GPU-scene sync and the
-    // frame's batches -- AFTER the schedulers (AdvanceSim left WorldTransform
-    // + WorldBounds current) and PushSceneCamera (View() is this frame's),
-    // and BEFORE the SubmitRender just below, whose sprite sweep reads
-    // views[0] through MainVisibleSet. The mesh pass draws with the
-    // perspective scene camera (the SAME guarded path the mesh block below
-    // has always used: a validated ViewTransform or nullopt, never identity),
-    // and culls against it as views[1] when it differs from the sprites'
-    // orthographic view; nullopt = no batch this frame, though the stage
-    // still lands (ruling R-D, see the mesh block).
-    const std::optional<Arcane::ViewTransform> meshView =
-        Arcane::ActivePerspectiveSceneCamera(io.runtime->Registry(), glm::uvec2{ frameWidth, frameHeight });
-    Arcane::PrepareSceneForRender(io.runtime->Registry(), io.runtime->View(), meshView,
-                                  io.graph->Scene(), io.gpuSceneFrame);
-    {
-        const auto t0 = io.perf.On() ? io.perf.Now() : Arcane::FramePerf::Clock::time_point{};
-        io.runtime->SetRenderContext(&io.gpu->Batch());
-        io.runtime->Loop().SubmitRender();
-        io.perf.Add(io.perf.accRec, t0, io.perf.Now());
-    }
-
-#if !defined(ARC_BUILD_DIST)
-    // --pick-probe. THE ONE PLACE the entity ids
-    // are produced: CollectPickables is a pure walk of the registry and
-    // the k-th drawable it appends IS hit-proxy id k+1, which is what
-    // the graph's pick node rasterises and what RuntimeApp::
-    // ShutdownGraphPath inverts through PickEntityForId. It lives here,
-    // not in the vehicle, because this is the object that owns a
-    // registry and a camera -- NriGraphContext is a render vehicle and
-    // must not grow either.
-    //
-    // The view handed over (pickView) is the SCENE camera PushSceneCamera
-    // just installed, so the id pass projects the same world silhouettes the
-    // batch node drew. They cannot disagree even in principle: both are fitted
-    // to frameWidth/frameHeight above, which IS the vehicle's own surface
-    // extent (FrameExtent -- the swapchain's, or the offscreen output's).
-    // In practice this block is windowed-only regardless: --pick-probe is
-    // refused at parse time alongside --headless (HostConfig.cpp), because
-    // an offscreen context declines to arm the fixed probe pixel.
-    if (io.config.pickProbe)
-    {
-        io.pickDrawables.clear();
-        Arcane::CollectPickables(io.runtime->Registry(), io.pickDrawables);
-
-        // THE SCRIPTED SELECTION -- a stand-in for the editor selection
-        // this host does not have: the FIRST pickable entity in the
-        // scene, whose hit-proxy id is 1 by CollectPickables' own
-        // ordering contract.
-        io.pickSelectedIds.clear();
-        if (!io.pickDrawables.empty())
-            io.pickSelectedIds.push_back(1u);
-
-        graphFrame.pickOutline = true;
-        graphFrame.pickables   = io.pickDrawables;
-        graphFrame.pickView    = io.runtime->View();
-        graphFrame.selectedIds = io.pickSelectedIds;
-    }
-#endif
-
-    // ---- pick@x,y probes (Task 9), driven through FrameDesc::pickPixel --
-    // NOT the --pick-probe flag above, and deliberately NOT ARC_BUILD_DIST-gated
-    // like it: this is the report's pick channel (VerifyReport's `pick@x,y`
-    // probe kind), not a dev-only exit-code check, so it must exist in every
-    // build configuration the same way every other probe kind does.
-    //
-    // Gated on reportPath too, matching the offscreen vehicle's own gate
-    // (RuntimeApp.cpp's offscreenNodes.pickOutline): a bare `--probe pick@..`
-    // with no `--report` has nowhere for the answer to go, so arming the
-    // readback here would cost a copy nobody reads -- and worse, the pick
-    // node itself was never BUILT for that run (NriGraphContext.cpp only
-    // builds it when NodeSet::pickOutline asked at Create time), so setting
-    // graphFrame.pickOutline here without that node existing would be
-    // arming a chain that is not there. The two gates must agree exactly.
-    //
-    // Armed at the SAME pixel every frame (FirstPickProbe's answer does not
-    // change frame to frame -- a run has exactly one `pick@x,y` request that
-    // matters), which is what lets the readback -- landing
-    // FramesInFlight() frames after the pass that wrote it -- settle
-    // well before ShutdownGraphPath reads NriGraphContext::ProbeId() after
-    // the loop ends. A run combining this with the (windowed-only) dev
-    // --pick-probe flag above has this block win FrameDesc::pickPixel for
-    // the frame -- the flag's own fixed pixel is superseded rather than
-    // silently ignored, which is an acceptable trade for an untested
-    // combination neither mechanism was designed to share.
-    // Verify-only (RuntimeApp.hpp's ARC_RUNTIME_HOST_VERIFY note): a package has no --report.
-#if defined(ARC_RUNTIME_HOST_VERIFY)
-    if (!io.config.reportPath.empty())
-    {
-        const std::optional<Arcane::ProbeSpec> pickSpec = Arcane::FirstPickProbe(io.config.probes);
-        if (pickSpec)
-        {
-            io.pickDrawables.clear();
-            Arcane::CollectPickables(io.runtime->Registry(), io.pickDrawables);
-
-            graphFrame.pickOutline = true;
-            graphFrame.pickables   = io.pickDrawables;
-            graphFrame.pickView    = io.runtime->View();   // the scene camera, as above
-            graphFrame.pickPixel   = glm::ivec2(pickSpec->x, pickSpec->y);
-            // selectedIds left empty (default): this probe reports FACTS, not
-            // a visible outline -- a --screenshot cross-check must show the
-            // scene exactly as an ordinary run would, not a pick-highlighted
-            // one.
-            //
-            // hoverPixel MUST be set explicitly (fix round 1, item 1): left
-            // unset, it falls back to ProbeX()/ProbeY() -- the OLD flag's
-            // fixed pixel, which defaults to (0, 0) when the flag was never
-            // armed (NriGraphContext.cpp's m_currentHover init). outline_seed.hlsl
-            // seeds a HOVER silhouette there in ADDITION to the (empty)
-            // selection one, and the outline composites a cyan ring over the
-            // tonemapped backbuffer -- BEFORE the capture node -- so any scene
-            // with a pickable at (0, 0), or any run also combining the dev
-            // --pick-probe flag, would silently corrupt every other probe and
-            // the screenshot. It reads clean today only because (0, 0) is
-            // empty background in ReferenceProject -- that is an accident of
-            // this scene, not a property of the mechanism, so the no-hover
-            // sentinel is spelled out here rather than left to the default.
-            graphFrame.hoverPixel = glm::ivec2(-1, -1);
-        }
-    }
-#endif
-
-    // ============================================================
-    // THE OPAQUE 3D PASS (F2a Task 10; F3 plan 1 T8) -- this frame's mesh
-    // scene: the GpuSceneFrame PrepareSceneForRender built above (a RuntimeApp
-    // member reached through FrameIo, the SAME "must outlive the RenderFrame
-    // call" storage io.pickDrawables is, because MeshSceneDesc::scene is a
-    // pointer borrowed for the duration of that call). This site only hands
-    // it to the graph; RuntimeFrame.cpp is not compiled into ArcaneTests, so
-    // the logic that decides what the frame holds lives in the tested header.
-    //
-    // `meshScene` only needs to outlive `io.graph->RenderFrame(graphFrame)`
-    // below, which happens inside THIS function call -- a RenderGraph-local
-    // is enough for it. THE GATE IS Empty(), NOT HasDraws() (ruling R-D): a
-    // frame whose meshes are all culled, or with no perspective camera at
-    // all, can still carry staged rows or a full rebuild, and the mirror's
-    // lastModel history has already advanced past them -- the pass must
-    // declare itself so GpuSceneSyncNode uploads them; MeshNode then records
-    // only its depth clear. Without a mesh view the matrices stay at their
-    // defaults (no batch reads them). graphFrame.mesh is left null (its
-    // default) for an Empty() scene, the "ask for the frame WITHOUT this
-    // stage" mechanism FrameDesc documents.
-    Arcane::MeshSceneDesc meshScene;
-    meshScene.scene = &io.gpuSceneFrame;
-    if (meshView)
-    {
-        meshScene.view       = meshView->view;
-        meshScene.projection = meshView->projection;
-    }
-    // NO LIGHT COMPONENT YET: this engine has none anywhere --
-    // Scene/Components.hpp declares none and SceneModule.hpp registers
-    // none -- so the scene's one light is render.mesh.defaultLight.*
-    // (RenderLookSettings.hpp; Live, read once per frame). A light
-    // component is future work and a reviewed scene-schema change.
-    Arcane::ApplyDefaultLight(meshScene, Arcane::Settings<Arcane::RenderMeshDefaultLightSettings>());
-    if (!meshScene.Empty())
-        graphFrame.mesh = &meshScene;
+    // The batcher the sprite sweep submits into, published for ExtractFrame
+    // below. The sweep itself runs there, once (F5 plan 1 Task 5). Extract
+    // sets this batcher's view-projection from the published sprite view
+    // before that submit.
+    io.runtime->SetRenderContext(&io.gpu->Batch());
 
     graphFrame.batch = &io.gpu->Batch();
     // The scene post chain as BYTES (SceneRenderResolver::PostDesc).
@@ -726,16 +646,176 @@ Arcane::NriGraphContext::FrameOutcome RenderGraph(FrameIo& io)
     graphFrame.capture = willBeLastFrame &&
                           (!io.config.screenshotPath.empty() || !io.config.reportPath.empty());
 
+    // THE ONE EXTRACT (F5 plan 1 Task 5, spec s4.1): the sprite sweep runs
+    // into the host batcher Begin()'d above and the drained batch is copied
+    // into this frame's packet, which the graph's batch node draws instead of
+    // draining the batcher again. graphFrame.batch stays that same batcher,
+    // so the registered sprite materials resolve where they were registered.
+    Arcane::ExtractRequest req;
+    req.viewport = { frameWidth, frameHeight };
+    req.device = io.graph->Scene();
+    // The scene light, read once per frame (Live) and published into the
+    // packet. The mesh block below copies the three vectors back out.
+    Arcane::MeshSceneDesc light{};
+    Arcane::ApplyDefaultLight(light, Arcane::Settings<Arcane::RenderMeshDefaultLightSettings>());
+    req.lightDirection = light.lightDirection;
+    req.lightColor = light.lightColor;
+    req.ambient = light.ambient;
+    req.imgui = graphFrame.imgui;
+    req.gameUi = graphFrame.gameUi;
+    req.post = graphFrame.post;
+    const auto extractT0 = io.perf.On() ? io.perf.Now() : Arcane::FramePerf::Clock::time_point{};
+    const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(io.runtime->Registry(), req, io.packetRing);
+    io.perf.Add(io.perf.accRec, extractT0, io.perf.Now());   // --perf's "extract" column
+    // After extract, before the mesh block and both pick blocks, so
+    // graphFrame.pickView = io.runtime->View() reads the view just installed.
+    io.app.PushSceneCamera(packet);
+
+    // The HUD and ShutdownGraphPath read these scalars. The ring holds the
+    // packet, which outlives this call.
+    io.gpuSceneStats.stats = packet.mesh.stats;
+    io.gpuSceneStats.transparentDraws =
+        static_cast<std::uint32_t>(packet.mesh.transparentDraws.size());
+
+    // THE OPAQUE 3D PASS (F2a Task 10; F3 plan 1 T8). The frame is the one
+    // ExtractFrame just published. `meshScene` only needs to outlive the
+    // RenderFrame* call below, inside this function. THE GATE IS Empty(),
+    // NOT HasDraws() (ruling R-D): a frame whose meshes are all culled, or
+    // with no perspective camera at all, can still carry staged rows or a
+    // full rebuild, and the mirror's lastModel history has already advanced
+    // past them -- the pass must declare itself so GpuSceneSyncNode uploads
+    // them; MeshNode then records only its depth clear. Without a mesh view
+    // the matrices stay at their defaults (no batch reads them).
+    // graphFrame.mesh is left null for an Empty() scene.
+    Arcane::MeshSceneDesc meshScene;
+    meshScene.scene = &packet.mesh;
+    if (packet.meshView)
+    {
+        meshScene.view       = packet.meshView->view;
+        meshScene.projection = packet.meshView->projection;
+    }
+    // NO LIGHT COMPONENT YET: this engine has none anywhere --
+    // Scene/Components.hpp declares none and SceneModule.hpp registers
+    // none -- so the scene's one light is render.mesh.defaultLight.*
+    // (RenderLookSettings.hpp; Live, read once per frame into the packet
+    // above). A light component is future work and a reviewed scene-schema
+    // change.
+    meshScene.lightDirection = packet.lightDirection;
+    meshScene.lightColor = packet.lightColor;
+    meshScene.ambient = packet.ambient;
+    if (!meshScene.Empty())
+        graphFrame.mesh = &meshScene;
+
+    // After ExtractFrame, so CollectPickables reads this frame's MainVisibleSet.
+#if !defined(ARC_BUILD_DIST)
+    // --pick-probe. CollectPickables ran inside ExtractFrame; the k-th
+    // drawable it appended IS hit-proxy id k+1, which is what the graph's
+    // pick node rasterises and what RuntimeApp::ShutdownGraphPath inverts
+    // through PickEntityForId. This block copies that list onto the frame.
+    // It lives here, not in the vehicle, because this is the object that
+    // owns a registry and a camera -- NriGraphContext is a render vehicle
+    // and must not grow either.
+    //
+    // The view handed over (pickView) is the SCENE camera PushSceneCamera
+    // just installed, so the id pass projects the same world silhouettes the
+    // batch node drew. They cannot disagree even in principle: both are fitted
+    // to frameWidth/frameHeight above, which IS the vehicle's own surface
+    // extent (FrameExtent -- the swapchain's, or the offscreen output's).
+    // In practice this block is windowed-only regardless: --pick-probe is
+    // refused at parse time alongside --headless (HostConfig.cpp), because
+    // an offscreen context declines to arm the fixed probe pixel.
+    if (io.config.pickProbe)
+    {
+        io.pickDrawables = packet.pickDrawables;
+
+        // THE SCRIPTED SELECTION -- a stand-in for the editor selection
+        // this host does not have: the FIRST pickable entity in the
+        // scene, whose hit-proxy id is 1 by CollectPickables' own
+        // ordering contract.
+        io.pickSelectedIds.clear();
+        if (!io.pickDrawables.empty())
+            io.pickSelectedIds.push_back(1u);
+
+        graphFrame.pickOutline = true;
+        graphFrame.pickables   = packet.pickDrawables;
+        graphFrame.pickView    = io.runtime->View();
+        if (!packet.pickDrawables.empty())
+            io.packetRing.Latest().selectedIds = { 1u };
+    }
+#endif
+
+    // ---- pick@x,y probes (Task 9), driven through FrameDesc::pickPixel --
+    // NOT the --pick-probe flag above, and deliberately NOT ARC_BUILD_DIST-gated
+    // like it: this is the report's pick channel (VerifyReport's `pick@x,y`
+    // probe kind), not a dev-only exit-code check, so it must exist in every
+    // build configuration the same way every other probe kind does.
+    //
+    // Gated on reportPath too, matching the offscreen vehicle's own gate
+    // (RuntimeApp.cpp's offscreenNodes.pickOutline): a bare `--probe pick@..`
+    // with no `--report` has nowhere for the answer to go, so arming the
+    // readback here would cost a copy nobody reads -- and worse, the pick
+    // node itself was never BUILT for that run (NriGraphContext.cpp only
+    // builds it when NodeSet::pickOutline asked at Create time), so setting
+    // graphFrame.pickOutline here without that node existing would be
+    // arming a chain that is not there. The two gates must agree exactly.
+    //
+    // Armed at the SAME pixel every frame (FirstPickProbe's answer does not
+    // change frame to frame -- a run has exactly one `pick@x,y` request that
+    // matters), which is what lets the readback -- landing
+    // FramesInFlight() frames after the pass that wrote it -- settle
+    // well before ShutdownGraphPath reads NriGraphContext::ProbeId() after
+    // the loop ends. A run combining this with the (windowed-only) dev
+    // --pick-probe flag above has this block win FrameDesc::pickPixel for
+    // the frame -- the flag's own fixed pixel is superseded rather than
+    // silently ignored, which is an acceptable trade for an untested
+    // combination neither mechanism was designed to share.
+    // Verify-only (RuntimeApp.hpp's ARC_RUNTIME_HOST_VERIFY note): a package has no --report.
+#if defined(ARC_RUNTIME_HOST_VERIFY)
+    if (!io.config.reportPath.empty())
+    {
+        const std::optional<Arcane::ProbeSpec> pickSpec = Arcane::FirstPickProbe(io.config.probes);
+        if (pickSpec)
+        {
+            io.pickDrawables = packet.pickDrawables;
+
+            graphFrame.pickOutline = true;
+            graphFrame.pickables   = packet.pickDrawables;
+            graphFrame.pickView    = io.runtime->View();   // the scene camera, as above
+            graphFrame.pickPixel   = glm::ivec2(pickSpec->x, pickSpec->y);
+            // selectedIds left empty (default): this probe reports FACTS, not
+            // a visible outline -- a --screenshot cross-check must show the
+            // scene exactly as an ordinary run would, not a pick-highlighted
+            // one.
+            //
+            // hoverPixel MUST be set explicitly (fix round 1, item 1): left
+            // unset, it falls back to ProbeX()/ProbeY() -- the OLD flag's
+            // fixed pixel, which defaults to (0, 0) when the flag was never
+            // armed (NriGraphContext.cpp's m_currentHover init). outline_seed.hlsl
+            // seeds a HOVER silhouette there in ADDITION to the (empty)
+            // selection one, and the outline composites a cyan ring over the
+            // tonemapped backbuffer -- BEFORE the capture node -- so any scene
+            // with a pickable at (0, 0), or any run also combining the dev
+            // --pick-probe flag, would silently corrupt every other probe and
+            // the screenshot. It reads clean today only because (0, 0) is
+            // empty background in ReferenceProject -- that is an accident of
+            // this scene, not a property of the mechanism, so the no-hover
+            // sentinel is spelled out here rather than left to the default.
+            graphFrame.hoverPixel = glm::ivec2(-1, -1);
+        }
+    }
+#endif
+
+
     // Timed into accPresent rather than left unmeasured, so `--perf`
     // reports something real on this path too (the spec's waiting-
     // frame budget is mostly the pacing wait inside
     // AcquireNextTexture, which is inside this call). It is the whole
     // record + submit + present cost, not just the present: Execute()
     // does all three, and splitting one call across three
-    // accumulators would be a fiction. accRec IS real (the submission
-    // above is the work it names), but accEnd/accTone stay 0 -- there is
-    // no separate flush or tonemap step left to time, both being inside
-    // this one call.
+    // accumulators would be a fiction. accRec IS real -- it times the
+    // ExtractFrame call above, the sprite submission included (F5 plan 1
+    // Task 5) -- but accEnd/accTone stay 0: there is no separate flush or
+    // tonemap step left to time, both being inside this one call.
     //
     // THE ONE LINE IN THIS FILE THAT NAMES THE MODE, and it is forced. The
     // vehicle deliberately exposes a PAIR that refuses each other's mode --
@@ -749,12 +829,15 @@ Arcane::NriGraphContext::FrameOutcome RenderGraph(FrameIo& io)
     // is identical in both modes, which is the property Task 14's parity check
     // rests on.
     const auto graphT0 = io.perf.On() ? io.perf.Now() : Arcane::FramePerf::Clock::time_point{};
+    // ExtractFrame -> write selection (both pick blocks above) -> BindPacket
+    // -> render. The vehicle nulls the pointer on return.
+    io.graph->BindPacket(&packet);
     const Arcane::NriGraphContext::FrameOutcome outcome =
         io.graph->IsOffscreen() ? io.graph->RenderFrameOffscreen(graphFrame)
                                 : io.graph->RenderFrame(graphFrame);
     io.perf.Add(io.perf.accPresent, graphT0, io.perf.Now());
     // Any outcome but Presented means GpuSceneSyncNode did not run, so the
-    // rows PrepareSceneForRender staged above never reached the GPU and would
+    // rows the extract staged above never reached the GPU and would
     // otherwise never be re-staged (ruling R-F): give the mirror a new
     // generation so the next sync is a full rebuild.
     if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
@@ -793,8 +876,12 @@ bool CaptureTail(FrameIo& io)
 
     if (io.perf.On())
     {
-        const Arcane::Batch2DStats bs = io.gpu->Batch().Stats();
-        io.perf.Tick(bs.quads, bs.drawCalls);
+        // This frame's packet (RenderGraph extracted it, and CaptureTail
+        // runs only after a Presented frame): quads = vertices / 4, draws =
+        // spans.
+        const Arcane::RenderFramePacket& last = io.packetRing.Slot(0);
+        io.perf.Tick(static_cast<std::uint32_t>(last.batchVertices.size() / 4u),
+                     static_cast<std::uint32_t>(last.batchSpans.size()));
     }
 
     ++io.frameCount;

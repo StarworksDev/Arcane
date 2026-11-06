@@ -17,6 +17,7 @@
 // server world).
 
 #include <Arcane/Base/Runtime.hpp>
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Client/RuntimePresentation.hpp>
 #include <Arcane/Plugin/ClientHooks.hpp>
 
@@ -29,9 +30,9 @@
 namespace Arcane
 {
     class Batcher2D;
-    struct SpriteEntry;            // Scene/SceneResources.hpp -- only named here (pointer-to-map param)
-    struct MeshEntry;               // Scene/SceneResources.hpp -- SpriteEntry's F2a (3D) sibling
-    struct ResolvedMeshMaterial;    // Scene/SceneResources.hpp -- mesh-material constants
+    struct SpriteEntry;            // Scene/SceneCacheRecords.hpp -- only named here (pointer-to-map param)
+    struct MeshEntry;               // Scene/SceneCacheRecords.hpp -- SpriteEntry's F2a (3D) sibling
+    struct ResolvedMeshMaterial;    // Scene/SceneCacheRecords.hpp -- mesh-material constants
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -172,6 +173,8 @@ namespace Arcane
         [[nodiscard]] glm::vec2 ResolvedGravity() const { return m_core.ResolvedGravity(); }
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::ClientAccess;   // hashes m_core / m_pres (Client/AbiManifestClient.hpp)
+
         // IClientHooks -- Core's ONE reach-back. Private: only PluginHost (through
         // Runtime::ClientHooks()) is meant to call these, never a host directly.
         void* SaveUiContext() noexcept override;
@@ -180,9 +183,10 @@ namespace Arcane
         void  OnSystemsCleared() noexcept override;
         void  FillEngineContext(EngineContext& ctx) noexcept override;
 
-        // RenderSubmissionSystem into the render scheduler, idempotently. Called at
-        // construction and from OnSystemsCleared -- the presentation counterpart of
-        // Runtime::InstallEngineSystems.
+        // The presentation's render-scheduler systems. Called at construction and
+        // from OnSystemsCleared -- the presentation counterpart of
+        // Runtime::InstallEngineSystems. Installs nothing since F5 plan 1 Task 5:
+        // RenderSubmissionSystem runs inside ExtractFrame, once per frame.
         void InstallRenderSystems();
 
         // ORDER MATTERS: the presentation is declared SECOND so it destructs FIRST,

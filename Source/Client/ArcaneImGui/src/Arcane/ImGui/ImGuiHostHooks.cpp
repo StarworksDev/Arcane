@@ -1,4 +1,5 @@
 #include <Arcane/ImGui/ImGuiHostHooks.hpp>
+#include <Arcane/ImGui/ImDrawSnapshot.hpp>
 #include <Arcane/ImGui/ImGuiLayer.hpp>
 #include <Arcane/ImGui/ImGuiNriNode.hpp>
 #include <Arcane/Host/HostOverlay.hpp>
@@ -18,7 +19,8 @@ namespace Arcane
             [](NriGraphContext& context) -> std::unique_ptr<RenderOverlayNode>
             { return ImGuiNriNode::Create(context); },
             [](RenderGraph& graph, NriGraphContext* context, RgTexture target, bool gameUi)
-            { AddImGuiNode(graph, context, target, gameUi ? ImGuiNodeSlot::GameUi : ImGuiNodeSlot::HostHud); }
+            { AddImGuiNode(graph, context, target, gameUi ? ImGuiNodeSlot::GameUi : ImGuiNodeSlot::HostHud); },
+            &CopyImDrawSnapshot
         });
     }
 }

@@ -41,6 +41,15 @@ namespace Arcane
     // means.
     [[nodiscard]] ARC_VERIFY_API bool ReferenceNameIsSafe(const std::string& name) noexcept;
 
+    // Servitor final fix pass (G-3): whether `joined` (a path this file built
+    // by appending a name to `root`) is lexically under `root`. A path whose
+    // root-name differs from root's (Windows "C:shot.png" appended to a D:
+    // root replaces the whole left side) or that climbs out with ".." is not.
+    // ResolveReferenceIn, the bless target and DiffArtifactPath refuse a
+    // path that fails this after every join, behind ReferenceNameIsSafe.
+    [[nodiscard]] ARC_VERIFY_API bool ReferencePathIsContained(const std::filesystem::path& root,
+                                                               const std::filesystem::path& joined) noexcept;
+
     enum class ReferenceLevel : std::uint8_t
     {
         None,      // nothing on disk for this name

@@ -19,8 +19,8 @@ push to the same ref cancels the older run (`concurrency: ci-<ref>`). Its jobs:
 | Job | What it does |
 |---|---|
 | `image-tag` | Runs the CI scripts' own tests, then computes the Linux image tag (`scripts/ci/image-tag.sh`) |
-| `ci-image` | Makes sure `ghcr.io/starworksdev/arcane-ci:<tag>` exists -- reused, or built, verified and only then pushed (`scripts/ci/ci-image.sh`) -- and outputs its digest. The only job with `packages: write` |
-| `build-test-linux` | The two Linux legs, inside that image pinned by digest |
+| `ci-image` | Reuses `ghcr.io/starworksdev/arcane-ci:<tag>` when that tag is already published. Only a non-pull-request run on `main` builds a missing tag, verifies it, and then pushes (`scripts/ci/ci-image.sh`). A pull request whose image inputs changed builds and verifies the image locally, does not push it, and outputs an empty digest. The only job with `packages: write` |
+| `build-test-linux` | The two Linux legs, inside that image pinned by digest. Skipped when the digest is empty (a pull request that verified a new tag locally, or a failed `ci-image`) |
 | `build-test` | The Windows and macOS legs, on the hosted runners |
 | `notify` | Discord FAILED / RECOVERED; never for pull requests |
 
@@ -76,7 +76,7 @@ first failing step and exits with its code:
 | Step | `scripts/ci/build.sh <cfg> [-j N]` (Linux, macOS) | `scripts/ci/build.ps1 <cfg> [-Jobs N]` (Windows) |
 |---|---|---|
 | generate | `premake5 --cc=<gcc\|clang> gmake` | `GenerateProjects.bat` (vs2026) |
-| engine | `make -k ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient` | `msbuild Arcane.slnx` |
+| engine | `make -k ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest` (then `arcane-abi-digest --check`) | `msbuild Arcane.slnx` |
 | game | `arcbuild build --project ReferenceProject --config <cfg> --sdk <checkout>` | the same |
 | hosts | `make -k ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests` (their postbuild stages ReferenceProject, `Binaries/` included) | `msbuild Arcane.slnx` again, so every host restages the game module |
 
@@ -92,9 +92,9 @@ scripts/run-tests.ps1 <Debug|Release|Dist> [--rng-seed N]           # Windows
 ```
 
 ArcaneTests runs in random order. Each leg runs `~[gpu]` twice: seed
-`SEED_A = run_number` and `SEED_B = <run_number>50021`; both appear in the
-suite banner and in the JUnit file name under `test-results/`. A failure
-reproduces locally with `--rng-seed N`.
+`SEED_A = run_number` and `SEED_B = (run_number + 50021) mod 4294967296`; both
+appear in the suite banner and in the JUnit file name under `test-results/`.
+A failure reproduces locally with `--rng-seed N`.
 
 Per-OS exclusions are files of `<exact test case name> | <reason>` lines that
 the runner refuses to read if a line has no reason:
@@ -152,30 +152,33 @@ docker build --target build --build-context scripts=scripts -f ci/linux/Dockerfi
 docker run --rm -v "$PWD/ci/linux:/v:ro" arcane-ci:dev bash /v/verify-image.sh
 ```
 
-**Publishing:** `ci-image` reuses a published tag or, on a same-repo run,
-builds it, verifies it (`verify-image.sh`) and only then pushes it
-(`scripts/ci/ci-image.sh`), so a failed verify publishes nothing. The legs run on
-`image@sha256:<digest>`, never the tag: the tag names the inputs, the digest
-names the image. The package is **public** (Arcane is public, the image holds
-no secrets), so pulls need no credentials; the legs still pass the workflow
-token so a not-yet-public package also works.
+**Publishing:** `ci-image` reuses a published tag. Only a non-pull-request run
+on `main` (a push to `main`, or `workflow_dispatch` on `refs/heads/main`)
+builds a missing tag, verifies it (`verify-image.sh`) and only then pushes it
+(`scripts/ci/ci-image.sh`), so a failed verify publishes nothing. `PUBLISH` is
+that condition. The legs that run use `image@sha256:<digest>`, never the tag:
+the tag names the inputs, the digest names the image. The package is **public**
+(Arcane is public, the image holds no secrets), so pulls need no credentials;
+the legs still pass the workflow token so a not-yet-public package also works.
+A published tag is reused, so a later edit of `scripts/ci/ci-image.sh` (not a
+tag input) does not rebuild or replace it.
 
-**Fork pull requests** cannot publish: when a fork changes an image input,
-`ci-image` fails naming the tag. Re-running it from a branch of this
-repository executes the fork's Dockerfile and scripts in the one job that
-holds `packages: write`, so a maintainer **reviews the `ci/linux/` and
-`scripts/` diff first**. A Dependabot PR, if one is ever configured, behaves
-the same way.
+**Pull requests do not publish.** A pull request whose image inputs changed
+builds and verifies the image locally, does not push it, and writes an empty
+digest. The Linux legs that need the registry image are skipped until a
+non-pull-request run on `main` publishes the tag. A pull request whose tag is
+already published reuses that digest and runs the Linux legs.
 
-**Same-repo branches can publish.** `packages: write` covers every same-repo
-run. `scripts/ci/ci-image.sh` is not a tag input, so a branch that edits it
-(say, to pass a build argument) can push a differently built image over a tag
-`main` already uses. The legs pin the digest read from that tag at run time,
-so the pin does not help. This is accepted with the current solo / trusted
-writer set; the control is review of `ci/linux/` and `scripts/ci/` changes.
+**Fork pull requests** cannot publish, and a missing tag is not built:
+`ci-image` fails naming the tag. A Dependabot pull request is treated the same
+way (`SAME_REPO` stays false). The image is published by the non-pull-request
+`main` run after the change is reviewed and merged, so the `ci/linux/` and
+`scripts/` diff is reviewed before that push.
 
-**Retention:** every image-input change on any branch publishes a tag, and
-nothing deletes old ones yet; the package size is watched (cleanup deferred).
+**Retention:** an image-input change publishes a tag only from a
+non-pull-request run on `main`. A pull request verifies locally and does not
+publish. Nothing deletes old tags yet; the package size is watched (cleanup
+deferred).
 
 ## Local runs
 
@@ -201,9 +204,10 @@ scripts\ci\local.ps1 -Full                    # windows-msvc, linux-gcc-14, linu
   through ccache (volume `arcane-ccache`; local only).
 - **Uncommitted changes are included.** Legs run one at a time (Windows first)
   and every leg runs even when one fails. Seeds: one random seed by default
-  (printed); `-Seeds 2` runs CI's pair; `-Seed N` fixes N (CI's N is the run
-  number). Jobs: Linux `min(CPUs, memory GB / 2)` of what Docker reports,
-  Windows `msbuild /m`; `-Jobs` sets both.
+  (printed); `-Seeds 2` runs CI's pair, `N` and `(N + 50021) mod 4294967296`;
+  `-Seed N` fixes N (CI's N is the run number). Jobs: Linux
+  `min(CPUs, memory GB / 2)` of what Docker reports, Windows `msbuild /m`;
+  `-Jobs` sets both.
 - **Output:** one table (leg, config, verdict, minutes, build, per-seed test
   counts, image, log directory), the first compiler/linker errors of a failed
   build, an OOM hint when the build logs show a compiler or linker killed by

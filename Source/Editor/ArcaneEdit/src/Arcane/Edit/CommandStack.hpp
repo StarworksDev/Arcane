@@ -114,6 +114,14 @@ namespace Arcane
         // consumer that owns the stack now.
         void Commit(TransactionId owner);   // capture afters; push if any changed; clear redo; close
         void Cancel(TransactionId owner);   // discard the open transaction (no push, no revert)
+        // Close a gesture whose input vanished mid-drag (gizmo target deleted or
+        // deselected). Every target still has its component: Commit, so the pose
+        // the author dragged to stays and is undoable. Any target gone: write the
+        // survivors back to their before-snapshot and drop the transaction (no undo
+        // entry). A generic command pushed into the open transaction is dropped in
+        // the mixed case by Cancel; gizmo drags do not push generic commands.
+        // No pending snapshots at all behaves as Cancel.
+        void Abandon(TransactionId owner);
 
         // Push an ALREADY-APPLIED generic command (the ICommand contract: the
         // live edit happened, the command only reverses/replays). Joins the open

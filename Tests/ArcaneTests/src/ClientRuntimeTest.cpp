@@ -1,8 +1,9 @@
 // The Runtime/ClientRuntime split (spec 2026-09-15 s2): a headless Runtime has NO
 // presentation -- no client, no hooks, an EMPTY render scheduler; a ClientRuntime
-// owns one, attaches itself as the client hooks, and keeps RenderSubmissionSystem
-// installed across ClearSystems (which PluginHost -- now Core -- calls on every
-// module unload/reload).
+// owns one and attaches itself as the client hooks. RenderSubmissionSystem is no
+// longer installed on either (F5 plan 1 Task 5): sprites are submitted once per
+// frame by ExtractFrame, and that stays true across ClearSystems (which
+// PluginHost -- now Core -- calls on every module unload/reload).
 #include <catch2/catch_test_macros.hpp>
 
 #include <Arcane/Base/Runtime.hpp>
@@ -13,7 +14,7 @@
 #include <Arcane/Plugin/ClientHooks.hpp>
 #include <Arcane/Plugin/PluginABI.hpp>   // EngineContext (the hooks' fill target)
 #include <Arcane/Render/RenderSystems.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
@@ -35,15 +36,15 @@ TEST_CASE("a headless Runtime carries no client and installs only the two headle
     CHECK_FALSE(rt.Schedulers().render.HasSystem<Arcane::RenderSubmissionSystem>());
 }
 
-TEST_CASE("ClientRuntime owns a Runtime, attaches as its client, and keeps render submission across ClearSystems", "[runtime][client]")
+TEST_CASE("ClientRuntime owns a Runtime, attaches as its client, and leaves render submission uninstalled", "[runtime][client]")
 {
     Arcane::ClientRuntime crt(Arcane::Test::Process());
     Arcane::Runtime& core = crt.Core();
     CHECK(core.Client() == &crt);
     CHECK(core.ClientHooks() != nullptr);
-    CHECK(core.Schedulers().render.HasSystem<Arcane::RenderSubmissionSystem>());
+    CHECK_FALSE(core.Schedulers().render.HasSystem<Arcane::RenderSubmissionSystem>());
     core.ClearSystems();                                   // the hook path PluginHost takes
-    CHECK(core.Schedulers().render.HasSystem<Arcane::RenderSubmissionSystem>());
+    CHECK_FALSE(core.Schedulers().render.HasSystem<Arcane::RenderSubmissionSystem>());
     CHECK(core.Schedulers().fixedUpdate.HasSystem<Arcane::PhysicsSystem2D>());
     // the aliases (P5) are the same objects
     CHECK(&crt.Registry() == &core.Registry());

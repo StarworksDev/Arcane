@@ -9,6 +9,7 @@
 #include <Arcane/Core/Api.hpp>
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -44,4 +45,51 @@ namespace Arcane
     ARC_ASSETS_API bool WritePngRgba(const std::filesystem::path& path,
                                  std::uint32_t width, std::uint32_t height,
                                  const unsigned char* rgba);
+
+    // Encode tight RGBA8 to PNG bytes in memory (stb's to-func writer), so a
+    // caller owns the file write: a wide-path std::ofstream, a checked close
+    // and a rename (the Servitor capture job). WritePngRgba goes through
+    // stbi_write_png, which neither reports a short write nor opens a
+    // non-ANSI path on Windows. False (png empty) for empty input or an
+    // encoder failure. Pure CPU, never logs.
+    ARC_ASSETS_API bool EncodePngRgba(std::uint32_t width, std::uint32_t height,
+                                      const unsigned char* rgba, std::vector<unsigned char>& png);
+
+    // Decode PNG (or any stb-supported image) bytes already in memory into
+    // tight RGBA8, so a caller owns the file read: a wide-path std::ifstream
+    // (the Servitor compare job reads its reference this way; LoadPngRgba
+    // narrows the path with path::string(), which throws on a non-ANSI path
+    // on Windows). False (pixels invalid) for empty or undecodable input.
+    // Pure CPU, never logs.
+    ARC_ASSETS_API bool DecodePngRgba(const unsigned char* bytes, std::size_t size, PixelData& pixels);
+
+    // A GPU readback's mapped rows into tight RGBA8: the row padding
+    // (rowPitch past width * 4) is dropped and BGRA is swizzled to RGBA, so a
+    // capture's bytes mean the same thing on every backend. The one copy of
+    // that normalization: NriGraphContext::ReadCapture (the --screenshot and
+    // cover path) and the Servitor capture job (ArcaneRemote) both call it.
+    // `mapped` holds at least rowPitch * (height - 1) + width * 4 bytes.
+    inline void NormalizeCaptureRows(const std::uint8_t* mapped,
+        std::uint32_t width, std::uint32_t height,
+        std::uint32_t rowPitch, bool bgra,
+        std::vector<unsigned char>& rgba)
+    {
+        rgba.resize(static_cast<std::size_t>(width) * height * 4);
+        for (std::uint32_t y = 0; y < height; ++y)
+        {
+            const std::uint8_t* src = mapped + static_cast<std::size_t>(y) * rowPitch;
+            unsigned char* dst = rgba.data() + static_cast<std::size_t>(y) * width * 4;
+            std::memcpy(dst, src, static_cast<std::size_t>(width) * 4);
+            if (bgra)
+            {
+                for (std::uint32_t x = 0; x < width; ++x)
+                {
+                    unsigned char* p = dst + static_cast<std::size_t>(x) * 4;
+                    const unsigned char b = p[0];
+                    p[0] = p[2];
+                    p[2] = b;
+                }
+            }
+        }
+    }
 }

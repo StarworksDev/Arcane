@@ -56,7 +56,7 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Guid.hpp>
-#include <Arcane/Scene/SceneResources.hpp>   // Arcane::ResolvedMeshMaterial (full type: Table()'s value type)
+#include <Arcane/Scene/SceneCacheRecords.hpp>   // Arcane::ResolvedMeshMaterial (full type: Table()'s value type)
 
 #include <cstdint>
 #include <filesystem>
@@ -76,7 +76,7 @@ namespace Arcane
 
         // Guid (the resolved `albedo` texture) -> a bindless material-table
         // slot, or 0xFFFFFFFF ("no slot" -- BindlessTable::kInvalidSlot's own
-        // value; restated as a literal for the SAME reason SceneResources.
+        // value; restated as a literal for the SAME reason SceneCacheRecords.
         // hpp's ResolvedMeshMaterial::materialSlot does, see that field's own
         // comment) when there is none. F2b Task 11's device seam: this class
         // stays CONSTANTS ONLY and never reaches NriTextureCache or

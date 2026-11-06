@@ -13,6 +13,7 @@ namespace Arcane
 {
     class Graveyard;
     class NriGraphContext;
+    struct ImDrawSnapshot;
 
     class ARC_RENDER_API RenderOverlayNode
     {
@@ -30,6 +31,9 @@ namespace Arcane
     {
         std::unique_ptr<RenderOverlayNode> (*create)(NriGraphContext&) = nullptr;
         void (*addNode)(RenderGraph&, NriGraphContext*, RgTexture, bool gameUi) = nullptr;
+        // Extract's ImDrawData copy (ruling PR-1): ArcaneImGui's CopyImDrawSnapshot.
+        // Null in a host without ImGui, whose packets carry empty snapshots.
+        bool (*snapshot)(const ImDrawData* src, ImDrawSnapshot& out) = nullptr;
     };
 
     ARC_RENDER_API void SetRenderOverlayHooks(RenderOverlayHooks hooks) noexcept;

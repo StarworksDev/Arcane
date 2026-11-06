@@ -12,12 +12,16 @@
 // A consumer that never builds a Runtime -- arcbuild, arccook -- creates no
 // ProcessContext and touches no ComponentRegistry; this class documents that
 // limit rather than enforcing it (there is nothing to enforce against).
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/EcsFwd.hpp>                 // Arcane::TypeContext (declared, aliased)
 #include <Arcane/Plugin/SystemFactory.hpp>   // SystemFactoryTable (a by-value member)
+#include <cstdint>
 #include <memory>
+#include <mutex>
 namespace Arcane
 {
+    class JobSystem;   // Arcane/Jobs/JobSystem.hpp
     struct ProcessContextDesc
     {
         bool                 isDedicatedServerProcess = false;
@@ -47,13 +51,28 @@ namespace Arcane
         // into it from OnInit (GameModule::RegisterSystem); every Runtime built on
         // this context instantiates the subset matching its own NetMode.
         [[nodiscard]] SystemFactoryTable& SystemFactories() noexcept { return m_factories; }
+        // The process's ONE job pool, shared by every Runtime on this context. Each
+        // Runtime holds the returned shared_ptr; this object keeps only a weak
+        // reference, so the pool lives exactly as long as the last Runtime and is
+        // rebuilt (with the then-current worker count) by the next one. The first
+        // caller's `workerCount` sizes the pool; a later caller while the pool is
+        // alive gets the same pool and its `workerCount` is ignored. The check and
+        // the mint run under one lock, so overlapping Runtime constructors cannot
+        // each mint. Hosts destroy every Runtime before ~ProcessContext. Every
+        // Runtime on this context ticks on the thread that built the first one
+        // (enkiTS gives every unregistered thread pipe 0, so two ticking threads
+        // would race on the one pool).
+        [[nodiscard]] std::shared_ptr<JobSystem> AcquireJobSystem(std::uint32_t workerCount);
     private:
+        friend struct ::Arcane::Detail::AbiManifest::Access;   // hashes these private members (Plugin/AbiManifestEngine.hpp)
         explicit ProcessContext(const ProcessContextDesc& desc);
         std::unique_ptr<::Arcane::TypeContext> m_owned;    // null when adopting
         ::Arcane::TypeContext*                 m_context = nullptr;
         SystemFactoryTable                     m_factories;
         bool                                   m_dedicated = false;
         bool                                   m_slotHeld  = false;
+        std::mutex                             m_jobsMutex;
+        std::weak_ptr<JobSystem>               m_jobs;
     };
 #if defined(_MSC_VER)
 #pragma warning(pop)

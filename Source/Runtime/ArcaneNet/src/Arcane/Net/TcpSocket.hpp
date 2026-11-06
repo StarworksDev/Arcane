@@ -29,6 +29,7 @@ using SocketType = SOCKET;
 #include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>      // fcntl/F_GETFL/F_SETFL/O_NONBLOCK (SetNonBlocking); glibc pulls nothing transitively
+#include <poll.h>       // poll/pollfd (PollSockets)
 #include <cerrno>
 using SocketType = int;
 #define INVALID_SOCK -1
@@ -38,7 +39,9 @@ using SocketType = int;
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <span>
 #include <string>
+#include <vector>
 
 #include <Arcane/Core/Constant.hpp>
 #include <Arcane/Net/NetSettings.hpp>
@@ -393,6 +396,118 @@ namespace Arcane
 #endif
 
         return sock;
+    }
+
+    // ============================================================================
+    // Readiness polling (remote listener, Servitor P0 task 6)
+    // ============================================================================
+
+    // One socket's interest and, after PollSockets, its readiness.
+    struct PollInterest
+    {
+        SocketType socket = INVALID_SOCK;
+        bool wantRead = false;
+        bool wantWrite = false;
+        bool readable = false;
+        bool writable = false;
+        bool hungup = false;
+    };
+
+    // ioctlsocket(FIONBIO) on Windows, fcntl(O_NONBLOCK) on POSIX. False on failure.
+    inline bool SetNonBlocking(SocketType sock, bool nonBlocking)
+    {
+#ifdef _WIN32
+        u_long mode = nonBlocking ? 1u : 0u;
+        return ::ioctlsocket(sock, FIONBIO, &mode) == 0;
+#else
+        const int flags = ::fcntl(sock, F_GETFL, 0);
+        if (flags < 0)
+            return false;
+        const int next = nonBlocking ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+        return ::fcntl(sock, F_SETFL, next) == 0;
+#endif
+    }
+
+    // Waits until a socket in `fds` is ready or `timeoutMs` passes. A negative
+    // timeout waits indefinitely, 0 polls. Returns -1 on a select/poll error
+    // (including EINTR; callers iterate again), 0 on timeout, otherwise the
+    // number of interests that became readable, writable, or hung up. Every
+    // call clears and refills readable / writable / hungup. INVALID_SOCK
+    // entries are skipped.
+    inline int PollSockets(std::span<PollInterest> fds, int timeoutMs)
+    {
+#ifdef _WIN32
+        // Winsock select bounds the socket COUNT by FD_SETSIZE (64), not the value.
+        fd_set readSet, writeSet, errSet;
+        FD_ZERO(&readSet);
+        FD_ZERO(&writeSet);
+        FD_ZERO(&errSet);
+        for (PollInterest& fd : fds)
+        {
+            fd.readable = false;
+            fd.writable = false;
+            fd.hungup = false;
+            if (fd.socket == INVALID_SOCK)
+                continue;
+            if (fd.wantRead)
+                FD_SET(fd.socket, &readSet);
+            if (fd.wantWrite)
+                FD_SET(fd.socket, &writeSet);
+            FD_SET(fd.socket, &errSet);
+        }
+        timeval tv{};
+        timeval* tvp = nullptr;
+        if (timeoutMs >= 0)
+        {
+            tv.tv_sec = timeoutMs / 1000;
+            tv.tv_usec = (timeoutMs % 1000) * 1000;
+            tvp = &tv;
+        }
+        const int sel = ::select(0, &readSet, &writeSet, &errSet, tvp); // Winsock ignores nfds
+        if (sel <= 0)
+            return sel;
+        int count = 0;
+        for (PollInterest& fd : fds)
+        {
+            if (fd.socket == INVALID_SOCK)
+                continue;
+            fd.readable = FD_ISSET(fd.socket, &readSet) != 0;
+            fd.writable = FD_ISSET(fd.socket, &writeSet) != 0;
+            fd.hungup = FD_ISSET(fd.socket, &errSet) != 0;
+            if (fd.readable || fd.writable || fd.hungup)
+                ++count;
+        }
+        return count;
+#else
+        // poll, not select: select's fd_set is indexed by descriptor NUMBER, and
+        // FD_SET on a descriptor >= FD_SETSIZE (1024) overflows it.
+        std::vector<pollfd> pfds(fds.size());
+        for (std::size_t i = 0; i < fds.size(); ++i)
+        {
+            PollInterest& fd = fds[i];
+            fd.readable = false;
+            fd.writable = false;
+            fd.hungup = false;
+            pfds[i].fd = fd.socket; // INVALID_SOCK (-1) is skipped by poll
+            pfds[i].events = static_cast<short>((fd.wantRead ? POLLIN : 0) | (fd.wantWrite ? POLLOUT : 0));
+            pfds[i].revents = 0;
+        }
+        const int rc = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeoutMs);
+        if (rc <= 0)
+            return rc;
+        int count = 0;
+        for (std::size_t i = 0; i < fds.size(); ++i)
+        {
+            PollInterest& fd = fds[i];
+            const short re = pfds[i].revents;
+            fd.readable = (re & POLLIN) != 0;
+            fd.writable = (re & POLLOUT) != 0;
+            fd.hungup = (re & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+            if (fd.readable || fd.writable || fd.hungup)
+                ++count;
+        }
+        return count;
+#endif
     }
 
     // ============================================================================

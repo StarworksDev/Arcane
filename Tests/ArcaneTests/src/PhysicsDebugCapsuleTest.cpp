@@ -14,6 +14,7 @@
 #include <Manifold2D/Physics/Shapes.hpp>
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/PhysicsDebugDraw.hpp>
+#include "Helpers/PhysicsDebugDrawSolver.hpp"
 
 #include <glm/glm.hpp>
 

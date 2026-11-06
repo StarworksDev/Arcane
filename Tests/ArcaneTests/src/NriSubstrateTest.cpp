@@ -40,7 +40,8 @@ TEST_CASE("nri: ARC_NRI_CHECK on SUCCESS returns true and does not bump RenderEr
     CHECK(Arcane::RenderErrorCount() == before);
 }
 
-TEST_CASE("nri: ARC_NRI_CHECK on a failure result returns false and bumps RenderErrorCount by exactly 1", "[nri]")
+TEST_CASE("nri: ARC_NRI_CHECK on a failure result returns false and bumps RenderErrorCount by exactly 1",
+          "[nri][expects-render-errors]")
 {
     // This is the one [nri] case that deliberately trips the REAL, shared
     // 0/0 gate latch (proving ARC_NRI_CHECK reaches it, not a fake local
@@ -68,7 +69,8 @@ namespace
     void RecordDeviceRemovedHook() { g_deviceRemovedHookFired = true; }
 }
 
-TEST_CASE("nri: NoteError bumps RenderErrorCount by exactly 1 and never fires the device-removed hook", "[nri]")
+TEST_CASE("nri: NoteError bumps RenderErrorCount by exactly 1 and never fires the device-removed hook",
+          "[nri][expects-render-errors]")
 {
     // Same bracket as the ARC_NRI_CHECK failure case above: this case
     // deliberately trips the REAL shared 0/0 latch (that is the point --

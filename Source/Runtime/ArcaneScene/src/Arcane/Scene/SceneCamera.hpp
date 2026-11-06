@@ -14,7 +14,9 @@
 
 #include <Arcane/Base/Log.hpp>              // ARC_WARN (degenerate-basis fallback, Task 7/F2a)
 #include <Arcane/Scene/Components.hpp>
+#include <Arcane/Scene/DepthConvention.hpp>
 #include <Arcane/Scene/RenderViewSettings.hpp>   // Ortho2DView: render.ortho2D.depthRange (S6-9)
+#include <Arcane/Scene/SceneCameraView.hpp>        // SceneCameraView (its own header, F5 plan 1 Task 4)
 #include <Arcane/Scene/ViewTransform.hpp>
 
 #include <Astra/Registry/Registry.hpp>
@@ -28,19 +30,6 @@
 
 namespace Arcane
 {
-    struct SceneCameraView
-    {
-        // The authored facts, for callers that need to draw the camera rather than
-        // look through it (the editor's camera-rect overlay).
-        glm::vec2 worldCenter{0.0f, 0.0f};   // the camera entity's world position
-        float     halfHeight = 0.0f;         // Camera::orthographicSize, meters
-
-        // Derived for the viewport that was asked about: the orthographic
-        // ViewTransform (+Y up; its AsAffine2D() is the pixel mapping the
-        // overlays still draw through, with a NEGATIVE y scale).
-        ViewTransform view{};
-    };
-
     // The active camera's view for a `viewport` (pixels), or nullopt when the
     // scene has no usable active Camera.
     //
@@ -53,11 +42,17 @@ namespace Arcane
     //
     // outCount, when given, receives the number of ACTIVE cameras found, so a host
     // can warn once that a scene is ambiguous -- the contract the PostProcess sweep
-    // already set.
+    // already set. `warn` is the same switch ResolveFrameViews threads into both
+    // sweeps. This orthographic sweep emits no diagnostic of its own: the
+    // no-camera and multi-camera lines are printed by ResolveFrameViews, and only
+    // when its flag is true, so a host's early resolve cannot double them. A
+    // diagnostic added here must honour `warn`, as the perspective sweep does.
     inline std::optional<SceneCameraView> ActiveSceneCamera(Astra::Registry& reg,
                                                             glm::uvec2 viewport,
-                                                            int* outCount = nullptr)
+                                                            int* outCount = nullptr,
+                                                            bool warn = true)
     {
+        (void)warn;
         int       found = 0;
         glm::vec2 center{0.0f, 0.0f};
         float     halfH = 0.0f;
@@ -203,9 +198,14 @@ namespace Arcane
     //
     // F4 plan 1 lifted the 2D path onto ViewTransform; the ortho camera still
     // frames XY by definition.
+    // `warn` defaults true, so a direct call still reports a degenerate basis
+    // every time (the fallback is not deduplicated -- see the ARC_WARN below).
+    // ResolveFrameViews passes its own flag through: ExtractFrame warns, and a
+    // host that resolves again before DrawUI passes false.
     inline std::optional<ViewTransform> ActivePerspectiveSceneCamera(Astra::Registry& reg,
                                                                      glm::uvec2 viewport,
-                                                                     int* outCount = nullptr)
+                                                                     int* outCount = nullptr,
+                                                                     bool warn = true)
     {
         int       found = 0;
         glm::mat4 world{1.0f};   // identity: eye at origin, forward -Z, up +Y -- the F1 default
@@ -268,9 +268,13 @@ namespace Arcane
             // accepted cost, not an oversight -- the alternative (process-global
             // mutable warned-state in a header-only "pure" function) would leak across
             // every Registry that calls this, including unrelated tests in the same
-            // binary.
-            ARC_WARN("camera: entity has a degenerate basis (zero scale?) -- "
-                     "falling back to forward -Z / up +Y");
+            // binary. `warn` is the caller's opt-out, not a latch: false skips the
+            // line and still takes the fallback.
+            if (warn)
+            {
+                ARC_WARN("camera: entity has a degenerate basis (zero scale?) -- "
+                         "falling back to forward -Z / up +Y");
+            }
             forward = glm::vec3(0.0f, 0.0f, -1.0f);
             up      = glm::vec3(0.0f, 1.0f,  0.0f);
         }

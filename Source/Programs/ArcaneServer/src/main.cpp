@@ -21,63 +21,6 @@
 
 #include <cstdio>
 #include <string>
-#include <string_view>
-#include <vector>
-
-namespace
-{
-    // THE RELAUNCH LINE (Diagnostics::Config::commandLine, spec S5.1), this
-    // host's own copy of the rule ArcaneClient's SanitizeRelaunchLine
-    // implements for the two windowed hosts.
-    //
-    // NOT a call into that one: this exe is Core-only BY CONSTRUCTION (see
-    // this file's header comment and premake5.lua's ArcaneServer block -- it
-    // links ArcaneCore, never ArcaneClient), and dragging Client in for one
-    // string function would break the very property ServerReport's
-    // clientDllLoadedAtBoot probe exists to police. The vocabulary is this
-    // host's own too (ServerConfig, not HostConfig): --frames N and --report
-    // <json> are the scripted-run half, and everything else -- --project,
-    // --plugin, --fixed-dt -- describes the SESSION and is kept.
-    //
-    // `exePath` REPLACES argv[0], for the same reason the --print-engine-info
-    // probe below prints ExecutablePathUtf8() rather than argv[0]: argv[0] is
-    // whatever the launcher typed -- a bare relative name under the documented
-    // cd-then-run workflow, in ANSI-codepage bytes under MSVC -- which neither
-    // relaunches from the reporter's own working directory nor survives a
-    // strict-UTF-8 envelope.
-    std::string SanitizedRelaunchLine(const std::string& exePath, int argc, char** argv)
-    {
-        static constexpr std::string_view kStripWithValue[] = { "frames", "report" };
-        std::string out = (exePath.find(' ') != std::string::npos || exePath.empty())
-                        ? "\"" + exePath + "\""
-                        : exePath;
-        for (int i = 1; i < argc; ++i)   // 1: argv[0] is `exePath` above
-        {
-            std::string_view arg(argv[i]);
-            if (arg.starts_with("--"))
-            {
-                std::string_view body = arg.substr(2);
-                const std::size_t eq = body.find('=');           // Cli accepts --name=value too
-                const bool inlineValue = eq != std::string_view::npos;
-                const std::string_view name = inlineValue ? body.substr(0, eq) : body;
-                bool strip = false;
-                for (std::string_view s : kStripWithValue) strip = strip || (s == name);
-                if (strip)
-                {
-                    if (!inlineValue && i + 1 < argc && !std::string_view(argv[i + 1]).starts_with("--"))
-                        ++i;   // its value
-                    continue;
-                }
-            }
-            if (!out.empty()) out.push_back(' ');
-            if (arg.find(' ') != std::string_view::npos || arg.empty())
-                out += "\"" + std::string(arg) + "\"";
-            else
-                out += std::string(arg);
-        }
-        return out;
-    }
-}
 
 int main(int argc, char** argv)
 {
@@ -123,7 +66,7 @@ int main(int argc, char** argv)
         // ALWAYS unattended, unlike the other two: a dedicated server has no
         // desktop session to put a reporter window on, whatever its flags say.
         diag.unattended  = true;
-        diag.commandLine = SanitizedRelaunchLine(Arcane::ExecutablePathUtf8(), argc, argv);
+        diag.commandLine = Arcane::Server::SanitizedRelaunchLine(Arcane::ExecutablePathUtf8(), argc, argv);
         Arcane::Diagnostics::Install(diag);
     }
     // Every host installs one (R24): with the slot empty a first Ctrl-C is

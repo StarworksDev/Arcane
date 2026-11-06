@@ -153,6 +153,9 @@ namespace Arcane::AssetPipeline
             return std::nullopt;   // the mesh cook refuses this file too -- nothing
                                     // extra to report here (this header's own comment).
 
+        // Buffer uris resolve through the confining reader: "../" and absolute uris are refused.
+        CgltfConfinedReads confinedReads(sourcePath);
+        confinedReads.Apply(options);
         if (cgltf_load_buffers(&options, guard.data, sourcePath.string().c_str())
             != cgltf_result_success)
             return std::nullopt;

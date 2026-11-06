@@ -1,4 +1,5 @@
 #include <Arcane/ImGui/ImGuiNriNode.hpp>
+#include <Arcane/ImGui/ImDrawSnapshot.hpp>   // CopyImDrawSnapshot / ImDrawSnapshotRebuild (ruling PR-1)
 // NODE-LEVEL PIXEL CORRECTNESS for the NRI frame graph -- [gpu], outside the
 // ~[gpu] baseline set.
 //
@@ -72,6 +73,15 @@
 #include <Arcane/Scene/TransformSystems.hpp>      // TransformPropagationSystem
 #include <Arcane/Render/PickEmit.hpp>             // PickDrawable -- the id pass's input
 #include <Arcane/Render/RenderErrorLatch.hpp>     // the shared 0/0 latch every case guards
+#include <Arcane/Render/RenderFramePacket.hpp>    // ImDrawSnapshot -- the packet's ImGui copy (F5 plan 1 Task 4)
+#include <Arcane/Render/ExtractFrame.hpp>         // ExtractFrame / ExtractRequest -- the registered-material witness (F5 plan 1 Task 5)
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>         // PhysicsWorld2D, Detail::Physics2D::Adopt / Access -- the extracted overlay witness
+#include <Arcane/Material/MaterialSource.hpp>     // BuildMaterialShaderSource / MaterialTemplateFile
+#include <Arcane/Material/MaterialInstance.hpp>
+#include <Arcane/Render/ShaderSourceProvider.hpp>
+#include <Arcane/Render/ShaderCompiler.hpp>
+#include <Arcane/Render/ShaderConventions.hpp>    // kVsEntry / kPsEntry / kVsProfile / kPsProfile
 #include <Arcane/Mesh/MeshBuilder.hpp>          // BuildCube -- the opaque pass's geometry
 #include <Arcane/Render/Nri/BindlessTable.hpp>    // kInvalidSlot -- the four-cube bindless proof
 #include <Arcane/Render/Nri/GpuScene.hpp>         // GpuScene -- the instance-buffer round trip (F3 plan 1 T6)
@@ -119,6 +129,7 @@
 
 #include <array>        // the world quad's four corners (case 3b)
 #include <cstdint>
+#include <cmath>        // std::lround, std::abs -- the extracted-overlay sample
 #include <cstdlib>      // std::abs over the integer luma difference
 #include <cstring>      // std::memcmp -- the byte-exact instance-row check
 #include <filesystem>   // case 9's own temp artifact dir
@@ -128,6 +139,7 @@
 #include <system_error> // case 9's own temp-dir cleanup
 #include <unordered_map> // the T7 case's MeshTable backing store
 #include <vector>
+#include <utility>      // std::move -- the extract witness's resource and material desc
 
 #include "Helpers/GpuCapability.hpp"
 
@@ -779,6 +791,63 @@ namespace
 
         CHECK(Arcane::RenderErrorCount() == before);
     }
+
+    std::vector<unsigned char> CaptureBoundSelection(
+        PixelVehicle& v, const Arcane::RenderFramePacket* packet,
+        std::span<const Arcane::PickDrawable> drawables,
+        std::span<const std::uint32_t> frameSelected,
+        std::uint32_t& w, std::uint32_t& h)
+    {
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.capture     = true;
+        frame.pickOutline = true;
+        frame.pickables   = drawables;
+        frame.pickView    = PixelIdentityView();
+        frame.selectedIds = frameSelected;
+        frame.hoverPixel  = glm::ivec2(-1, -1);
+        if (packet)
+            v.ctx->BindPacket(packet);
+        RenderOne(*v.ctx, frame);
+        std::vector<unsigned char> rgba;
+        REQUIRE(v.ctx->ReadCapture(w, h, rgba));
+        return rgba;
+    }
+
+    void CheckPacketSelectionDrawsTheOutline(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+        Arcane::NriGraphContext::NodeSet nodes;
+        nodes.pickOutline = true;
+
+        const Arcane::PickDrawable quad = WorldQuadAtPixel({ 60.0f, 40.0f }, { 20.0f, 14.0f });
+        Arcane::RenderFramePacket fromPacket;
+        fromPacket.pickDrawables.push_back(quad);
+        fromPacket.selectedIds = { 1u };
+        Arcane::RenderFramePacket fromFrameIgnored;
+        fromFrameIgnored.pickDrawables.push_back(quad);
+
+        std::uint32_t wP = 0, hP = 0, wF = 0, hF = 0, wB = 0, hB = 0;
+        std::vector<unsigned char> packetPx, framePx, baseline;
+        {
+            PixelVehicle v = MakeVehicle(backend, nodes);
+            packetPx = CaptureBoundSelection(v, &fromPacket, fromPacket.pickDrawables, {}, wP, hP);
+        }
+        {
+            PixelVehicle v = MakeVehicle(backend, nodes);
+            const std::uint32_t selected[] = { 1u };
+            framePx = CaptureBoundSelection(v, &fromFrameIgnored, fromFrameIgnored.pickDrawables, selected, wF, hF);
+        }
+        {
+            PixelVehicle v = MakeVehicle(backend, nodes);
+            const Arcane::PickDrawable drawables[] = { quad };
+            baseline = CaptureBoundSelection(v, nullptr, drawables, {}, wB, hB);
+        }
+        REQUIRE((wP == wB && hP == hB && wF == wB && hF == hB));
+        CHECK(DifferingTexels(packetPx, baseline, wB, hB) > 40u);
+        CHECK(DifferingTexels(framePx, baseline, wB, hB) == 0u);
+        CHECK(Arcane::RenderErrorCount() == before);
+    }
 }
 
 TEST_CASE("outline: the JFA traces the selected silhouette and nothing when the selection is empty (d3d12)",
@@ -791,6 +860,16 @@ TEST_CASE("outline: the JFA traces the selected silhouette and nothing when the 
           "[gpu][pixel][outline][nri][vulkan]")
 {
     CheckSelectionOutlineTracesOnlyTheSelection(Arcane::GraphicsBackend::Vulkan);
+}
+
+TEST_CASE("packet selection draws the outline (d3d12)", "[gpu][pixel][pick][nri][d3d12]")
+{
+    CheckPacketSelectionDrawsTheOutline(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("packet selection draws the outline (vulkan)", "[gpu][pixel][pick][nri][vulkan]")
+{
+    CheckPacketSelectionDrawsTheOutline(Arcane::GraphicsBackend::Vulkan);
 }
 
 // ---------------------------------------------------------------------------
@@ -2219,7 +2298,7 @@ namespace
         Arcane::GpuSceneMirror mirror;
         Arcane::GpuSceneFrame frame;
         Arcane::GpuSceneSync(w.reg, mirror, /*deviceSyncedGeneration*/ 0u, frame.stage);
-        Arcane::BuildGpuSceneFrame(mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, frame);
+        Arcane::BuildGpuSceneFrame(mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, frame);
         REQUIRE(frame.stage.rows.size() == 1u);
         REQUIRE(frame.stage.values.size() == 1u);
         REQUIRE(frame.batches.size() == 1u);
@@ -2299,7 +2378,7 @@ namespace
         Arcane::GpuSceneMirror mirror;
         Arcane::GpuSceneFrame  frame;
         Arcane::GpuSceneSync(w.reg, mirror, /*deviceSyncedGeneration*/ 0u, frame.stage);
-        Arcane::BuildGpuSceneFrame(mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, frame);
+        Arcane::BuildGpuSceneFrame(mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, frame);
         REQUIRE(frame.stage.fullRebuild);
         REQUIRE(frame.stage.rows.size() == 2);
         REQUIRE(frame.batches.size() == 1);
@@ -2357,7 +2436,7 @@ namespace
         coarseOffscreen.Insert(offscreenE, offscreenBounds->box, 0.0f);
         Arcane::GpuSceneFrame culled;
         Arcane::BuildGpuSceneFrame(offscreenMirror, &coarseOffscreen,
-                                   offscreen.reg.GetResource<Arcane::MeshTable>(), view, culled);
+                                   Arcane::MeshSectionRanges(offscreen.reg.GetResource<Arcane::MeshTable>()), view, culled);
         REQUIRE(culled.batches.size() == 1);
         REQUIRE(culled.args.size() == 1);
         CHECK(culled.stats.coarseVisible == 1);
@@ -2385,7 +2464,7 @@ namespace
         none.Clear();
         Arcane::GpuSceneFrame nothing;
         nothing.stage = frame.stage;
-        Arcane::BuildGpuSceneFrame(mirror, &none, w.reg.GetResource<Arcane::MeshTable>(), view, nothing);
+        Arcane::BuildGpuSceneFrame(mirror, &none, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, nothing);
         CHECK(nothing.batches.empty());
         CHECK(nothing.args.empty());
         CHECK_FALSE(nothing.HasDraws());
@@ -2583,4 +2662,509 @@ TEST_CASE("imgui: 100 concurrent textures grow the HUD's descriptor-pool chain a
           "samples its own texture (vulkan)", "[gpu][pixel][imgui][nri][vulkan]")
 {
     CheckImGuiDrawsPastOnePool(Arcane::GraphicsBackend::Vulkan);
+}
+
+// ---------------------------------------------------------------------------
+// F5 plan 1 Task 4 (ruling PR-1): a packet's ImDrawSnapshot, rebuilt into an
+// ImDrawData, reaches ImGuiNri -- the rebuild carries Textures, declaration
+// services the atlas before record, and the red rect composites after tonemap.
+// ---------------------------------------------------------------------------
+namespace
+{
+    void CheckImGuiSnapshotReachesRenderer(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+
+        ImGuiContext* const previous = ImGui::GetCurrentContext();
+        ImGuiContext* const imgui = ImGui::CreateContext();
+        REQUIRE(imgui != nullptr);
+        ImGui::SetCurrentContext(imgui);
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.DisplaySize = ImVec2(static_cast<float>(kW), static_cast<float>(kH));
+        io.DeltaTime = 1.0f / 60.0f;
+
+        Arcane::NriGraphContext::NodeSet nodes;
+        nodes.hostHud = true;
+        PixelVehicle v = MakeVehicle(backend, nodes);
+        Arcane::RenderOverlayNode* const hud = v.ctx->ImGuiHud();
+        REQUIRE(hud != nullptr);
+        hud->AdoptImGuiContext(imgui);
+
+        ImGui::NewFrame();
+        ImGui::GetForegroundDrawList()->AddRectFilled(
+            ImVec2(70.0f, 40.0f), ImVec2(90.0f, 56.0f), IM_COL32(255, 0, 0, 255));
+        ImGui::Render();
+
+        Arcane::ImDrawSnapshot snap;
+        REQUIRE(Arcane::CopyImDrawSnapshot(ImGui::GetDrawData(), snap));
+        REQUIRE(snap.hasTextures);
+        Arcane::ImDrawSnapshotRebuild rebuilt(snap);
+        REQUIRE(rebuilt.Data()->Textures != nullptr);
+
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.imgui = rebuilt.Data();
+        frame.capture = true;
+        RenderOne(*v.ctx, frame);
+
+        std::uint32_t w = 0, h = 0;
+        std::vector<unsigned char> rgba;
+        REQUIRE(v.ctx->ReadCapture(w, h, rgba));
+        REQUIRE(w == kW);
+        REQUIRE(h == kH);
+        const Rgba px = At(rgba, w, 80u, 48u);
+        CHECK(px.r > px.g + 60);
+        CHECK(px.r > px.b + 60);
+        CHECK(Arcane::RenderErrorCount() == before);
+
+        v.ctx.reset();
+        ImGui::DestroyContext(imgui);
+        ImGui::SetCurrentContext(previous);
+    }
+}
+
+TEST_CASE("an ImDrawSnapshot rebuild reaches ImGuiNri (d3d12)",
+          "[gpu][packet][imgui][nri][d3d12]")
+{
+    CheckImGuiSnapshotReachesRenderer(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("an ImDrawSnapshot rebuild reaches ImGuiNri (vulkan)",
+          "[gpu][packet][imgui][nri][vulkan]")
+{
+    CheckImGuiSnapshotReachesRenderer(Arcane::GraphicsBackend::Vulkan);
+}
+
+// ---------------------------------------------------------------------------
+// F5 plan 1 Task 10: a bound packet's gameUi snapshot is what the gameui
+// node draws. The live FrameDesc::gameUi is empty and only declares the node.
+// ---------------------------------------------------------------------------
+namespace
+{
+    void CheckPacketGameUiReachesTheHud(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+
+        ImGuiContext* const previous = ImGui::GetCurrentContext();
+        ImGuiContext* const game = ImGui::CreateContext();
+        REQUIRE(game != nullptr);
+        ImGui::SetCurrentContext(game);
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.DisplaySize = ImVec2(static_cast<float>(kW), static_cast<float>(kH));
+        io.DeltaTime = 1.0f / 60.0f;
+
+        Arcane::NriGraphContext::NodeSet nodes;
+        nodes.gameUi = true;
+        PixelVehicle v = MakeVehicle(backend, nodes);
+        Arcane::RenderOverlayNode* const hud = v.ctx->ImGuiGame();
+        REQUIRE(hud != nullptr);
+        hud->AdoptImGuiContext(game);
+
+        // The Play HUD the editor built before extract.
+        ImGui::NewFrame();
+        ImGui::GetForegroundDrawList()->AddRectFilled(
+            ImVec2(70.0f, 40.0f), ImVec2(90.0f, 56.0f), IM_COL32(255, 0, 0, 255));
+        ImGui::Render();
+        Arcane::RenderFramePacket packet;
+        REQUIRE(Arcane::CopyImDrawSnapshot(ImGui::GetDrawData(), packet.gameUi));
+        REQUIRE(packet.gameUi.hasTextures);
+
+        // An empty live frame: it declares the gameui node and draws nothing itself.
+        ImGui::NewFrame();
+        ImGui::Render();
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.gameUi = ImGui::GetDrawData();
+        frame.capture = true;
+        v.ctx->BindPacket(&packet);
+        RenderOne(*v.ctx, frame);
+
+        std::uint32_t w = 0, h = 0;
+        std::vector<unsigned char> rgba;
+        REQUIRE(v.ctx->ReadCapture(w, h, rgba));
+        REQUIRE(w == kW);
+        REQUIRE(h == kH);
+        const Rgba px = At(rgba, w, 80u, 48u);
+        CHECK(px.r > px.g + 60);
+        CHECK(px.r > px.b + 60);
+        CHECK(Arcane::RenderErrorCount() == before);
+
+        v.ctx.reset();
+        ImGui::DestroyContext(game);
+        ImGui::SetCurrentContext(previous);
+    }
+}
+
+TEST_CASE("a bound packet's game HUD reaches the gameui node (d3d12)", "[gpu][packet][imgui][nri][d3d12]")
+{
+    CheckPacketGameUiReachesTheHud(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("a bound packet's game HUD reaches the gameui node (vulkan)", "[gpu][packet][imgui][nri][vulkan]")
+{
+    CheckPacketGameUiReachesTheHud(Arcane::GraphicsBackend::Vulkan);
+}
+
+// ---------------------------------------------------------------------------
+// EXTRACT KEEPS A REGISTERED SPRITE MATERIAL (F5 plan 1 Task 5). ExtractFrame
+// submits into the batcher the material was registered on and copies the
+// drained batch into the packet; the bound packet is what Batch2DNode draws.
+// A constant-green shade proves the registered pipeline drew: had the id been
+// rewritten to kMaterialSprite, the plain sprite pipeline would draw the red
+// tint instead.
+// ---------------------------------------------------------------------------
+namespace
+{
+    void CheckExtractKeepsRegisteredMaterial(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+
+        Arcane::ShaderSourceProvider provider;
+        provider.AddRoot("data/shaders");
+        const auto templateText = provider.Get(
+            Arcane::MaterialTemplateFile(Arcane::MaterialSurface::Sprite));
+        REQUIRE(templateText.has_value());
+        const Arcane::MaterialBuildResult build = Arcane::BuildMaterialShaderSource(
+            *templateText,
+            "float4 shade(Varyings v) { return float4(0.0, 1.0, 0.0, 1.0); }",
+            "extract_green",
+            Arcane::MaterialSurface::Sprite);
+        REQUIRE(build.errors.empty());
+
+        Arcane::ShaderCompiler compiler;
+        REQUIRE(compiler.InitializeWithDebounce(0.0));
+        auto compileStage = [&](const char* entry, const char* profile)
+        {
+            Arcane::ShaderCompileRequest compileReq;
+            compileReq.debugName = "extract_green.hlsl";
+            compileReq.sourceUtf8 = build.hlsl;
+            compileReq.entry = entry;
+            compileReq.profile = profile;
+            return compiler.CompileNow(compileReq);
+        };
+        const Arcane::ShaderCompileResult vs = compileStage(Arcane::kVsEntry, Arcane::kVsProfile);
+        const Arcane::ShaderCompileResult ps = compileStage(Arcane::kPsEntry, Arcane::kPsProfile);
+        const bool vulkan = backend == Arcane::GraphicsBackend::Vulkan;
+        const Arcane::ShaderTargetResult& vsTarget = vulkan ? vs.spirv : vs.dxil;
+        const Arcane::ShaderTargetResult& psTarget = vulkan ? ps.spirv : ps.dxil;
+        REQUIRE(vsTarget.succeeded);
+        REQUIRE(psTarget.succeeded);
+
+        auto batcher = Arcane::Batcher2D::Create();
+        REQUIRE(batcher != nullptr);
+        auto templ = std::make_shared<const Arcane::MaterialTemplate>(build.templ);
+        auto instance = std::make_shared<const Arcane::MaterialInstance>(templ);
+        Arcane::Material2DDesc desc;
+        desc.templ = templ;
+        desc.instance = instance;
+        desc.vsBytes = std::make_shared<const std::vector<std::uint8_t>>(vsTarget.bytecode);
+        desc.psBytes = std::make_shared<const std::vector<std::uint8_t>>(psTarget.bytecode);
+        const std::uint16_t id = batcher->RegisterMaterial(std::move(desc));
+        REQUIRE(id != Arcane::Batcher2D::kInvalidMaterialId);
+        REQUIRE(id != Arcane::Batcher2D::kMaterialSprite);
+        batcher->Begin(kW, kH);
+
+        auto components = std::make_shared<Astra::ComponentRegistry>();
+        Astra::Registry reg{ components };
+        Arcane::RegisterSceneComponents(reg);
+        Astra::Entity root = reg.CreateEntity();
+        reg.AddComponent<Arcane::Transform>(root, Arcane::Transform{});
+        reg.SetResource<Arcane::SceneRoot>(Arcane::SceneRoot{ root });
+
+        Arcane::RenderContext2D renderCtx;
+        renderCtx.batcher = batcher.get();
+        reg.SetResource<Arcane::RenderContext2D>(std::move(renderCtx));
+        const Arcane::Guid matGuid = Arcane::Guid::Generate();
+        std::unordered_map<Arcane::Guid, std::uint16_t> ids;
+        ids.emplace(matGuid, id);
+        reg.SetResource<Arcane::SpriteMaterialTable>(Arcane::SpriteMaterialTable{ &ids });
+
+        Astra::Entity sprite = reg.CreateEntity();
+        Arcane::Transform xform;
+        xform.position = { 80.0f, 48.0f, 0.0f };
+        xform.scale = { 16.0f, 16.0f, 1.0f };
+        reg.AddComponent<Arcane::Transform>(sprite, xform);
+        reg.SetParent(sprite, root);
+        Arcane::SpriteRenderer rend;
+        rend.tint = { 1.0f, 0.0f, 0.0f, 1.0f };
+        rend.material = matGuid;
+        reg.AddComponent<Arcane::SpriteRenderer>(sprite, rend);
+        Arcane::TransformPropagationSystem{}(reg);
+        Arcane::BoundsSystem{}(reg);
+
+        Arcane::PacketRing ring;
+        Arcane::ExtractRequest req;
+        req.viewport = { kW, kH };
+        req.editorView = Arcane::Ortho2DView(
+            glm::vec2(static_cast<float>(kW) * 0.5f, static_cast<float>(kH) * 0.5f),
+            static_cast<float>(kH) * 0.5f,
+            req.viewport);
+        const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(reg, req, ring);
+        REQUIRE(packet.batchSpans.size() == 1u);
+        CHECK(packet.batchSpans[0].material == id);
+        CHECK(packet.batchSpans[0].worldSpace);
+
+        PixelVehicle v = MakeVehicle(backend);
+        v.ctx->BindPacket(&packet);
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.batch = batcher.get();
+        frame.capture = true;
+        RenderOne(*v.ctx, frame);
+
+        std::uint32_t w = 0, h = 0;
+        std::vector<unsigned char> rgba;
+        REQUIRE(v.ctx->ReadCapture(w, h, rgba));
+        const Rgba px = At(rgba, w, 80u, 48u);
+        CHECK(px.g > px.r + 60);
+        CHECK(Arcane::RenderErrorCount() == before);
+    }
+}
+
+TEST_CASE("extract keeps a registered sprite material on screen (d3d12)",
+          "[gpu][extract][shadercompile][nri][d3d12]")
+{
+    CheckExtractKeepsRegisteredMaterial(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("extract keeps a registered sprite material on screen (vulkan)",
+          "[gpu][extract][shadercompile][nri][vulkan]")
+{
+    CheckExtractKeepsRegisteredMaterial(Arcane::GraphicsBackend::Vulkan);
+}
+
+namespace
+{
+    void CheckExtractedOverlayReachesTheBackbuffer(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+
+        auto components = std::make_shared<Astra::ComponentRegistry>();
+        Astra::Registry reg{ components };
+        Arcane::RegisterSceneComponents(reg);
+
+        Manifold2D::Physics::WorldDef wd;
+        wd.gravityX = Manifold2D::Physics::Real(0);
+        wd.gravityY = Manifold2D::Physics::Real(0);
+        reg.SetResource(Arcane::Detail::Physics2D::Adopt(
+            std::make_unique<Manifold2D::Physics::PhysicsWorld>(wd)));
+        Manifold2D::Physics::PhysicsWorld& solver =
+            *Arcane::Detail::Physics2D::Access::Solver(*reg.GetResource<Arcane::PhysicsWorld2D>());
+        Manifold2D::Physics::BodyDef bd;
+        bd.type = Manifold2D::Physics::BodyType::Static;
+        bd.position = Manifold2D::Physics::Vec2(
+            Manifold2D::Physics::Real(15), Manifold2D::Physics::Real(6));
+        bd.shape = Manifold2D::Physics::MakeAabb(
+            Manifold2D::Physics::Real(1), Manifold2D::Physics::Real(1));
+        solver.AddBody(bd);
+
+        Arcane::PacketRing ring;
+        Arcane::ExtractRequest req;
+        req.viewport = { kW, kH };
+        req.editorView = Arcane::Ortho2DView({ 0.0f, 0.0f }, 16.0f, req.viewport);
+        req.playMode = false;
+        req.showGrid2d = true;
+        req.gridMinorAlpha = 0.35f;
+        req.gridMajorAlpha = 0.55f;
+        req.gridLineRgb = { 0.5f, 0.5f, 0.5f };
+        req.gridLineThicknessPx = 8.0f;
+        req.gridMaxLinesPerAxis = 4096;
+        req.physicsDebug = true;
+        req.physicsWholeWorld = true;
+        req.cameraRect = false;
+        Arcane::OverlayLine gizmo{};
+        gizmo.a = { 4.0f, 10.0f, 0.0f };
+        gizmo.b = { 16.0f, 10.0f, 0.0f };
+        gizmo.color = { 0.0f, 0.0f, 1.0f, 1.0f };
+        gizmo.thickness = 8.0f;
+        gizmo.depth = Arcane::OverlayDepthClass::AlwaysOnTop;
+        gizmo.space = Arcane::OverlayColorSpace::DisplayReferred;
+        gizmo.screenSpace = true;
+        req.gizmoPrims.AddLine(gizmo);
+
+        const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(reg, req, ring);
+        REQUIRE(packet.spriteView.has_value());
+        const glm::vec3 origin = packet.spriteView->view.WorldToScreen({ 0.0f, 0.0f, 0.0f });
+        CHECK(std::abs(origin.x - 80.0f) < 0.5f);
+        CHECK(std::abs(origin.y - 48.0f) < 0.5f);
+
+        const Arcane::OverlayLine* physics = nullptr;
+        float best = -1.0f;
+        for (const Arcane::OverlayPrimitive& prim : packet.overlay.prims)
+        {
+            if (prim.tag != Arcane::OverlayPrimitive::Tag::Line)
+                continue;
+            const Arcane::OverlayLine& line = prim.line;
+            if (!line.screenSpace || line.space != Arcane::OverlayColorSpace::Linear
+                || line.depth != Arcane::OverlayDepthClass::AlwaysOnTop)
+                continue;
+            const float len = glm::length(glm::vec2(line.b) - glm::vec2(line.a));
+            if (len > best)
+            {
+                best = len;
+                physics = &line;
+            }
+        }
+        REQUIRE(physics != nullptr);
+        const int px = (int)std::lround(0.5f * (physics->a.x + physics->b.x));
+        const int py = (int)std::lround(0.5f * (physics->a.y + physics->b.y));
+        REQUIRE((std::abs(px - 80) > 8 || std::abs(py - 20) > 8));
+        REQUIRE((std::abs(px - 10) > 8 || std::abs(py - 10) > 8));
+
+        Arcane::RenderFramePacket cleared = packet;
+        cleared.overlay.prims.clear();
+        cleared.overlay.hasGrid3d = false;
+
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.capture = true;
+
+        PixelVehicle v = MakeVehicle(backend);
+        v.ctx->BindPacket(&packet);
+        RenderOne(*v.ctx, frame);
+        std::uint32_t w = 0, h = 0;
+        std::vector<unsigned char> drawn;
+        REQUIRE(v.ctx->ReadCapture(w, h, drawn));
+
+        v.ctx->BindPacket(&cleared);
+        RenderOne(*v.ctx, frame);
+        std::uint32_t w2 = 0, h2 = 0;
+        std::vector<unsigned char> bare;
+        REQUIRE(v.ctx->ReadCapture(w2, h2, bare));
+        REQUIRE((w == kW && h == kH && w2 == w && h2 == h));
+
+        const Rgba gridOn = At(drawn, w, 80, 20);
+        const Rgba gridOff = At(bare, w, 80, 20);
+        CHECK((gridOn.r != gridOff.r || gridOn.g != gridOff.g || gridOn.b != gridOff.b));
+
+        const Rgba gizmoOn = At(drawn, w, 10, 10);
+        CHECK(gizmoOn.r == 0);
+        CHECK(gizmoOn.g == 0);
+        CHECK(gizmoOn.b == 255);
+        const Rgba gizmoOff = At(bare, w, 10, 10);
+        CHECK((!(gizmoOff.r == 0 && gizmoOff.g == 0 && gizmoOff.b == 255)));
+
+        bool physicsDiff = false;
+        const glm::ivec2 samples[5] = {
+            { px, py }, { px - 1, py }, { px + 1, py }, { px, py - 1 }, { px, py + 1 } };
+        for (const glm::ivec2 s : samples)
+        {
+            if (s.x < 0 || s.y < 0 || s.x >= (int)w || s.y >= (int)h)
+                continue;
+            const Rgba a = At(drawn, w, (std::uint32_t)s.x, (std::uint32_t)s.y);
+            const Rgba b = At(bare, w, (std::uint32_t)s.x, (std::uint32_t)s.y);
+            if (a.r != b.r || a.g != b.g || a.b != b.b)
+                physicsDiff = true;
+        }
+        CHECK(physicsDiff);
+        CHECK(Arcane::RenderErrorCount() == before);
+    }
+
+    // Packet-bound frames take both overlay matrices from the packet. Equal
+    // sprite and mesh views depth-test a world line; differing views do not.
+    void CheckPacketBoundDifferingViewWorldLine(Arcane::GraphicsBackend backend)
+    {
+        ARC_REQUIRE_BACKEND(backend);
+        const std::uint64_t before = Arcane::RenderErrorCount();
+
+        const Arcane::MeshData cube = Arcane::BuildCube(2.0f);
+        const Arcane::Guid cubeId{ 1, 1 };
+        GpuSceneWorld w;
+        w.AddMesh(cubeId, cube);
+        w.Spawn(glm::vec3(0.0f), cubeId);
+        w.Schedulers();
+
+        Arcane::MeshSceneDesc scene;
+        FillCamera(scene);
+        Arcane::ViewTransform meshView;
+        meshView.view       = scene.view;
+        meshView.projection = scene.projection;
+        meshView.viewport   = glm::uvec2{ kW, kH };
+
+        Arcane::VisibleSet vis;
+        Arcane::BuildVisibleSet(w.reg, meshView, vis);
+        Arcane::GpuSceneMirror mirror;
+        Arcane::GpuSceneFrame gpu;
+        Arcane::GpuSceneSync(w.reg, mirror, /*deviceSyncedGeneration*/ 0u, gpu.stage);
+        Arcane::BuildGpuSceneFrame(mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), meshView, gpu);
+        for (Arcane::GpuInstance& row : gpu.stage.values)
+            row.baseColor = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+        scene.scene = &gpu;
+
+        Arcane::ViewTransform otherView = meshView;
+        otherView.projection = Arcane::PerspectiveProjection(kFovYDegrees + 1.0f,
+                                                             static_cast<float>(kW) / static_cast<float>(kH),
+                                                             kNearZ, kFarZ);
+        REQUIRE(meshView.ViewProjection() != otherView.ViewProjection());
+
+        Arcane::PacketRing ring;
+        Arcane::ExtractRequest req;
+        req.viewport = { kW, kH };
+        req.editorView = meshView;
+        Arcane::ExtractFrame(w.reg, req, ring);
+        Arcane::RenderFramePacket& packet = ring.Latest();
+        REQUIRE(packet.spriteView.has_value());
+        REQUIRE(packet.meshView.has_value());
+
+        Arcane::OverlayLine line{};
+        line.a = { -0.4f, 0.0f, -2.0f };
+        line.b = {  0.4f, 0.0f, -2.0f };
+        line.thickness = 0.5f;
+        line.depth = Arcane::OverlayDepthClass::DepthTested;
+        line.space = Arcane::OverlayColorSpace::DisplayReferred;
+        line.color = { 0.0f, 1.0f, 0.0f, 1.0f };
+        line.screenSpace = false;
+        packet.overlay.AddLine(line);
+
+        PixelVehicle v = MakeVehicle(backend);
+        v.ctx->SetMeshSupply(SupplyOne(cubeId, cube));
+
+        Arcane::NriGraphContext::FrameDesc frame;
+        frame.capture = true;
+        frame.mesh = &scene;
+
+        auto centre = [&]() {
+            v.ctx->BindPacket(&packet);
+            RenderOne(*v.ctx, frame);
+            std::uint32_t width = 0, height = 0;
+            std::vector<unsigned char> rgba;
+            REQUIRE(v.ctx->ReadCapture(width, height, rgba));
+            REQUIRE(width == kW);
+            REQUIRE(height == kH);
+            return At(rgba, kW, kW / 2u, kH / 2u);
+        };
+
+        packet.spriteView->view = meshView;
+        packet.meshView = meshView;
+        const Rgba hidden = centre();
+        CHECK(hidden.r > hidden.g + 60);
+
+        packet.spriteView->view = otherView;
+        packet.meshView = meshView;
+        REQUIRE(packet.spriteView->view.ViewProjection() != packet.meshView->ViewProjection());
+        const Rgba shown = centre();
+        CHECK(shown.g == 255);
+        CHECK(shown.r == 0);
+        CHECK(Arcane::RenderErrorCount() == before);
+    }
+}
+
+TEST_CASE("extracted overlay reaches the backbuffer (d3d12)", "[gpu][pixel][overlay][nri][d3d12]")
+{
+    CheckExtractedOverlayReachesTheBackbuffer(Arcane::GraphicsBackend::D3D12);
+}
+TEST_CASE("extracted overlay reaches the backbuffer (vulkan)", "[gpu][pixel][overlay][nri][vulkan]")
+{
+    CheckExtractedOverlayReachesTheBackbuffer(Arcane::GraphicsBackend::Vulkan);
+}
+
+TEST_CASE("packet-bound overlay draws a differing-view world line untested (d3d12)", "[gpu][pixel][overlay][nri][d3d12]")
+{
+    CheckPacketBoundDifferingViewWorldLine(Arcane::GraphicsBackend::D3D12);
+}
+TEST_CASE("packet-bound overlay draws a differing-view world line untested (vulkan)", "[gpu][pixel][overlay][nri][vulkan]")
+{
+    CheckPacketBoundDifferingViewWorldLine(Arcane::GraphicsBackend::Vulkan);
 }

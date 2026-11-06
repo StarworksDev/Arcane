@@ -24,7 +24,7 @@ namespace Arcane
         WindowDesc HostWindowDesc(const HostConfig& cfg)
         {
             WindowDesc wd;
-            wd.title  = "Arcane Runtime";
+            wd.title  = kHostWindowTitle;
             wd.vulkan = (cfg.backend == GraphicsBackend::Vulkan);
             wd.hidden = true;
             // render.window.* (settings arc S6-24): the configured extent; its

@@ -44,12 +44,14 @@
 #include <Arcane/Platform/Platform.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <thread>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -1138,6 +1140,63 @@ TEST_CASE("host boot: the golden scene's imported prop resolves to sectioned geo
     REQUIRE(resolved.mesh->sections.size() == 3u);
     CHECK(resolved.mesh->sections[0].slotIndex == resolved.mesh->sections[1].slotIndex);
     CHECK(resolved.mesh->sections[2].slotIndex != resolved.mesh->sections[0].slotIndex);
+}
+
+// --- --fixed-time pins the scene's clock, never the compile service's -----
+// FrameInfo::now is the compile service's clock (SceneRenderResolver.hpp):
+// material and post Requests debounce against it and Poll dispatches on it.
+// Both hosts used to write --fixed-time into it, so a pinned host debounced
+// every compile against a clock that never reached readyAt: the compiler never
+// went idle, no material compiled, and --settle or `servitor wait settled`
+// could never converge (the Servitor P0 acceptance's editor, --fixed-time 0).
+// FrameInfo::sceneTime carries the pinned value to the material globals alone.
+TEST_CASE("a pinned scene time leaves the compile clock running, so the post chain compiles",
+          "[host][project][shadercompile]")
+{
+    const fs::path dir = FindReferenceProjectDir();
+    REQUIRE_FALSE(dir.empty());
+    Arcane::ClientRuntime runtime(Arcane::Test::Process());
+    REQUIRE(runtime.OpenProject(dir));
+    const Arcane::Project* proj = runtime.CurrentProject();
+    REQUIRE(proj != nullptr);
+    REQUIRE(Arcane::HostBoot::BootScene(runtime.Core(), *proj).has_value());
+
+    Arcane::ShaderCompiler compiler;
+    REQUIRE(compiler.InitializeWithDebounce(0.2));   // a real debounce, as the hosts run it
+    Arcane::ShaderSourceProvider provider;
+    provider.AddRoot("data/shaders");
+    {
+        Arcane::SceneRenderResolver::Services services;
+        services.runtime  = &runtime;
+        services.compiler = &compiler;
+        services.sources  = &provider;
+        services.backend  = Arcane::GraphicsBackend::D3D12;
+        Arcane::SceneRenderResolver resolver(std::move(services));
+        REQUIRE(resolver.Materials().postReferenced);   // the scene root's PostProcess
+
+        Arcane::SceneRenderResolver::FrameInfo frame;
+        frame.dt             = 1.0 / 60.0;
+        frame.viewportWidth  = 1280.0f;
+        frame.viewportHeight = 720.0f;
+        frame.sceneTime      = 0.0;                     // --fixed-time 0
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (!resolver.Materials().postBound && std::chrono::steady_clock::now() < deadline)
+        {
+            frame.now += 1.0 / 60.0;                    // the host clock keeps running
+            resolver.Refresh(frame);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        CHECK(resolver.Materials().postBound);          // compiled past the 0.2 s debounce
+        CHECK(frame.now > 0.2);
+        CHECK(resolver.Globals().time == 0.0f);         // the scene saw the pinned time throughout
+
+        // Unpinned, Time is the host clock, as before.
+        frame.sceneTime.reset();
+        frame.now = 3.5;
+        resolver.Refresh(frame);
+        CHECK(resolver.Globals().time == 3.5f);
+    }
+    compiler.Shutdown();
 }
 
 // --- the reference scene's material content ------------------------------

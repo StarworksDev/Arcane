@@ -11,12 +11,14 @@
 
 #include "PickOutlineNodes.hpp"
 
+#include <Arcane/Render/DepthConventionMap.hpp>
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriGraphContext.hpp>
 #include <Arcane/Render/Nri/NriUploadRing.hpp>
 
 #include <Arcane/Base/Log.hpp>
 #include <Arcane/Render/RenderErrorLatch.hpp>
+#include <Arcane/Render/RenderFramePacket.hpp>   // Packet()->selectedIds (the header only forward-declares the packet)
 #include <Arcane/Render/ShaderConventions.hpp>   // kVsEntry / kPsEntry
 // EVERY CB LAYOUT HERE -- the seed CB's id capacity above all -- is pinned
 // against the SHADER (the static_asserts below) rather than against a second
@@ -379,10 +381,12 @@ namespace Arcane
         const nri::CoreInterface& core = context.core;
         (void)frameSlot;   // no per-frame-slot state here: the streams are ring allocations
 
-        // THE CLEAR, both planes. Graph attachments are LOAD/STORE and the
-        // declaration API carries no clear op, so a node that needs a cleared
-        // target clears it from its own exec fn (the seam DeclareGraphFrame
-        // documents). 0 IS the background id, so the colour clear is not
+        // THE CLEAR, both planes. This node still clears from its own exec fn
+        // rather than through a declared load op (RenderGraph::
+        // SetColorAttachmentOps / SetDepthAttachmentOp, F5 plan 1 T2): moving
+        // it was out of that task's scope, and it is the one remaining
+        // in-pass clear (a source scan in RenderGraphTest.cpp pins it, so its
+        // removal is a deliberate act). 0 IS the background id, so the colour clear is not
         // cosmetic: every pixel no silhouette covers must read back as
         // "nothing here". The depth plane is the pass's OWN transient (F4 spec
         // s7.1), a fresh pool slot with undefined contents, cleared to the far
@@ -579,7 +583,7 @@ namespace Arcane
             // Depth-tested AND written, forward-Z [0,1] -- LESS is "nearer wins"
             // against the 1.0 the pass cleared to. This is what makes two
             // overlapping meshes resolve by depth, not by emission order.
-            desc.outputMerger.depth.compareOp = nri::CompareOp::LESS;
+            desc.outputMerger.depth.compareOp = NearerWinsOp(kSelectedDepthConvention);
         });
         if (!pipeline)
             return;   // already logged + latched by the cache
@@ -1369,7 +1373,12 @@ namespace Arcane
         // reason AddPickNodes prepares its geometry here: the driver's span is
         // published for the span of one BuildFrame and every Record runs later.
         if (OutlineNode* node = context ? context->Outline() : nullptr)
-            node->PrepareSelection(context->CurrentSelectedIds());
+        {
+            if (context->Packet())
+                node->PrepareSelection(context->Packet()->selectedIds);
+            else
+                node->PrepareSelection(context->CurrentSelectedIds());
+        }
 
         // Shared rather than captured by value: a later step reads an EARLIER
         // step's target, and every handle is minted inside its own setup fn.
@@ -1449,8 +1458,9 @@ namespace Arcane
                 });
         }
 
-        // NO CLEAR anywhere above, deliberately (the clear seam, stated in
-        // DeclareGraphFrame): every pass here is an OPAQUE fullscreen triangle
+        // NO CLEAR anywhere above -- no clear load op is declared and no exec fn
+        // clears -- deliberately (see DeclareGraphFrame's THE CLEAR IS
+        // DECLARATIVE): every pass here is an OPAQUE fullscreen triangle
         // that writes every pixel of its target, so a LOADed undefined pool slot
         // is fully overwritten before anything can read it. The ID target is the
         // exception and clears itself -- 0 is a meaningful value there.

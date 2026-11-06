@@ -110,7 +110,13 @@ namespace Arcane::Editor
         // area (UE/Unity shape), overriding any stale floating placement the
         // imgui.ini remembers. After that first frame the user's drags win
         // for the document's lifetime.
-        void DrawAll(unsigned int dockId = 0);
+        //
+        // `modalBlocked`: another dockspace-level modal (a queued error, a parked
+        // scene intent) owns the frame (ModalGate.hpp). The pending-close confirm
+        // then neither re-arms nor draws -- two modals at popup level 0 close each
+        // other every frame and both go invisible. Its state is untouched, so it
+        // draws again once the gate clears.
+        void DrawAll(unsigned int dockId = 0, bool modalBlocked = false);
 
         // Visit every open document (compile-result routing and the like).
         template <typename F>

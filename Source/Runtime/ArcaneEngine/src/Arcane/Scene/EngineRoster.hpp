@@ -20,19 +20,15 @@
 // in the exe's private TypeContext before the shared one was installed.
 
 #include <Arcane/Scene/Components.hpp>          // Transform / WorldTransform / ... / MeshRenderer / Arcane::PhysicsSettings2D / WorldBounds
-#include <Arcane/Scene/PhysicsComponents.hpp>   // Arcane::RigidBody2D / Arcane::Collider2D / Arcane::PhysicsBodyRef2D
+#include <Arcane/Scene/TypeList.hpp>            // Arcane::TypeList (Scene's; the physics roster in PhysicsComponents.hpp uses it too)
 
 namespace Arcane
 {
-    // A bare compile-time type list. Astra has none of its own, and this needs
-    // to be nothing more than a pack the two expanders can unpack.
-    template<typename... Ts>
-    struct TypeList {};
-
-    // EXACTLY the order RegisterSceneComponents + Arcane::RegisterPhysicsComponents2D
-    // register in (SceneModule.hpp / PhysicsComponents.hpp).
+    // EXACTLY the order RegisterSceneComponents registers in (SceneModule.hpp):
+    // the ten scene types, ending at WorldBounds. The 2D physics types follow in
+    // Arcane::PhysicsComponentRoster2D (Scene/PhysicsComponents.hpp), registered
+    // by the 2D physics module's SimHook; VerifySharedTypeContext walks both.
     using EngineComponentRoster = TypeList<Transform, WorldTransform, SpriteRenderer,
                                            PostProcess, Identity, Hidden, Camera, MeshRenderer,
-                                           Arcane::PhysicsSettings2D, WorldBounds,
-                                           Arcane::RigidBody2D, Arcane::Collider2D, Arcane::PhysicsBodyRef2D>;
+                                           Arcane::PhysicsSettings2D, WorldBounds>;
 }

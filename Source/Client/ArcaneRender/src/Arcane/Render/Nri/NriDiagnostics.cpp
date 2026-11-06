@@ -5,6 +5,7 @@
 // (via Arcane/Base/Log.hpp -> spdlog) #defines ERROR via wingdi.h.
 #include <NRI.h>
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/IO/ReadRegularFile.hpp>
 
 #include "NriDiagnostics.hpp"
 
@@ -393,15 +394,11 @@ namespace Arcane
 
         [[nodiscard]] std::vector<std::uint8_t> ReadShaderBlob(const std::filesystem::path& path)
         {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
-            if (!file)
+            const auto raw = Arcane::ReadRegularFile(path);
+            if (!raw || raw->empty())
                 return {};
-            const std::streamsize size = file.tellg();
-            file.seekg(0, std::ios::beg);
-            std::vector<std::uint8_t> bytes(size > 0 ? (std::size_t)size : 0);
-            if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), size))
-                return {};
-            return bytes;
+            const auto* p = reinterpret_cast<const std::uint8_t*>(raw->data());
+            return std::vector<std::uint8_t>(p, p + raw->size());
         }
 
         // Everything FireFault creates, so ONE teardown path serves the happy

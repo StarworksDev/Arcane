@@ -143,6 +143,33 @@ TEST_CASE("RunLoop single-step: exactly one canonical fixed step while paused", 
     CHECK(loop.IsPaused());                          // and still paused
 }
 
+// The runtime's remote `step` (AM1, RuntimeFrame::AdvanceSim SimPace::SingleTick)
+// requests a single step on a loop that is NOT paused and relies on this.
+TEST_CASE("RunLoop single-step on a running loop: one tick whatever the dt, backlog untouched", "[sim][runloop]")
+{
+    Astra::Registry reg;
+    reg.SetResource<Ticks>(Ticks{});
+    Arcane::SystemSchedulers sch(nullptr);
+    REQUIRE(sch.fixedUpdate.AddSystem<IncrementTicks>().IsOk());
+    Arcane::RunLoop loop(reg, sch);
+    REQUIRE_FALSE(loop.IsPaused());
+
+    loop.Advance(0.5 / 60.0);                       // half a step of backlog
+    CHECK(reg.GetResource<Ticks>()->fixed == 0);
+
+    loop.RequestSingleStep();
+    loop.Advance(10.0 / 60.0);                      // a long frame: still exactly one tick
+    CHECK(reg.GetResource<Ticks>()->fixed == 1);
+
+    loop.Advance(0.5 / 60.0);                       // the half step of backlog survived the step
+    CHECK(reg.GetResource<Ticks>()->fixed == 2);
+
+    loop.SetTimeScale(0.0);                         // a stalled clock does not swallow a step
+    loop.RequestSingleStep();
+    loop.Advance(1.0 / 60.0);
+    CHECK(reg.GetResource<Ticks>()->fixed == 3);
+}
+
 TEST_CASE("RunLoop time-scale scales the sim clock, not the step dt", "[sim][runloop]")
 {
     auto stepsOverOneRealSecond = [](double scale)

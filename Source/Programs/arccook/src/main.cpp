@@ -18,6 +18,7 @@
 #include <Arcane/Guid.hpp>
 
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -78,7 +79,20 @@ int main(int argc, char** argv)
         // reader of whatever happens to already be on disk. The result itself is
         // unused here: a failed cook for THIS guid surfaces below as "no CURRENT
         // cooked artifact for guid", which is the more specific, actionable message.
-        [[maybe_unused]] const CookResult dumpCookResult = session.CookProject(projectDir);
+        try
+        {
+            [[maybe_unused]] const CookResult dumpCookResult = session.CookProject(projectDir);
+        }
+        catch (const std::exception& ex)
+        {
+            std::fprintf(stderr, "arccook: the cook threw: %s\n", ex.what());
+            return 1;
+        }
+        catch (...)
+        {
+            std::fprintf(stderr, "arccook: the cook threw\n");
+            return 1;
+        }
 
         // ResolveCurrentArtifactPath, NEVER an ArtifactStore::RebuildIndexFromScan +
         // Lookup round-trip: that index maps a Guid to ONE cook key by last-write-wins
@@ -137,7 +151,20 @@ int main(int argc, char** argv)
         return stale ? 2 : 0;
     }
 
-    const CookResult result = session.CookProject(projectDir);
-    std::printf("arccook: cooked=%zu upToDate=%zu failed=%zu\n", result.cooked, result.upToDate, result.failed);
-    return (result.failed > 0) ? 1 : 0;
+    try
+    {
+        const CookResult result = session.CookProject(projectDir);
+        std::printf("arccook: cooked=%zu upToDate=%zu failed=%zu\n", result.cooked, result.upToDate, result.failed);
+        return (result.failed > 0) ? 1 : 0;
+    }
+    catch (const std::exception& ex)
+    {
+        std::fprintf(stderr, "arccook: the cook threw: %s\n", ex.what());
+        return 1;
+    }
+    catch (...)
+    {
+        std::fprintf(stderr, "arccook: the cook threw\n");
+        return 1;
+    }
 }

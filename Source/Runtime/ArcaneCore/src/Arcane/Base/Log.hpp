@@ -19,7 +19,30 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <string>
+#include <vector>
 #include <Arcane/Core/Constant.hpp>
+
+namespace Arcane
+{
+    // One retained log line (the remote log ring, LogRing.cpp). Separate from the
+    // crash backlog below: this ring is mutexed, holds structured records, and
+    // is read by the remote surface and any host.
+    struct LogRecord
+    {
+        std::uint64_t seq = 0;     // starts at 1; never repeats in-process
+        std::int64_t unixMs = 0;
+        int level = 0;             // spdlog level as int
+        std::string logger;
+        std::string text;
+    };
+
+    // Runs on the LOGGING thread, under the ring's mutex. It must not re-enter
+    // Log (no ARC_* calls, no Subscribe/Unsubscribe/ReadSince).
+    using LogSinkFn = void (*)(const LogRecord& record, void* user);
+
+    struct LogSubscription { std::uint64_t id = 0; };
+}
 
 namespace Arcane::Log
 {
@@ -73,6 +96,23 @@ namespace Arcane::Log
     // A module that unloads (GameModule.hpp's Shutdown) unregisters its setter first.
     inline void UninstallMosaicLevelTarget() noexcept { UnregisterMosaicLevelTarget(&SetThisModuleMosaicLevel); }
     // ARC_INTERNAL_END
+
+    // ------------------------------------------------------------------
+    // Sequenced log ring (Servitor P0 task 2). Every line the engine logger
+    // emits is pushed as a LogRecord; overflow drops the oldest. Capacity is
+    // the log.remote.ringLines cvar (default 4096).
+    ARC_CORE_API LogSubscription Subscribe(LogSinkFn fn, void* user);
+    ARC_CORE_API void Unsubscribe(LogSubscription sub);
+    // The OLDEST maxLines retained records with seq > seqExclusive, in order.
+    // A reader that wants only what comes next anchors on LatestSeq() first.
+    ARC_CORE_API std::vector<LogRecord> ReadSince(std::uint64_t seqExclusive, std::size_t maxLines);
+    // Seq of the newest record pushed so far; 0 before the first line.
+    ARC_CORE_API std::uint64_t LatestSeq();
+    ARC_CORE_API std::size_t RingCapacity();
+
+    // Internal: the ring's spdlog sink, attached inside Log::Init's dist sink.
+    // Not exported; used by Log.cpp only.
+    std::shared_ptr<spdlog::sinks::sink> MakeRingSink();
 
     // ------------------------------------------------------------------
     // File sink + backlog (spec S5.6, crash window plan 1 task 4).

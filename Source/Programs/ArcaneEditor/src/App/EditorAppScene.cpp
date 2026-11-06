@@ -123,15 +123,24 @@ namespace Arcane::Editor
             dir.empty() ? nullptr : dir.c_str());
     }
 
-    void EditorApp::ClearSceneReferences(std::string reason)
+    bool EditorApp::ClearSceneReferences(std::string reason)
     {
         // Every entity handle the editor is holding names an entity of the OUTGOING
         // scene, and none of them survive the registry swap that follows (Runtime::
         // ResetRegistry, or PlaySession::Stop's RestoreRegistry). Play is stopped
         // FIRST because Stop restores the pre-Play snapshot: left running, it would
         // later overwrite whatever scene is loaded after this.
-        if (InPlayMode())
-            m_play.Stop(m_runtime->Core(), m_plugin ? &*m_plugin : nullptr);
+        const bool wasPlaying = InPlayMode();
+        if (wasPlaying && !m_play.Stop(m_runtime->Core(), m_plugin ? &*m_plugin : nullptr))
+        {
+            // The restore failed and the session is STILL in Play (PlaySession::Stop):
+            // the registry holds play-time state. Replacing or clearing anything now
+            // would act on the wrong scene, so touch nothing below -- no flip, no
+            // server-process stop, no selection or undo clear -- and tell the caller.
+            PushPlayStopFailedModal();
+            return false;
+        }
+        AfterPlayFlip(wasPlaying);   // the one flip rule (EditorApp.hpp)
         // The separate-server topology's other half dies with the session it
         // belongs to. Unconditional: a silent no-op on every other topology.
         m_serverProcess.Stop();
@@ -161,11 +170,13 @@ namespace Arcane::Editor
         m_inspectorHost.InvalidateSource(m_sceneSource);
         m_sceneSelectionEdge.lastEpoch = m_selection.Epoch();   // re-arm on the Clear() above: the first GESTURE in the new scene is the first event
         if (m_undo) m_undo->Clear(std::move(reason));
+        return true;
     }
 
     bool EditorApp::DoNewScene()
     {
-        ClearSceneReferences("New scene");
+        if (!ClearSceneReferences("New scene"))
+            return false;   // Play could not be stopped; the modal is queued
         m_runtime->ResetRegistry();
         Arcane::Scene::CreateEmpty(m_runtime->Registry());
         m_scene.Reset(*m_undo);
@@ -194,7 +205,8 @@ namespace Arcane::Editor
             return false;
         }
 
-        ClearSceneReferences("Opened scene " + file.stem().string());
+        if (!ClearSceneReferences("Opened scene " + file.stem().string()))
+            return false;   // Play could not be stopped; the file read above is not applied
         m_runtime->ResetRegistry();
         if (!Arcane::Scene::ApplySceneDocument(*doc, m_runtime->Registry()))
         {

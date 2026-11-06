@@ -493,6 +493,19 @@ namespace Arcane
         std::uint32_t              poolSlotCount = 0;    // distinct pool slots Task 6 must realize
     };
 
+    // Declarative attachment load op (F5 plan 1, Task 2). A node that wants
+    // its attachment cleared says so at declaration; the executor turns it
+    // into the nri::AttachmentDesc load op at CmdBeginRendering, so a node
+    // need not clear from its own exec fn. Load is the pre-F5 behaviour.
+    // The store op is always STORE.
+    enum class RgLoadOp : std::uint8_t { Load, Clear };
+
+    struct RgAttachmentOp
+    {
+        RgLoadOp         load = RgLoadOp::Load;
+        nri::ClearValue  clear{};
+    };
+
     class ARC_RENDER_API RenderGraph
     {
     public:
@@ -551,6 +564,13 @@ namespace Arcane
         // ARC_ASSERTs otherwise.
         void SetColorAttachments(std::span<const RgTexture> attachments);
         void SetDepthAttachment(RgTexture attachment);
+
+        // Load ops for the attachments above, same "only while setup is
+        // running" rule. Colour ops are index-parallel to the colour
+        // attachments; a span shorter than the attachment span leaves the
+        // missing attachments at RgLoadOp::Load.
+        void SetColorAttachmentOps(std::span<const RgAttachmentOp> ops);
+        void SetDepthAttachmentOp(RgAttachmentOp op);
 
         // Derives, from the declarations above and NOTHING else, everything
         // Task 6's executor needs: the batched per-node barriers, the
@@ -689,6 +709,11 @@ namespace Arcane
         [[nodiscard]] std::size_t NodeCount() const noexcept { return m_nodes.size(); }
         [[nodiscard]] const char* NodeName(std::size_t nodeIndex) const;
         [[nodiscard]] bool        NodeHasRequiredAttachments(std::size_t nodeIndex) const;
+        // The declared load op, or null when that attachment's op was not
+        // declared (out-of-range node/attachment, or a colour-op span that
+        // stops short of `attachment`) -- an undeclared op is LOAD.
+        [[nodiscard]] const RgAttachmentOp* ColorLoadOp(std::size_t nodeIndex, std::size_t attachment) const;
+        [[nodiscard]] const RgAttachmentOp* DepthLoadOp(std::size_t nodeIndex) const;
 
         [[nodiscard]] std::size_t TextureCount() const noexcept { return m_textures.size(); }
         [[nodiscard]] std::size_t BufferCount() const noexcept { return m_buffers.size(); }
@@ -698,6 +723,10 @@ namespace Arcane
         [[nodiscard]] bool        IsTransient(RgBuffer buffer) const;
         [[nodiscard]] bool        WasWritten(RgTexture texture) const;
         [[nodiscard]] bool        WasWritten(RgBuffer buffer) const;
+        // True when some node Reads `texture` (any non-write access). False for
+        // an invalid handle. F5 plan 1 Task 3: pins that the overlay pass
+        // samples the mesh depth and never the unconsumed placeholder depth.
+        [[nodiscard]] bool        WasRead(RgTexture texture) const;
 
         // True iff `texture`/`buffer` decodes to a slot that both exists in
         // the CURRENT generation and is in range -- the non-fatal, queryable
@@ -864,6 +893,9 @@ namespace Arcane
             std::vector<RgTexture>   colorAttachments;
             RgTexture                depthAttachment{};
             bool                     hasRequiredAttachments = true;  // see NodeHasRequiredAttachments()
+            std::vector<RgAttachmentOp> colorOps;
+            RgAttachmentOp              depthOp{};
+            bool                        hasDepthOp = false;
         };
 
         // One declared Read()/Write() -- the raw material Task 4's Compile()

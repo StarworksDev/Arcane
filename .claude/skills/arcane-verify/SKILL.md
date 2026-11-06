@@ -19,13 +19,15 @@ The gate rebuilds ReferenceProject but NOT the engine. After a shader or engine 
 
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\golden-gate.ps1 -Configuration Debug
-type bin\Debug-windows-x86_64-md\golden-gate-summary.json
+type Binaries\Debug-windows-x86_64-md\golden-gate-summary.json
 ```
+
+Its first step is always a rebuild of the game module for `-Configuration`, so the single slot is right during the run. Afterwards the slot holds THAT config. A gate run in Release leaves the Release game DLL behind for your next Debug test run; restore it with `arcbuild build --project ReferenceProject --config Debug` (see `arcane-build`).
 
 **Judging it:** pass = `gatePassed: true` and empty `refusalReason`. Per lane, the verdict is
 `exitReason` in the lane's report, never the raw exit code (codes collide). Lanes run from the host
 exe directory, so their files live in the STAGED project,
-`bin\<Cfg>-windows-x86_64-md\<Host>\ReferenceProject\Saved\Verify\`:
+`Binaries\<Cfg>-windows-x86_64-md\<Host>\ReferenceProject\Saved\Verify\`:
 
 - report: `golden-gate-<Host>-<backend>-<slot>-report.json`
 - diff image: `<slot>-<backend>-diff.png` -- look at it; the delta must be exactly your change.
@@ -41,6 +43,17 @@ PassedOnFallback is normal for a dx12 lane whose slot only has a vulkan override
 | `f3-cull-blend` | ArcaneRuntime | `--scene 7e5a0030-0030-4030-8030-000000000030` | shared file = dx12, `vulkan\` override |
 | `editor-ui` | ArcaneEditor | none | shared only (both backends, both configs) |
 | `editor-ui-perspective` | ArcaneEditor | `--view-mode perspective` | shared only |
+| `editor-input-doc` | ArcaneEditor | `--open-asset 97260310-8b35-4b29-b12f-1fd6f8e99071 --select-in-document Player/Jump` | shared only |
+| `editor-asset-page` | ArcaneEditor | `--select-asset d7f389fd-f687-407d-b9d7-9753eb6b0258` | shared only |
+| `editor-material-page` | ArcaneEditor | `--open-asset 7e5a0010-0010-4010-8010-000000000010` | shared only |
+
+Each slot runs on dx12 and vulkan, so 7 slots make 14 lanes. `scripts\golden-gate.ps1` (the `$lanes` table) is the source of truth if this list drifts.
+
+## A quick live look first (Servitor)
+
+While iterating, you don't need the whole gate for every edit. Launch a headless runtime with `--fixed-time`, run `wait settled`, then `compare <slot>` or `screenshot`; see `arcane-servitor`. That gives a fast signal for one slot on one backend.
+
+The GATE is still the verdict before you call a visual change done. Never use `compare --bless` from servitor as a substitute for the re-bless procedure below.
 
 A bless writes to the level the reference resolved from: `Verify\References\<backend>\<slot>.png`
 if that override exists, otherwise the shared `Verify\References\<slot>.png`. So a dx12 bless of

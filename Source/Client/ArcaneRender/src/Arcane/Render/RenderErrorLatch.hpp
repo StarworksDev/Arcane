@@ -10,8 +10,8 @@
 // layer -- bumps it.
 //
 // A process-wide singleton owned by ArcaneRender.dll (Instance() is exported;
-// other modules' producers reach the same latch), with two atomics and the
-// public seams below -- which is why the exported *ForTest shims exist.
+// other modules' producers reach the same latch), with the counters below
+// and the public seams -- which is why the exported *ForTest shims exist.
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Base/Log.hpp>
@@ -49,17 +49,22 @@ namespace Arcane
 
         uint64_t ErrorCount() const { return m_errorCount.load(); }
 
-        // Test support ONLY: the counter is documented (below, on
-        // RenderErrorCount) as "since process start" and production code must
-        // never call this -- it exists so a test that deliberately drives an
-        // Error/Fatal through this sink (proving a discipline macro or
-        // callback wiring actually reaches the shared 0/0 gate latch, e.g.
-        // NriCommon's ARC_NRI_CHECK) can restore the latch afterward instead
-        // of permanently failing every OTHER test case's RenderErrorCount()==0
-        // assertion for the rest of the process. Same idiom as
-        // GpuInstrumentation's ResetGpuDeviceLost(), reused by
-        // GpuCrashReportTest.cpp for the same "other cases must not leak
-        // into this one" reason.
+        // Every Note* call bumps this with the resettable count. Nothing
+        // stores zero back into it. The ArcaneTests listener samples it so a
+        // case cannot hide a rise by calling ResetForTest before the sample.
+        uint64_t ErrorTotal() const { return m_errorTotal.load(); }
+
+        // Test support ONLY. Clears the resettable count tests assert on.
+        // Does not clear ErrorTotal. Production code must never call this.
+        // It exists so a test that deliberately drives an Error/Fatal through
+        // this sink (proving a discipline macro or callback wiring actually
+        // reaches the shared 0/0 gate latch, e.g. NriCommon's ARC_NRI_CHECK)
+        // can restore the count afterward instead of permanently failing
+        // every OTHER test case's RenderErrorCount()==0 assertion. Same
+        // idiom as GpuInstrumentation's ResetGpuDeviceLost(), reused by
+        // GpuCrashReportTest.cpp. A case that does this on purpose is tagged
+        // [expects-render-errors]: the suite gate reads ErrorTotal, which
+        // this reset leaves alone.
         void ResetForTest() noexcept { m_errorCount.store(0); }
 
         void SetDeviceRemovedHook(DeviceRemovedHook hook) noexcept
@@ -105,7 +110,7 @@ namespace Arcane
         //     observation point -- F-3b, and the reason the hook lives there.
         void NoteError(const char* tag, const char* text) noexcept
         {
-            ++m_errorCount;
+            Bump();
             ARC_ERROR("[{}] {}", tag ? tag : "?", text ? text : "");
         }
 
@@ -126,7 +131,7 @@ namespace Arcane
         // hook, one honest tag.
         void NoteDeviceLost(const char* tag, const char* text) noexcept
         {
-            ++m_errorCount;
+            Bump();
             ARC_ERROR("[{}] {}", tag ? tag : "?", text ? text : "");
             if (const DeviceRemovedHook hook = m_deviceRemovedHook.load(std::memory_order_acquire))
                 hook();
@@ -159,7 +164,7 @@ namespace Arcane
         // loss. Giving THIS seam its own tag parameter is the shape that works.
         void NoteNriError(const char* messageText) noexcept
         {
-            ++m_errorCount;
+            Bump();
             ARC_ERROR("[nri] {}", messageText);
             NotifyIfDeviceRemoved(messageText);
         }
@@ -173,6 +178,12 @@ namespace Arcane
         // caller, not just declaring the function.
 
     private:
+        void Bump() noexcept
+        {
+            ++m_errorTotal;
+            ++m_errorCount;
+        }
+
         void NotifyIfDeviceRemoved(const char* messageText)
         {
             // Substring, not equality: NRI's callback interface, the D3D12
@@ -186,25 +197,29 @@ namespace Arcane
         }
 
         std::atomic<uint64_t>          m_errorCount{0};
+        std::atomic<uint64_t>          m_errorTotal{0};
         std::atomic<DeviceRemovedHook> m_deviceRemovedHook{nullptr};
     };
 
-    // Total render-layer Error/Fatal diagnostics since process start, across
-    // all devices and EVERY producer:
-    // the Vulkan debug messenger, the D3D12 debug layer's InfoQueue1 callback,
-    // NRI's callback interface and ARC_NRI_CHECK, and anything else reporting
-    // through RenderErrorLatch::NoteError all land in this one counter.
-    // GPU tests assert this stays zero -- the machine-enforced form of the
-    // "validation must stay silent" foundation rule.
+    // Resettable render-layer Error/Fatal count. Tests assert this stays
+    // zero. ResetRenderErrorCount clears it after a deliberate bump.
+    // Producers are the Vulkan debug messenger, the D3D12 debug layer, NRI's
+    // callback interface and ARC_NRI_CHECK, and anything else reporting
+    // through RenderErrorLatch::NoteError. The suite gate does not sample
+    // this: a reset before the listener runs would hide the bump. It samples
+    // RenderErrorTotal.
     ARC_RENDER_API uint64_t RenderErrorCount();
 
-    // Test support ONLY -- production code must never call this (the count
-    // above is documented as "since process start"). Restores the 0/0 gate
-    // latch to zero; exists so a test that deliberately trips it (proving a
-    // discipline macro reaches the real, shared latch rather than a fake
-    // local counter) can clean up after itself instead of leaking a
-    // permanent +1 into every unrelated test case's RenderErrorCount()==0
-    // assertion for the rest of the process. Same idiom as
+    // Monotonic total of the same errors since process start. Nothing resets
+    // it, including ResetRenderErrorCount. The ArcaneTests listener samples
+    // this around each case, at run end, and once more after Session::run
+    // returns.
+    ARC_RENDER_API uint64_t RenderErrorTotal();
+
+    // Test support ONLY -- production code must never call this. Clears
+    // RenderErrorCount and leaves RenderErrorTotal untouched, so a deliberate
+    // bump can be hidden from later RenderErrorCount()==0 assertions and
+    // cannot be hidden from the suite gate. Same idiom as
     // ResetGpuDeviceLost() (GpuInstrumentation.hpp).
     ARC_RENDER_API void ResetRenderErrorCount();
 

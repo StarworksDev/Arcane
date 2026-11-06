@@ -16,7 +16,8 @@
 #include <Arcane/Host/EarlyConfig.hpp>
 #include <Arcane/Host/HostConfig.hpp>
 #include <Arcane/Jobs/JobSystem.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DDetail.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Sim/RunLoop.hpp>
 #include <Arcane/Sim/SimSettings.hpp>
 #include <Arcane/Render/RenderDeviceSettings.hpp>
@@ -272,6 +273,31 @@ TEST_CASE("ResolveWorkerThreads: 0 is enkiTS' hardware default and N is N; a Run
     JobSystem one(1);
     Runtime serial(Test::Process());
     CHECK(serial.Jobs().WorkerCount() == one.WorkerCount());
+}
+
+TEST_CASE("AcquireJobSystem: once every Runtime is gone the pool is rebuilt with the CURRENT jobs.workerThreads", "[settings][jobs]")
+{
+    auto& reg = Arcane::CVarRegistry::Get();
+    const CVarHandle h = reg.Find("jobs.workerThreads");
+    ClearCodeOnExit restore{ h };
+    std::uint32_t firstCount = 0;
+    REQUIRE(reg.Set(h, CVarValue::UInt32(2), SetBy::Code) == SetResult::Applied);
+    reg.Publish();
+    {
+        Runtime first(Test::Process());
+        firstCount = first.Jobs().WorkerCount();
+        // A live sibling keeps the pool: a changed setting does not resize it.
+        REQUIRE(reg.Set(h, CVarValue::UInt32(1), SetBy::Code) == SetResult::Applied);
+        reg.Publish();
+        Runtime sibling(Test::Process());
+        CHECK(&sibling.Jobs() == &first.Jobs());
+    }   // both gone: the weak expired
+    JobSystem two(2);
+    JobSystem one(1);
+    CHECK(firstCount == two.WorkerCount());
+    Runtime later(Test::Process());
+    CHECK(later.Jobs().WorkerCount() == one.WorkerCount());
+    CHECK(later.Jobs().WorkerCount() != firstCount);
 }
 
 TEST_CASE("ApplyEarlyConfigRungs: jobs.workerThreads in <project>/Config/jobs.json sizes the first Runtime",

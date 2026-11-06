@@ -3,6 +3,27 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with
 code in this repository.
 
+## Start here: workflow and onboarding (every contributor, every session)
+
+Read `docs/onboarding.md` before planning or changing anything. It is
+binding, not background:
+- **Workflow.** Use the superpowers skills (`.claude/settings.json` enables
+  the plugin). Brainstorm first. An architectural change (a new system or
+  module, any D-row arc) gets a written spec in `docs/superpowers/specs/`
+  that the engine lead approves before any plan is written. Then a reviewed
+  plan in `docs/superpowers/plans/`, then execution in a worktree on its own
+  branch with TDD, and a final review. Use Servitor for host-visible changes.
+  Push or merge only when the engine lead agrees.
+- **Engineering rules** that are not all written below: errors are
+  `Mosaic::Result`s (no new `throw`); events are pulled as data; every
+  tunable is a setting; long-lived entity references use the GUID; Astra
+  changes go upstream first.
+- **Coordination.** Do not touch the files listed in the onboarding doc's
+  section 4 without asking: other arcs are rewriting them.
+- **If the superpowers skills are missing,** tell the user to install the
+  plugin (`/plugin install superpowers@claude-plugins-official`) before
+  starting architectural work.
+
 ## Repository layout
 
 The repo root IS the premake workspace (`premake5.lua` here generates
@@ -97,9 +118,8 @@ Binaries\Debug-windows-x86_64-md\ArcaneRuntime\ArcaneRuntime.exe --project Refer
   click-selectable in EVERY view mode (the id pass rasterises world-space
   drawables through the frame's `ViewTransform`, spec §7.1), and the transform
   gizmo is 3D -- one ray-based code path, the 2D view only masks its Z handles
-  (planar handles; spec §7.2). It paints as viewport FOREGROUND chrome (an ImGui
-  sink over the image, `Viewport/GizmoOverlay.hpp` -- never into the scene
-  batch, which the mesh pass overpaints) and its look is Unreal's widget
+  (planar handles; spec §7.2). BuildGizmoOverlayPrims (EditorAppFrame.cpp)
+  feeds it into the post-tonemap overlay, and its look is Unreal's widget
   (`UnrealWidgetRender.cpp` proportions and colours, in pixels).
 - **Bounds, visibility and the GPU scene (F3 plan 1, 2026-09-18, ABI 36, raised to 37 by the review fix 4363b825 -- MeshTable/SpriteTable carry the cache's publish generation):**
   every drawable carries `WorldBounds` (`BoundsSystem`, after transform
@@ -174,7 +194,7 @@ build steps live in `scripts/ci/build.{sh,ps1}`, not in the workflow YAML.
 
 ## Agent skills and the knowledge graph
 
-Project skills live in `.claude/skills/` (checked in; the rest of `.claude/`
+Project skills live in `.claude/skills/` (checked in, with `.claude/settings.json`; the rest of `.claude/`
 stays ignored). Claude Code loads them on demand by their descriptions; they
 carry the repo-specific traps the sections above only summarize:
 
@@ -184,6 +204,7 @@ carry the repo-specific traps the sections above only summarize:
 | `arcane-tests` | running and reproducing ArcaneTests, seeds, which CI lane ran what, the coverage baselines |
 | `arcane-verify` | the golden gate, judging lanes, the slot/bless table, copying blesses back to source |
 | `arcane-graph` | impact analysis and "what connects to X" via the knowledge graph |
+| `arcane-servitor` | checking a change in a RUNNING host: launch, wait, screenshot/compare, step N ticks, inspect entities/ECS, cvars, live logs/Problems, hot-reload confirmation |
 
 **Use the knowledge graph before assuming how files, symbols or docs
 connect.** `graphify-out/` (gitignored; build it per machine with
@@ -195,8 +216,56 @@ union them -- each finds things the other misses. Confirm in source before
 asserting.
 
 **Agent tooling goes the CLI route (shell tools + these skills), not MCP.**
-The live-query gap (asking a RUNNING host a new question) is to be closed by
-a CLI client to an in-host listener, designed with the cvar/console build.
+
+### Servitor: check changes in a running engine (every agent, every model)
+
+`servitor` (`Binaries\<Cfg>-windows-x86_64-md\Servitor\servitor.exe`, built
+with `Arcane.slnx`, compiled out of Dist) is a loopback CLI that attaches to
+running ArcaneEditor / ArcaneRuntime / ArcaneServer hosts and prints one JSON
+envelope per call. It is not an MCP server: run it from the shell, like `git`.
+The full guide is `.claude/skills/arcane-servitor/SKILL.md`. Read it before
+you use Servitor. This applies to every agent, whatever the model: Claude
+sessions and subagents, Grok, Codex/GPT, and any SDD implementer or reviewer.
+
+- **When.** Any change whose effect shows up in a running host: pixels, a Play/Edit
+  transition, camera or UI behaviour, a hot reload, cvars, log/Problems output,
+  or entity/ECS state after N ticks. Unit tests and goldens stay the regression
+  net. A Servitor check is the evidence that THIS change does what you claim.
+  Put it in your report: the command, the exit code, and the result file paths.
+- **Core loop.**
+  `servitor --project ReferenceProject --client <name> launch runtime --headless -- --fixed-time 0`
+  (the host's descriptor records the client), then
+  `servitor --project ReferenceProject --client <name> --host runtime wait settled`, then `screenshot window --out <png>` /
+  `compare <lane> --source window` / `step N` / `entity get ...` /
+  `ecs query ...` / `logs --level warn`, then
+  `servitor --project ReferenceProject --client <name> quit`.
+  `describe <cmd>` and `commands` print the arguments and exit codes.
+- **Branch on the exit code.** 0 ok; 2 usage; 3 permission; 4 no host; 5 busy
+  (safe to retry); 6 the command failed (read `errors[0].code`); 7 the host died;
+  8 a check failed (that IS the finding).
+- **Client name.** Use a name unique to you (agent name plus a session or run
+  id, e.g. `b7-impl`; never a shared name like `claude-code`) and pass
+  `--client <name>` on every call, `launch`, `status` and `quit` included.
+  `status --client <name>` lists only your hosts; use `status` without
+  `--client` to see everything running. `quit --client <name>`: `--pid N` wins
+  (that process); otherwise your hosts, narrowed by `--host` (one is quit,
+  `--force` works; several need `--yes`); with none of yours, `--host KIND`
+  quits the KIND host Servitor launched WITHOUT `--client` (its descriptor
+  records the explicit `--remote`), never another client's and never a host
+  Servitor did not launch (exit 4 naming it); with none and no `--host`,
+  exit 4. That fallback never selects an editor the user opened by hand, even
+  with `--force`; quit an editor you launched by your `--client` or its `--pid`.
+- **Rules.** Under `--json`/`--format json|ndjson` everything is on stdout and
+  stderr stays empty. A host launched with `--remote` (Servitor always adds
+  it) on an open-ended run (no `--frames N`) exits after `--remote-idle-exit`
+  seconds idle (default 600); a `--frames N` run and an editor the user opens
+  by hand never do. `--owner-pid <pid>` (a host flag, after `--`)
+  is opt-in and Servitor never sets it. Launch your own `--headless` host;
+  never drive (`play`/`stop`/`quit`/`cvar set`) an editor the user has open.
+  Never `--bless` through Servitor. `quit` every host you launched.
+- **Sandboxed CLIs.** Codex blocks loopback by default, so every call fails
+  with exit 4/7. Run it with network access to localhost allowed. Grok's
+  default shell can reach localhost.
 
 ## Engine-as-SDK
 

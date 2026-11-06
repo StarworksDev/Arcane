@@ -39,6 +39,14 @@ namespace Arcane::Attr
     using ::Astra::Deprecated;
     using ::Astra::AliasName;
     using ::Astra::Precision;
+    // FIELD attribute: the field may be omitted, so a JSON Schema leaves it out
+    // of `required` (remote command args structs). Local until the vendored Astra declares
+    // `struct Optional`; that sync replaces this with `using ::Astra::Optional;`
+    // (Servitor P0 Task 4 fallback).
+    struct Optional : ::Astra::AttributeBase<Optional>
+    {
+        constexpr Optional() noexcept = default;
+    };
     // ---- settings attributes (settings arc S2, spec s4.3) -----------------
     // TYPE attribute: this reflected struct is a settings struct. Each field
     // becomes the cvar "<category>.<field>" (ARC_SETTINGS, Config/Settings.hpp),

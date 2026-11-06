@@ -26,6 +26,9 @@
 #include <Arcane/Host/ReferenceImages.hpp>    // --compare/--bless (Task 9): ReferenceResolution
 #include <Arcane/Host/VerifyReport.hpp>       // --report (Task 9): VerifyReport
 #include <Arcane/Assets/ImageCompare.hpp>     // --compare (Task 9): PixelData/ImageCompareResult
+#if !defined(ARC_BUILD_DIST)
+#include <Arcane/Remote/HostSession.hpp>      // Servitor P0: the editor's remote surface (m_remote)
+#endif
 #include "Panels/AssetActivityLog.hpp"
 #include "Panels/AssetBrowserPanel.hpp"   // AssetBrowserPanelState (m_assetBrowserUi)
 #include "Panels/AssetGraphPanel.hpp"     // AssetGraphPanelState (m_assetGraphUi) + the canvas teardown seam
@@ -40,6 +43,7 @@
 #include "App/DialogSlot.hpp"
 #include "App/InputEdges.hpp"
 #include "App/ModalErrorQueue.hpp"
+#include "App/ModalGate.hpp"
 #include "App/UndoSettings.hpp"           // m_undoLimitsApplied + ReadUndoLimits (editor.undo.*)
 #include "Scene/UndoGate.hpp"             // ResolveDocumentUndo (DocumentUndo)
 #include "Documents/DocumentHost.hpp"
@@ -88,9 +92,11 @@
 #include <Arcane/Plugin/PluginHost.hpp>
 #include <Arcane/Host/SceneRenderResolver.hpp>
 #include <Arcane/Render/GpuFaultInjector.hpp>   // dev-only Build -> Diagnostics -> Crash GPU (kPassName only; the injector is NriDiagnostics::FireFault)
-#include <Arcane/Render/GpuSceneTypes.hpp>   // GpuSceneFrame -- the viewport's per-frame GPU-scene frame (F3 plan 1 T8)
+#include <Arcane/Render/GpuSceneTypes.hpp>   // GpuSceneFrameStats -- the viewport frame's HUD/shutdown figures (F3 plan 1 T8)
 #include <Arcane/Render/Nri/NriGraphContext.hpp>   // the graph vehicle (chrome + viewport); unconditional
 #include <Arcane/Render/PickEmit.hpp>   // PickDrawable -- the frame's pickables
+#include <Arcane/Render/ExtractFrame.hpp>        // ExtractRequest (BuildExtractRequest) -- F5 plan 1 Task 5
+#include <Arcane/Render/RenderFramePacket.hpp>   // PacketRing (m_packetRing)
 #include <Arcane/Render/ShaderCompiler.hpp>
 #include <Arcane/Render/ShaderSourceProvider.hpp>
 
@@ -110,6 +116,7 @@ namespace Arcane::AssetPipeline { struct GltfSurvey; }
 struct ImGuiContext;
 struct ImGuiSettingsHandler;
 struct ImGuiTextBuffer;
+struct ImDrawData;
 
 namespace Arcane::Editor
 {
@@ -146,6 +153,20 @@ namespace Arcane::Editor
         // Whether that hook has fired. Read by PumpFrameEvents; a plain
         // relaxed load per frame.
         [[nodiscard]] static bool CleanExitRequested() noexcept;
+
+#if !defined(ARC_BUILD_DIST)
+        // ---- Remote test probes (Dist-stripped) ------------------------------
+        // The ONLY code that touches m_modalErrors / m_createDialog /
+        // m_selection / m_undo / m_gizmoDrag / m_play for the editor.*.probe
+        // commands (Remote/*ProbeCommand.cpp). Main thread, inside DrainFrame.
+        bool                      ArmModalProbe();          // queue an error + open the create dialog; true when the dialog opened
+        void                      DismissModalProbe();      // the error modal's OK pop
+        bool                      ArmDocumentModalProbe();  // park a dirty probe document's close confirm
+        void                      ClearDocumentModalProbe();// cancel that confirm and drop the probe document
+        [[nodiscard]] Arcane::Editor::ModalKind ModalProbeKind() const noexcept;   // the last DrawModals winner
+        void                      ArmFailNextRestore();   // PlaySession::FailNextRestoreForTesting (editor.play.failnextrestore)
+        bool                      ArmGizmoAbandonProbe();   // arm a two-target drag, delete one target; the frame's else-branch abandons it
+#endif
 
     private:
         // ---- Boot (EditorApp.cpp) -------------------------------------------
@@ -311,13 +332,23 @@ namespace Arcane::Editor
         void ApplyPendingViewportResize();
         void RefreshSceneResolution();
         void RenderSceneToViewport();
-        // The scene's 2D submission plus the two Edit-mode overlays drawn on
-        // top of it (the scene-camera rect and the transform gizmo), against
-        // whichever batcher the caller hands in -- in practice the
-        // device-less GpuContext batcher RenderSceneToViewport Begin()s
-        // itself. Contains no target, no command list and no device, which is
-        // what keeps the ORDER of its statements the whole of its contract.
+        // The scene's 2D submission SETUP -- globals, view-projection and the
+        // render context. The sprite sweep and the overlays run in the
+        // caller's ExtractFrame (F5 plan 1 Tasks 5 and 9). Contains no
+        // target, no command list and no device.
         void SubmitSceneToBatcher(Arcane::Batcher2D& b);
+        // THE EXTRACT REQUEST (F5 plan 1 Task 5) for a w x h frame -- the ONE
+        // builder, so the viewport frame and the scene-save cover ask for the
+        // same picture. Fills only editor state and settings, never a registry
+        // read; ExtractFrame does the reading.
+        [[nodiscard]] Arcane::ExtractRequest BuildExtractRequest(std::uint32_t w, std::uint32_t h);
+        // The transform gizmo as post-tonemap overlay primitives (F5 plan 1
+        // Task 3): fills m_gizmoPrims from the same gate, handle mask, size and
+        // view as this frame's hit-test, in viewport pixels (image origin),
+        // AlwaysOnTop + DisplayReferred. Called from MainLoop immediately
+        // BEFORE RenderSceneToViewport, so the gizmo is not a frame late;
+        // BuildExtractRequest copies the result onto the extract request.
+        void BuildGizmoOverlayPrims();
         // Phase 11's CPU HALF: the game context's
         // per-frame input, and -- in Play, with a plugin that draws one --
         // its BeginFrame + DrawUIAll. Returns true when a game-UI frame was
@@ -334,7 +365,8 @@ namespace Arcane::Editor
         // point at (m_pickDrawables / m_pickSelectedIds) and returns nothing by
         // value, because a span into a temporary is the one mistake this shape
         // exists to make impossible.
-        void ArmGraphViewportFrame(Arcane::NriGraphContext::FrameDesc& vp);
+        void ArmGraphViewportFrame(Arcane::NriGraphContext::FrameDesc& vp,
+                                   Arcane::RenderFramePacket& packet);
         // NO phase 11 / phase 12 members. CompositeGameUi and
         // RenderSelectionOutline were declared here and called from MainLoop
         // between phases 10 and 13; ArmGraphViewportFrame above satisfies both
@@ -660,6 +692,13 @@ namespace Arcane::Editor
         // ImGuiNri's m_imguiContext member.
         std::unique_ptr<Arcane::OffscreenImGuiLayer> m_gameImgui;
 
+        // This frame's Play HUD draw data. RenderSceneToViewport builds it
+        // after SubmitSceneToBatcher and before ExtractFrame, so the packet
+        // snapshot is this frame's HUD; ArmGraphViewportFrame assigns it to
+        // FrameDesc::gameUi so the gameui node is declared. Null in Edit and
+        // when no plugin draws. Not owned.
+        ImDrawData* m_gameUiDrawData = nullptr;
+
         std::unique_ptr<Arcane::ProcessContext> m_process;          // the process's ONE (spec s3); declared before m_runtime so it outlives it
         std::optional<Arcane::ClientRuntime> m_runtime;             // destructs before m_gpu
 
@@ -706,8 +745,17 @@ namespace Arcane::Editor
         // host's dt sources (FrameInput's frameDt, AdvanceSim's simDt) read
         // 0 while this is true. ONE predicate, read by both, so the two
         // clocks can never disagree about whether the hold is on.
+        //
+        // Task 30 fix round 1: a remote `servitor wait settled` holds the same
+        // freeze while it is in its capture phase (spec s4.7: frozen-clock
+        // captures), on a windowed editor too; the session lifts it when the
+        // wait ends, fails or is torn down (HostSession::SettleClockFrozen).
         [[nodiscard]] bool SettleHoldActive() const noexcept
         {
+#if !defined(ARC_BUILD_DIST)
+            if (m_remote && m_remote->SettleClockFrozen())
+                return true;
+#endif
             return m_config.headless && m_config.settleAttempts != 0 &&
                    m_config.maxFrames != 0 && m_frameCount >= m_config.maxFrames;
         }
@@ -1367,8 +1415,9 @@ namespace Arcane::Editor
         // THIS FRAME's pickable silhouettes and the hit-proxy ids the outline
         // traces, held as MEMBERS because FrameDesc borrows both as spans and a
         // span into a per-frame temporary is a dangling read the moment the
-        // declaration outlives the statement. Reused rather than rebuilt, so a
-        // steady-state Edit frame allocates nothing.
+        // declaration outlives the statement. Copy-assigned from the packet, so
+        // the vectors keep their capacity and a steady-state Edit frame
+        // allocates nothing after the first.
         //
         // Produced by CollectPickables, whose k-th entry IS hit-proxy id k+1
         // -- the ONE id assignment in the process.
@@ -1376,28 +1425,21 @@ namespace Arcane::Editor
         std::vector<std::uint32_t>        m_pickSelectedIds;
 
         // ---- The viewport's opaque 3D pass (F2a Task 10; F3 plan 1 T8) -----
-        // THIS FRAME's GPU-scene frame -- the staged rows, the batch table,
-        // the indirect args and the CPU-written visible-index list -- held as
-        // a MEMBER for the identical reason m_pickDrawables above is one:
-        // FrameDesc::mesh -> MeshSceneDesc::scene BORROWS it for the duration
-        // of the RenderFrame call, so a per-frame temporary would dangle the
-        // moment the declaration outlives the statement that filled it.
-        //
-        // Rebuilt every frame by PrepareSceneForRender (Host/GpuSceneHost.hpp)
-        // from RenderSceneToViewport, between the schedulers and the sprite
-        // sweep -- the visible set(s) it builds are what that sweep and the
-        // pick pass cull against, so it cannot run later, inside
-        // ArmGraphViewportFrame where the pick spans are filled. Its
-        // containers are reused, so a steady-state frame with a static scene
-        // allocates nothing after the first.
-        Arcane::GpuSceneFrame m_gpuSceneFrame;
+        // The last VIEWPORT frame's GPU-scene figures, snapshotted from that
+        // frame's extract so the shutdown report still reads them. The graph
+        // borrows packet.mesh. The scene-save cover extracts again and must
+        // not replace these scalars, which is why they are taken at the
+        // viewport extract rather than read off the ring at shutdown. Only the
+        // stats and the transparent-draw count are copied, so the copy
+        // allocates nothing.
+        Arcane::GpuSceneFrameStats m_gpuSceneStats;
 
         // THE VIEW THE MESH PASS DRAWS WITH this frame -- the editor view in
         // Edit, the perspective scene camera in Play (RuntimeFrame.cpp's
         // rule), nullopt when Play has no such camera (no mesh batches then;
         // the pass still declares itself for any staged rows, ruling R-D).
-        // Resolved beside the PrepareSceneForRender call (it culls against
-        // this view) and read again by ArmGraphViewportFrame for the
+        // Resolved in RenderSceneToViewport (ExtractFrame culls against the
+        // same camera) and read again by ArmGraphViewportFrame for the
         // MeshSceneDesc's matrices, so the two cannot disagree.
         std::optional<Arcane::ViewTransform> m_meshView;
 
@@ -1413,11 +1455,17 @@ namespace Arcane::Editor
         // that outlives the function that fills it.
         Arcane::MeshSceneDesc m_meshScene;
 
-        // THIS FRAME'S 3D REFERENCE GRID (F4 plan 1 T10, spec s5.2) -- a
-        // member for exactly m_meshScene's reason: FrameDesc::grid is a
-        // POINTER read by RenderFrameOffscreen after ArmGraphViewportFrame
-        // (which fills it) has returned.
-        Arcane::GridSceneDesc m_gridScene;
+        // The gizmo's primitives, rebuilt by BuildGizmoOverlayPrims each frame
+        // and copied onto the extract request. The packet owns the overlay
+        // the graph draws.
+        Arcane::OverlayPrimitiveList m_gizmoPrims;
+
+        // THE EXTRACT STAGE'S PACKETS (F5 plan 1 Task 5): the viewport frame
+        // and the scene-save cover each ExtractFrame into this ring and bind
+        // the returned slot on m_viewportTargets.graph for their one
+        // RenderFrameOffscreen; FramesInFlight() slots keep a bound packet
+        // alive past that call.
+        Arcane::PacketRing m_packetRing;
 
         // The click-pick, which cannot answer in the frame it is asked -- see
         // DeferredPick.hpp for the three hazards it closes.
@@ -1438,6 +1486,19 @@ namespace Arcane::Editor
         std::uint64_t m_sceneEpoch = 0;
         // Bumped from the two sites above; named so both read as one decision.
         void NoteSceneReplaced() noexcept { ++m_sceneEpoch; m_deferredPick.Reset(); }
+
+        // THE ONE PLAY/EDIT FLIP RULE (Servitor P0 Task 29 fix round 1). Every
+        // site that calls PlaySession Play or Stop -- the toolbar transport,
+        // servitor play/stop, the save modal's Stop, ClearSceneReferences --
+        // runs BeforePlayStart before an Edit -> Play attempt and
+        // AfterPlayFlip(wasPlaying) after it, so their follow-ups cannot drift:
+        // the separate server process on Stop, NextWorld settings and the
+        // "editor:play" Problems retraction on Play, the scene epoch and the
+        // m_editBinding.editMode re-derivation either way (PlanPlayFlip,
+        // PlayMode.hpp). EditorAppFrame.cpp. The shutdown Stop and the boot
+        // --play-as Play stay outside it (see their own comments).
+        void BeforePlayStart();
+        void AfterPlayFlip(bool wasPlaying);
 
         // Shader-editor services + open documents (Slice 5). The compiler is the
         // app-shared compile service: documents Submit through it, and the
@@ -2185,11 +2246,60 @@ namespace Arcane::Editor
         // trigger, honoured by both hosts. Same fired-once shape as
         // m_gpuFaultFired directly above.
         bool                                      m_hangMainFired = false;
+
+        // ---- Servitor remote surface (P0 Task 11) ----------------------------
+        // Armed when editor.remote.enable is published true OR --remote was
+        // given (spec 0.4(b): the editor is armed by its cvar, default on;
+        // servitor launch passes --remote), and the primary world is not a
+        // Client (Arming::Allow). Drained once per frame between the event
+        // pump's Exit break and its SkipFrame continue (EditorAppFrame.cpp).
+        // The cvar going true -> false stops it ("remote-disabled") until it
+        // is true again. A project switch re-arms it so the descriptor follows
+        // the open project. Main thread only. The condition lives in
+        // UpdateRemoteSession, beside the cvar in EditorAppFrame.cpp.
+        void UpdateRemoteSession();
+        std::unique_ptr<Arcane::Remote::HostSession> m_remote;
+        // A start that failed (or was not allowed), or a cvar switched off, is
+        // not retried every frame: only the cvar being published true again
+        // (after a false) clears this.
+        bool                                      m_remoteArmBlocked = false;
+        // The last published editor.remote.enable UpdateRemoteSession saw, so
+        // only a true -> false TRANSITION stops the session (a false at boot
+        // with --remote still arms).
+        bool                                      m_remoteCvarKnown = false;
+        bool                                      m_remoteCvarLast  = false;
+        // 2 when an open-ended --headless --remote run lost (or never had) its
+        // remote surface: it has no other stop path, so Main() returns this.
+        int                                       m_remoteArmExit   = 0;
+        // UpdateRemoteSession has attempted an arm before (Arming::Attempt marks
+        // it, armed or refused): an explicit --remote refusal exits only on
+        // the first, startup attempt (rounds 2-3, M-2).
+        bool                                      m_remoteArmTried  = false;
+        // The remote reason the frame loop broke on ("remote-quit" or
+        // "remote-idle"), latched by MainLoop before the session stops, so
+        // ShutdownGraphPath's --report exitReason names it (Task 16).
+        std::string                               m_remoteExitReason;
+        // Task 27: the capture hooks (CaptureHooks), defined beside
+        // CaptureGraphViewportPng in EditorApp.cpp. user = this. Viewport =
+        // m_viewportTargets.graph (also the host pair, ruling F20); window =
+        // ChromeGraph(). Main thread.
+        static bool RemoteArmViewport(std::uint64_t ticket, void* user);
+        static bool RemoteDrainViewport(std::uint64_t ticket, Arcane::Remote::CaptureMapped* raw, void* user);
+        static bool RemoteArmWindow(std::uint64_t ticket, void* user);
+        static bool RemoteDrainWindow(std::uint64_t ticket, Arcane::Remote::CaptureMapped* raw, void* user);
+        // Servitor final fix pass (C-M12): the job gave up on `ticket`.
+        static void RemoteCancelViewport(std::uint64_t ticket, void* user);
+        static void RemoteCancelWindow(std::uint64_t ticket, void* user);
 #endif
 
         // Editor state naming entities of the OUTGOING scene, torn down before any
         // registry swap. Shared by SwitchProject and the scene effects below.
-        void ClearSceneReferences(std::string reason);
+        // False = Play is still running because Stop's restore failed (PlaySession::Stop):
+        // NOTHING was cleared, a "could not be stopped" modal is queued, and the caller
+        // must not replace or write the scene.
+        [[nodiscard]] bool ClearSceneReferences(std::string reason);
+        // The one modal for a failed Stop (Save button, ClearSceneReferences, SwitchProject).
+        void PushPlayStopFailedModal();
         // Saved/UndoCache follows the project (spec s3.3, R12): wipe the
         // outgoing dir, wipe the incoming one (crash leftovers), retarget the
         // stack. Null = no project = memory-only.
@@ -2275,6 +2385,9 @@ namespace Arcane::Editor
         // lock needed). Errors display one at a time, FIFO, instead of racing
         // for the popup stack.
         Arcane::Editor::ModalErrorQueue m_modalErrors;
+#if !defined(ARC_BUILD_DIST)
+        Arcane::Editor::ModalKind       m_modalDrawn = Arcane::Editor::ModalKind::None;   // DrawModals' latch (editor.modal.probe)
+#endif
 
         // ---- Asset file operations (T5 s7.3, s7.12) -------------------------
         // Declared AFTER m_undo so the executor (which holds *m_undo) destructs

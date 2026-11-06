@@ -1,17 +1,20 @@
 #pragma once
 #include <Arcane/Modules/ArcanePhysics2DApi.hpp>
 
-// PhysicsWorld2D and PhysicsSystem2D. The system body lives in
-// PhysicsSystem.hpp so a game that includes Physics2D.hpp does not compile
-// the solver passes. PhysicsWorld2D's destructor is out of line: the solver
-// object stays an incomplete type here.
+// PhysicsWorld2D. PhysicsSystem2D's declaration is PhysicsSystem2D.hpp
+// (included below); its pass body is PhysicsSystem.cpp, so a game that
+// includes Physics2D.hpp does not compile the solver passes.
+// PhysicsWorld2D's destructor is out of line: the solver object stays an
+// incomplete type here.
 
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Ecs.hpp>
 #include <Arcane/Guid.hpp>
 #include <Arcane/Scene/Physics2DHandles.hpp>
 #include <Arcane/Scene/PhysicsComponents.hpp>
 #include <Arcane/Scene/PhysicsEvents2D.hpp>
+#include <Arcane/Scene/PhysicsSystem2D.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 
 #include <cstdint>
@@ -87,6 +90,7 @@ namespace Arcane
 
     private:
         friend struct PhysicsSystem2D;
+        friend struct ::Arcane::Detail::AbiManifest::Physics2DAccess;   // hashes these private members (Physics2D/AbiManifestPhysics2D.hpp)
         friend struct ::Arcane::Detail::Physics2D::Access;
 
         ARC_PHYSICS2D_API void RecordBody(Arcane::Entity entity, Guid guid, Detail::Physics2D::BodyHandle handle,
@@ -101,22 +105,5 @@ namespace Arcane
         std::unordered_map<std::uint64_t, Detail::Physics2D::BodyRecord> bodyRecords;
         Detail::Physics2D::EventBuffers stepEvents;
         Detail::Physics2D::EventBuffers frameEvents;
-    };
-
-    struct PhysicsSystem2D
-        : Arcane::SystemTraits<Arcane::Reads<Collider2D>,
-                               Arcane::Writes<Arcane::Transform, PhysicsBodyRef2D, RigidBody2D>,
-                               Arcane::Before<Arcane::TransformPropagationSystem>>
-    {
-        static constexpr bool RequiresExclusive = true;
-
-        explicit PhysicsSystem2D(float fixedDt, bool stepWorld = true) noexcept
-            : m_fixedDt(fixedDt), m_stepWorld(stepWorld) {}
-
-        void operator()(Arcane::Registry& reg);
-
-    private:
-        float m_fixedDt;
-        bool  m_stepWorld;
     };
 } // namespace Arcane

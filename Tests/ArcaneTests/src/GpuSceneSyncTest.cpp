@@ -496,7 +496,7 @@ TEST_CASE("BuildGpuSceneFrame: capacities prefix-sum by batch id; only coarse-vi
     Arcane::VisibleSet vis;
     Arcane::BuildVisibleSet(w.reg, view, vis);
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(w.mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, frame);
+    Arcane::BuildGpuSceneFrame(w.mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, frame);
 
     REQUIRE(frame.batches.size() == 2);                    // cube batch, other batch; gone's batch not emitted
     CHECK(frame.batches[0].mesh == cube);                  // nearDepth 1 (near's front face at z=-1)
@@ -533,7 +533,7 @@ TEST_CASE("BuildGpuSceneFrame: no VisibleSet means every row is written", "[gpus
     w.Spawn(glm::vec3(500, 0, 0), w.Mesh(1));
     w.Frame();
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(w.mirror, nullptr, w.reg.GetResource<Arcane::MeshTable>(), Arcane::ViewTransform{}, frame);
+    Arcane::BuildGpuSceneFrame(w.mirror, nullptr, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), Arcane::ViewTransform{}, frame);
     CHECK(frame.stats.coarseVisible == 2);
     CHECK(frame.batches.size() == 2);
 }
@@ -558,7 +558,7 @@ TEST_CASE("BuildGpuSceneFrame: each batch's draw range is the MESH TABLE's secti
     w.Spawn(glm::vec3(0, 0, -5), cube);
     w.Frame();
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(w.mirror, nullptr, w.reg.GetResource<Arcane::MeshTable>(), Arcane::ViewTransform{}, frame);
+    Arcane::BuildGpuSceneFrame(w.mirror, nullptr, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), Arcane::ViewTransform{}, frame);
     REQUIRE(frame.batches.size() == 4);
     REQUIRE(frame.args.size() == 4);
 
@@ -614,7 +614,7 @@ TEST_CASE("BuildGpuSceneFrame: transparent sections are direct records only with
     Arcane::VisibleSet vis;
     Arcane::BuildVisibleSet(w.reg, view, vis);
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(w.mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, frame);
+    Arcane::BuildGpuSceneFrame(w.mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, frame);
 
     REQUIRE(frame.batches.empty());
     REQUIRE(frame.args.empty());
@@ -664,8 +664,8 @@ TEST_CASE("BuildGpuSceneFrame: transparent records sort deterministically by ord
     Arcane::VisibleSet vis;
     Arcane::BuildVisibleSet(w.reg, view, vis);
     Arcane::GpuSceneFrame frame, repeat;
-    Arcane::BuildGpuSceneFrame(w.mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, frame);
-    Arcane::BuildGpuSceneFrame(w.mirror, &vis, w.reg.GetResource<Arcane::MeshTable>(), view, repeat);
+    Arcane::BuildGpuSceneFrame(w.mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, frame);
+    Arcane::BuildGpuSceneFrame(w.mirror, &vis, Arcane::MeshSectionRanges(w.reg.GetResource<Arcane::MeshTable>()), view, repeat);
 
     const std::vector<std::uint32_t> expected{
         w.RowOf(biased, 0), w.RowOf(biased, 1),
@@ -698,9 +698,9 @@ TEST_CASE("RowSpanAllocator: first-fit reuse, split, and high water", "[gpuscene
 }
 
 // ---- F3 plan 1 T8: the host helper (Host/GpuSceneHost.hpp) ----------------
-// PrepareSceneForRender is the three calls every host makes between the
-// schedulers and the render scheduler; it is header-only so this case can
-// drive it without a device (a null GpuScene* reads as "never synced").
+// PrepareSceneForRender is the three calls (visible set, sync, frame).
+// ExtractFrame does them for the hosts; this case still drives the
+// header-only helper without a device (a null GpuScene* reads as "never synced").
 
 TEST_CASE("PrepareSceneForRender: fills views[0] from the main view and views[1] from a differing mesh view; the frame culls against the mesh view", "[gpuscene][host]")
 {

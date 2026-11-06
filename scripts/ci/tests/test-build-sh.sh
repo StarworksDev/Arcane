@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/ci/build.sh against a fake checkout: stub premake5, make
-# and arcbuild record their arguments, so the step order, flags, logs and the
+# Tests for scripts/ci/build.sh against a fake checkout: stub premake5, make,
+# arcane-abi-digest and arcbuild record their arguments, so the step order, flags, logs and the
 # stop-at-first-failure rule are checked without a compiler. Runs in the
 # image-tag job of .github/workflows/ci.yml and on any Linux/macOS shell.
 set -euo pipefail
@@ -11,7 +11,8 @@ bad() { echo "FAIL $1" >&2; fails=$((fails + 1)); }
 
 # stub <path> <name>: records "<name> <args>" in $CALLS. premake exits
 # $FAIL_PREMAKE when set; make exits $FAIL_CODE (default 3) when its
-# arguments contain the word $FAIL_MAKE_ON.
+# arguments contain the word $FAIL_MAKE_ON; the digest tool exits $FAIL_ABI
+# when set.
 stub() {
     cat > "$1" <<EOF
 #!/bin/sh
@@ -20,6 +21,7 @@ if [ "$2" = make ] && [ -n "\${FAIL_MAKE_ON:-}" ]; then
     case " \$* " in *" \$FAIL_MAKE_ON "*) exit "\${FAIL_CODE:-3}" ;; esac
 fi
 if [ "$2" = premake ] && [ -n "\${FAIL_PREMAKE:-}" ]; then exit "\$FAIL_PREMAKE"; fi
+if [ "$2" = abi ] && [ -n "\${FAIL_ABI:-}" ]; then exit "\$FAIL_ABI"; fi
 exit 0
 EOF
     chmod +x "$1"
@@ -27,7 +29,7 @@ EOF
 
 # fixture [--no-premake]: prints a fake checkout root.
 fixture() {
-    local d c bin
+    local d c bin abi
     d=$(mktemp -d)
     mkdir -p "$d/scripts/ci" "$d/ThirdParty/premake5" "$d/ReferenceProject/Binaries" "$d/fakebin"
     cp "$REPO/scripts/ci/build.sh" "$d/scripts/ci/build.sh"
@@ -39,6 +41,9 @@ fixture() {
         bin="$d/$("$d/scripts/arcane-bin-dir.sh" "$c")/arcbuild"
         mkdir -p "$bin"
         stub "$bin/arcbuild" arcbuild
+        abi="$d/$("$d/scripts/arcane-bin-dir.sh" "$c")/arcane-abi-digest"
+        mkdir -p "$abi"
+        stub "$abi/arcane-abi-digest" abi
     done
     echo "$d"
 }
@@ -57,13 +62,14 @@ first_call() { head -n 1 "$1/calls.txt"; }
 
 d=$(fixture); run "$d" CC=gcc-14 scripts/ci/build.sh Debug -j 4
 expected="premake --cc=gcc gmake
-make -k -j4 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient
+make -k -j4 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest
+abi --check --root $d
 arcbuild build --project ReferenceProject --config Debug --sdk $d
 make -k -j4 config=debug ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests"
 [ "$RC" -eq 0 ] && [ "$(cat "$d/calls.txt")" = "$expected" ] && ok "steps, order and flags" \
     || bad "steps, order and flags (rc $RC): $(cat "$d/calls.txt" "$d/out.txt")"
-all=1; for l in generate engine referencegame tests; do [ -f "$d/logs/build-$l.log" ] || all=0; done
-[ "$all" -eq 1 ] && ok "four step logs" || bad "four step logs: $(ls "$d/logs" 2>&1)"
+all=1; for l in generate engine abi referencegame tests; do [ -f "$d/logs/build-$l.log" ] || all=0; done
+[ "$all" -eq 1 ] && ok "five step logs" || bad "five step logs: $(ls "$d/logs" 2>&1)"
 
 d=$(fixture); run "$d" CC=clang-19 scripts/ci/build.sh Release
 [ "$(first_call "$d")" = "premake --cc=clang gmake" ] && ok "clang from CC" || bad "clang from CC: $(first_call "$d")"
@@ -83,6 +89,10 @@ fi
 d=$(fixture); run "$d" FAIL_MAKE_ON=ArcaneCore FAIL_CODE=3 scripts/ci/build.sh Debug
 [ "$RC" -eq 3 ] && ! grep -q '^arcbuild' "$d/calls.txt" && [ ! -f "$d/logs/build-tests.log" ] \
     && ok "engine failure stops the build with its code" || bad "engine failure stops the build (rc $RC): $(cat "$d/calls.txt")"
+
+d=$(fixture); run "$d" FAIL_ABI=5 scripts/ci/build.sh Debug
+[ "$RC" -eq 5 ] && ! grep -q '^arcbuild' "$d/calls.txt" && grep -q "\[abi\] FAILED" "$d/out.txt" \
+    && ok "abi digest mismatch stops the build before the game" || bad "abi digest mismatch stops the build (rc $RC): $(cat "$d/calls.txt")"
 
 d=$(fixture); run "$d" FAIL_PREMAKE=4 scripts/ci/build.sh Debug
 [ "$RC" -eq 4 ] && [ "$(wc -l < "$d/calls.txt" | tr -d ' ')" = 1 ] && ok "generate failure stops the build" || bad "generate failure stops the build (rc $RC)"

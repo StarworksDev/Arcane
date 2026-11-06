@@ -45,7 +45,7 @@ namespace Arcane
             return;
 
         // Negative-result caching: emplace a DEFAULT SpriteEntry (1x1 m,
-        // untextured -- SceneResources.hpp:85-92's field defaults) directly
+        // untextured -- SceneCacheRecords.hpp:114-123's field defaults) directly
         // into the PUBLISHED table -- unlike SpriteMaterialCache::Request,
         // which keeps a failed material OUT of its published table via a
         // separate `failed` set (SpriteMaterialCache.cpp:47,95-101) so the

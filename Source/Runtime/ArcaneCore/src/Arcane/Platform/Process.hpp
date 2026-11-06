@@ -9,6 +9,8 @@
 //   ExecutablePath     GetModuleFileNameW    /proc/self/exe           _NSGetExecutablePath + realpath
 //   LoadedLibraryPath  GetModuleFileNameW    dlinfo(RTLD_DI_LINKMAP)  dyld image list x dlopen(RTLD_NOLOAD)
 //   QueryProcess       (not provided)        /proc/<pid>/stat         proc_pidinfo(PIDTBSDINFO/PIDTASKINFO)
+//   IsProcessLive      OpenProcess + GetProcessTimes   QueryProcess   QueryProcess
+//   TerminateProcess   OpenProcess + TerminateProcess  kill(SIGKILL)  kill(SIGKILL)
 //   UserDataDirectory  %LOCALAPPDATA%        $XDG_DATA_HOME|~/.local/share  ~/Library/Application Support
 //
 // None of these is async-signal-safe; the crash path has its own primitives
@@ -34,6 +36,29 @@ namespace Arcane::Platform
     // (else ~/.local/share) on Linux, ~/Library/Application Support on macOS.
     // Empty when the environment names none.
     ARC_CORE_API std::filesystem::path UserDataDirectory();
+
+    // True only while `pid` is STILL the process a record described and is
+    // still running -- three tells, all of which must hold:
+    //   1. the pid still opens (Windows) / has a process-table entry (POSIX),
+    //   2. its creation stamp equals `start` (a recycled pid has a different
+    //      birth); `start` 0 means "no stamp recorded" and any start passes,
+    //   3. it has not exited (Windows: zero exit time, which a lingering
+    //      handle cannot fake; POSIX: not a zombie awaiting its reap).
+    // `start` is the stamp EditorLock::Self records: the creation FILETIME as
+    // u64 on Windows, QueryProcess's start on POSIX. Pid 0 is never live.
+    // Windows: an OpenProcess refused with ERROR_ACCESS_DENIED is a running
+    // process the caller may not query (elevated, another user, SYSTEM); it
+    // is live, and tells 2-3 cannot be checked for it.
+    ARC_CORE_API bool IsProcessLive(std::uint32_t pid, std::uint64_t start);
+
+    // Ends the running process {pid, start} at once (Windows TerminateProcess,
+    // POSIX SIGKILL) and returns true when the kill was delivered. START-CHECKED
+    // like IsProcessLive's tell 2, and stricter: `start` must be the nonzero
+    // stamp a record holds and must equal the process's own, so a recycled pid
+    // is never killed. False (nothing done) for pid 0, start 0, a pid that is
+    // gone or already exited, a stamp mismatch, or a kill the OS refused.
+    // Asynchronous: poll IsProcessLive for the exit. (Servitor `quit --force`.)
+    ARC_CORE_API bool TerminateProcess(std::uint32_t pid, std::uint64_t start);
 
 #if ARC_PLATFORM_POSIX
     // A snapshot of another (or this) process.

@@ -5,6 +5,7 @@
 
 #include <Arcane/Config/CVarRegistry.hpp>
 #include <Arcane/Config/RemoteCVarService.hpp>
+#include <Json.hpp>
 
 #include <string>
 #include <vector>
@@ -229,4 +230,96 @@ TEST_CASE("RemoteCVarService: get and explain on a ServerCanExecute command do n
     CHECK(set.ok);
     CHECK(flag.ran);
     CHECK(set.text == "pong");
+}
+
+TEST_CASE("Editor context can read an Editor-audience cvar the ServerAdmin list hides", "[remote][cvar]") {
+    CVarRegistry reg;
+    Knob(reg, "editor.visible", CVarValue::Int32(3), Audience::Editor);
+    Knob(reg, "editor.secret", CVarValue::String("editorhorse"), Audience::Editor, CVarFlags::Protected);
+    RemoteCVarService svc(reg);
+    RemoteCVarRequest req{"get", "editor.visible", "", "remote-test", CVarContext::Editor};
+    const RemoteCVarResponse res = svc.Handle(req);
+    CHECK(res.ok);
+    CHECK(res.text.find('3') != std::string::npos);
+    CHECK(res.valueJson == "3");
+    RemoteCVarRequest hidden{"get", "editor.visible", "", "admin-1"};
+    CHECK_FALSE(svc.Handle(hidden).ok);
+}
+
+TEST_CASE("Protected get is masked in the Editor context", "[remote][cvar]") {
+    CVarRegistry reg;
+    Knob(reg, "editor.secret", CVarValue::String("editorhorse"), Audience::Editor, CVarFlags::Protected);
+    RemoteCVarService svc(reg);
+    RemoteCVarRequest req{"get", "editor.secret", "", "remote-test", CVarContext::Editor};
+    const RemoteCVarResponse res = svc.Handle(req);
+    CHECK_FALSE(res.ok);
+    CHECK(res.text.find("protected") != std::string::npos);
+    CHECK(res.text.find("editorhorse") == std::string::npos);
+    CHECK(res.valueJson == "null");
+}
+
+TEST_CASE("explain returns structured history and still masks Protected", "[remote][cvar]") {
+    CVarRegistry reg;
+    Knob(reg, "test.server.tick", CVarValue::Int32(60), Audience::Server);
+    Knob(reg, "test.server.password", CVarValue::String("hunter2"), Audience::Server, CVarFlags::Protected);
+    RemoteCVarService svc(reg);
+    RemoteCVarRequest set{"set", "test.server.tick", "45", "remote-test", CVarContext::ServerAdmin};
+    REQUIRE(svc.Handle(set).ok);
+    RemoteCVarRequest exp{"explain", "test.server.tick", "", "remote-test", CVarContext::ServerAdmin};
+    const RemoteCVarResponse res = svc.Handle(exp);
+    CHECK(res.ok);
+    CHECK(res.text.find("Console") != std::string::npos);
+    CHECK(res.setBy == "Console");
+    CHECK(res.valueJson == "45");
+    const auto history = nlohmann::json::parse(res.historyJson);
+    REQUIRE(history.is_array());
+    REQUIRE(history.size() >= 2);
+    CHECK(history.front()["by"] == "Default");
+    CHECK(history.front()["value"] == 60);
+    CHECK(history.front()["module"] == "");
+    CHECK(history.back()["by"] == "Console");
+    CHECK(history.back()["value"] == 45);
+    CHECK(history.back()["module"] == "");
+    CHECK(res.historyJson.find("remote-test") == std::string::npos);
+    RemoteCVarRequest prot{"explain", "test.server.password", "", "remote-test", CVarContext::Editor};
+    const RemoteCVarResponse masked = svc.Handle(prot);
+    CHECK_FALSE(masked.ok);
+    CHECK(masked.text.find("hunter2") == std::string::npos);
+    CHECK(masked.valueJson == "null");
+    CHECK(masked.historyJson.empty());
+}
+
+TEST_CASE("Editor context explains a non-protected Editor-audience cvar", "[remote][cvar]") {
+    CVarRegistry reg;
+    AuditLog audit;
+    Knob(reg, "editor.visible", CVarValue::Int32(3), Audience::Editor);
+    RemoteCVarService svc(reg, &AuditLog::Sink, &audit);
+    RemoteCVarRequest set{"set", "editor.visible", "9", "remote-test", CVarContext::Editor};
+    REQUIRE(svc.Handle(set).ok);
+    REQUIRE(audit.records.size() == 1);
+    CHECK(audit.records.front().context == CVarContext::Editor);
+    RemoteCVarRequest exp{"explain", "editor.visible", "", "remote-test", CVarContext::Editor};
+    const RemoteCVarResponse res = svc.Handle(exp);
+    CHECK(res.ok);
+    CHECK(res.text.find("unknown") == std::string::npos);
+    CHECK(res.valueJson == "9");
+    CHECK(res.setBy == "Console");
+    CHECK(res.audience == "Editor");
+}
+
+TEST_CASE("omitted context stays ServerAdmin", "[remote][cvar]") {
+    RemoteCVarRequest req{"get", "test.server.tick", "", "tester"};
+    CHECK(req.context == CVarContext::ServerAdmin);
+}
+
+TEST_CASE("ToString(SetBy) names every rung", "[remote][cvar]") {
+    CHECK(std::string(Arcane::ToString(SetBy::Default)) == "Default");
+    CHECK(std::string(Arcane::ToString(SetBy::EngineConfig)) == "EngineConfig");
+    CHECK(std::string(Arcane::ToString(SetBy::Plugin)) == "Plugin");
+    CHECK(std::string(Arcane::ToString(SetBy::Project)) == "Project");
+    CHECK(std::string(Arcane::ToString(SetBy::EditorUser)) == "EditorUser");
+    CHECK(std::string(Arcane::ToString(SetBy::User)) == "User");
+    CHECK(std::string(Arcane::ToString(SetBy::CommandLine)) == "CommandLine");
+    CHECK(std::string(Arcane::ToString(SetBy::Code)) == "Code");
+    CHECK(std::string(Arcane::ToString(SetBy::Console)) == "Console");
 }

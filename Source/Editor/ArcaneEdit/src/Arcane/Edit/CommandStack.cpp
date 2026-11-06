@@ -2,6 +2,8 @@
 
 #include <Arcane/Base/Log.hpp>
 #include <Arcane/Edit/ComponentEditCommand.hpp>
+#include <Astra/Component/Component.hpp>
+#include <Astra/Registry/Registry.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -216,6 +218,37 @@ namespace Arcane
         m_pending.clear();
         m_pendingGeneric.clear();
         m_pendingTouched.clear();
+    }
+
+    void CommandStack::Abandon(TransactionId owner)
+    {
+        if (owner == TransactionId::None || owner != m_openId)
+            return;   // see Commit: only the owner may close.
+        if (m_pending.empty() && m_pendingGeneric.empty())
+        {
+            Cancel(owner);
+            return;
+        }
+        Astra::Registry& reg = m_resolve();
+        const bool allLive = std::all_of(m_pending.begin(), m_pending.end(), [&](const Pending& p) {
+            return p.descriptor != nullptr && reg.GetComponentByHash(p.entity, p.descriptor->hash) != nullptr;
+        });
+        if (allLive && m_pendingGeneric.empty())
+        {
+            Commit(owner);
+            return;
+        }
+        // Restore is private on the command: build the same command Commit would
+        // and Undo() the temporary, which writes `before` back (a no-op for a
+        // component that is gone).
+        for (Pending& p : m_pending)
+        {
+            if (p.descriptor == nullptr || reg.GetComponentByHash(p.entity, p.descriptor->hash) == nullptr)
+                continue;
+            ComponentEditCommand restore(m_resolve, p.entity, p.descriptor, std::move(p.before), {}, m_openLabel);
+            restore.Undo();
+        }
+        Cancel(owner);
     }
 
     void CommandStack::Push(std::unique_ptr<ICommand> command,

@@ -38,6 +38,7 @@
 // NetMode. Conflating the two is UE's IsRunningDedicatedServer-vs-NetMode bug
 // class, and RoleMaskTest.cpp pins them apart.
 
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Core/NetMode.hpp>
 #include <Arcane/EcsFwd.hpp>   // Arcane::SystemScheduler (declared, aliased)
@@ -57,6 +58,10 @@ namespace Arcane
     struct SystemSchedulers;
 
     enum class RoleMask : std::uint8_t { Server = 1, Client = 2, Both = 3 };
+    // Render is RETIRED (F5 plan 1 Task 5): no host runs the render scheduler
+    // (sprites come from the frame extract, Arcane/Render/ExtractFrame.hpp). The
+    // value stays so the ABI and older modules are unchanged; a Render-phase
+    // registration is accepted, never runs, and warns once per system name.
     enum class SystemPhase : std::uint8_t { FixedUpdate, Update, Render };
 
     // RoleMask is a bitmask, so it needs the two operators RoleMatches is written
@@ -147,6 +152,7 @@ namespace Arcane
         std::size_t InstantiateInto(SystemSchedulers& into, NetMode mode) const;
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::Access;   // hashes these private members (Plugin/AbiManifestEngine.hpp)
         std::vector<SystemFactoryEntry> m_entries;
         const void*                     m_openOwner = nullptr;
     };

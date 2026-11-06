@@ -107,7 +107,7 @@
 #include <NRI.h>
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
-#include <Arcane/Config/CVarTypes.hpp>   // CVarColor -- Record's clear colour
+#include <Arcane/Config/CVarTypes.hpp>   // CVarColor -- Record's (unused since F5 T2) clear colour parameter
 #include <Arcane/Core/Constant.hpp>
 #include <Arcane/Guid.hpp>
 #include <Arcane/Render/Nri/NriPipelineCache.hpp>
@@ -227,14 +227,18 @@ namespace Arcane
                      nri::Format canvasFormat);
 
         // Records one frame's 2D content into an ALREADY-OPEN raster pass
-        // whose single colour attachment is the canvas. In order: clear the
-        // canvas to `clearColor` (render.clearColor, read once per frame by
-        // AddBatch2DNode, which also made it the canvas's optimized clear
-        // value; the clear seam -- graph attachments are LOAD/STORE and a
-        // node that wants a cleared target clears it itself, see
-        // NriGraphContext::BuildFrame), then, if the batch drew anything,
-        // upload its vertex/index streams through the ring and issue one
-        // CmdDrawIndexed per drained span.
+        // whose single colour attachment is the canvas. It does NOT clear: the
+        // canvas arrives already cleared to render.clearColor by the CLEAR
+        // colour load op DeclareClearedCanvas declares (F5 plan 1 T2, see
+        // NriGraphContext.cpp's THE CLEAR IS DECLARATIVE). A caller that drives
+        // Record outside AddBatch2DNode must declare that op itself. If the
+        // batch drew anything, Record uploads its vertex/index streams through
+        // the ring and issues one CmdDrawIndexed per drained span.
+        //
+        // `clearColor` is UNUSED since that change. It stays in the signature
+        // only because Batch2DNode is ARC_RENDER_API and dropping a parameter
+        // moves the exported mangled name -- an ABI change this plan does not
+        // take (plan 1 Global Constraints, ABI). Drop it with the next bump.
         //
         // Emits NO barrier: the executor derives and batches every one of them
         // from the declarations (RgCompiled's contract block).
@@ -584,4 +588,16 @@ namespace Arcane
     // this function's DECLARATIONS change.
     ARC_RENDER_API RgTexture AddBatch2DNode(RenderGraph& graph, NriGraphContext* context,
                                         std::uint32_t width, std::uint32_t height);
+
+    // THE ONE CANVAS DECLARATION (F5 plan 1 T2). Called from the setup fn of
+    // the frame's first canvas writer -- `batch2d` on a world frame,
+    // `letterbox` on a chrome frame (DeclareGraphFrame) -- so the two can never
+    // disagree on the canvas's format, extent, optimized clear value or load
+    // op. Mints the "canvas" transient (GraphCanvasFormat(), width x height,
+    // optimized clear = render.clearColor), Writes it as ColorWrite, attaches
+    // it as the node's only colour attachment, and declares a CLEAR colour
+    // load op to the same render.clearColor. Valid only inside a setup fn
+    // (it calls the graph's attachment setters). Module-internal: no export.
+    RgTexture DeclareClearedCanvas(RenderGraph& graph, RenderGraphBuilder& builder,
+                                   std::uint32_t width, std::uint32_t height);
 }

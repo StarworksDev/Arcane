@@ -79,14 +79,19 @@ namespace Arcane::Editor::ClassTemplates
             return out;
         }
 
+        // Render is RETIRED (F5 plan 1 Task 5): no host runs the render
+        // scheduler, so a Render-phase system would register and never run.
+        // The wizard never writes one; a typed Render normalizes like any
+        // other unusable value.
         Arcane::SystemPhase NormalizePhase(Arcane::SystemPhase phase) noexcept
         {
             switch (phase)
             {
                 case Arcane::SystemPhase::FixedUpdate:
                 case Arcane::SystemPhase::Update:
-                case Arcane::SystemPhase::Render:
                     return phase;
+                case Arcane::SystemPhase::Render:
+                    break;
             }
             return Arcane::SystemPhase::FixedUpdate;
         }
@@ -109,7 +114,7 @@ namespace Arcane::Editor::ClassTemplates
             {
                 case Arcane::SystemPhase::FixedUpdate: return "Arcane::SystemPhase::FixedUpdate";
                 case Arcane::SystemPhase::Update:      return "Arcane::SystemPhase::Update";
-                case Arcane::SystemPhase::Render:      return "Arcane::SystemPhase::Render";
+                case Arcane::SystemPhase::Render:      break;   // retired; NormalizePhase never yields it
             }
             return "Arcane::SystemPhase::FixedUpdate";
         }
@@ -201,8 +206,8 @@ namespace {{NS}}
 //     void operator()(Arcane::View<Arcane::Transform>& view,
 //                     Arcane::Res<Arcane::Time> time)
 //
-// Fixed-step transform propagation is not installed in the Update or Render
-// scheduler, so this template invents no irrelevant edge. Registrar discovery
+// Fixed-step transform propagation is not installed in the Update scheduler,
+// so this template invents no irrelevant edge. Registrar discovery
 // order is irrelevant: derive Arcane::SystemTraits<Arcane::Before<...>> or
 // After<...> whenever scheduler order matters. The ARC_SYSTEM declaration
 // that selects phase and network role is in {{CLASS}}.cpp.
@@ -259,7 +264,6 @@ namespace {{NS}}
         {
             case 0: return "Fixed Update";
             case 1: return "Update";
-            case 2: return "Render";
             default: return "Fixed Update";
         }
     }
@@ -281,7 +285,6 @@ namespace {{NS}}
         switch (phaseIndex)
         {
             case 1: options.phase = Arcane::SystemPhase::Update; break;
-            case 2: options.phase = Arcane::SystemPhase::Render; break;
             default: options.phase = Arcane::SystemPhase::FixedUpdate; break;
         }
         switch (roleIndex)

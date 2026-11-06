@@ -436,3 +436,34 @@ TEST_CASE("reference: ResolveReferenceIn applies the same levels under any refer
     CHECK(sw.level == Arcane::ReferenceLevel::Shared);
     CHECK(sw.blessTarget == thumbs / "vulkan-lavapipe" / "mesh-reference_cube.png");
 }
+
+// --- Servitor final fix pass (G-3): ':' in a name. On Windows, appending
+// "C:shot.png" to a D: root replaces the whole left side (a different
+// root-name), and "foo:bar.png" under the references directory is an NTFS
+// alternate data stream of "foo". Both are refused by name, and every join is
+// checked for containment after it is built.
+
+TEST_CASE("reference: a name with ':' is refused, and a joined path must stay under its root", "[reference]")
+{
+    CHECK_FALSE(Arcane::ReferenceNameIsSafe("C:shot"));
+    CHECK_FALSE(Arcane::ReferenceNameIsSafe("foo:bar"));
+    CHECK_FALSE(Arcane::ReferenceNameIsSafe(":"));
+    CHECK(Arcane::ReferenceNameIsSafe("runtime-scene"));
+
+    const auto root = TempProject("contained") / "Verify" / "References";
+    CHECK(Arcane::ReferencePathIsContained(root, root / "runtime-scene.png"));
+    CHECK(Arcane::ReferencePathIsContained(root, root / "dx12" / "runtime-scene.png"));
+    CHECK_FALSE(Arcane::ReferencePathIsContained(root, root / ".." / "escape.png"));
+    CHECK_FALSE(Arcane::ReferencePathIsContained(root, root.parent_path() / "sibling.png"));
+    CHECK_FALSE(Arcane::ReferencePathIsContained(root, root));
+#if defined(_WIN32)
+    // The append replaced the left side: the result names another drive.
+    const std::filesystem::path otherDrive = std::filesystem::path(L"D:\\proj\\Verify\\References") / L"C:shot.png";
+    CHECK_FALSE(Arcane::ReferencePathIsContained(L"D:\\proj\\Verify\\References", otherDrive));
+#endif
+
+    const auto res = Arcane::ResolveReference(TempProject("colon"), "C:shot", "dx12");
+    CHECK(res.level == Arcane::ReferenceLevel::None);
+    CHECK(res.blessTarget.empty());   // refused: a bless writes nothing
+    CHECK(Arcane::DiffArtifactPath(TempProject("colon-diff"), "foo:bar", "dx12").empty());
+}

@@ -1,6 +1,5 @@
 #include <Arcane/Scene/EngineResourceTypes.hpp>
 
-#include <Arcane/Scene/PhysicsSystem.hpp>       // Arcane::PhysicsWorld2D
 #include <Arcane/Scene/SceneResources.hpp>      // SceneRoot / Arcane::PhysicsInterpBuffer2D / the four tables
 #include <Arcane/Scene/TransformSystems.hpp>    // TransformOrder
 
@@ -10,6 +9,7 @@ namespace Arcane
 {
     void PrewarmEngineResourceTypes()
     {
+        // PhysicsWorld2D is prewarmed by the 2D physics module's SimHook (ProcessContext::Create).
         // Order is not load-bearing (resource ids are not serialized anywhere and
         // nothing indexes by them); being FIRST is. Grouped as declared.
         (void)Astra::TypeID<SceneRoot>::Value();
@@ -18,7 +18,6 @@ namespace Arcane
         (void)Astra::TypeID<SpriteMaterialTable>::Value();
         (void)Astra::TypeID<MeshTable>::Value();
         (void)Astra::TypeID<MeshMaterialTable>::Value();
-        (void)Astra::TypeID<Arcane::PhysicsWorld2D>::Value();
         (void)Astra::TypeID<TransformOrder>::Value();
     }
 }

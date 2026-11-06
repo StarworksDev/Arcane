@@ -14,6 +14,7 @@
 // attaches itself here. ArcaneServer, a bare Runtime in a test, and the editor's
 // embedded server world run with no client at all.
 
+#include <Arcane/Core/AbiAccess.hpp>
 #include <Arcane/Core/Api.hpp>
 #include <Arcane/Ecs.hpp>   // the Arcane:: names (aliases) this header's declarations spell; Result is by value
 #include <Arcane/Guid.hpp>
@@ -151,8 +152,13 @@ namespace Arcane
         // background texture cook (Arcane::Editor::CookQueue) is the first
         // production consumer. Same instance WorkScheduler()/TaskExecutor()
         // already expose two other faces of; this is the third. Reference,
-        // not pointer: the JobSystem is a fixed part of this Runtime's
-        // substrate and outlives every caller that could hold the reference.
+        // not pointer: the JobSystem is the process pool, owned jointly by the
+        // Runtimes on this ProcessContext (ProcessContext::AcquireJobSystem), so
+        // the reference stays valid as long as any Runtime on that context is
+        // alive -- including after this Runtime is destroyed if a sibling lives.
+        // Submit work is drained only by the LAST Runtime's drop; a task that
+        // captures one Runtime's state must be drained by its owner before that
+        // Runtime dies.
         JobSystem&                Jobs() noexcept;
         std::shared_ptr<::Arcane::ComponentRegistry> Components() noexcept;
         Assets&                   AssetsFacade() noexcept;
@@ -385,6 +391,8 @@ namespace Arcane
         // Arcane::PhysicsWorld2D destroys the PhysicsWorld, and ArcaneEditor.exe does
         // not link Manifold2D. Nothing to do when no world exists yet.
         void      ResetPhysics();
+        // Resolved by Arcane::ResolveGravity2D (Scene/PhysicsGravity2D.hpp), the one function
+        // the 2D physics hook's EnsureWorld reads too; Engine passes no gravity to a hook.
         // The scene-root Arcane::PhysicsSettings2D component when present, else the
         // `physics.gravity` setting (its project rung, else
         // its default (0, -9.81; +Y up, F4)). Layered on purpose: gravity is
@@ -393,6 +401,7 @@ namespace Arcane
         [[nodiscard]] glm::vec2 ResolvedGravity() const;
 
     private:
+        friend struct ::Arcane::Detail::AbiManifest::Access;   // hashes these private members (Plugin/AbiManifestEngine.hpp)
         struct Impl;
         std::unique_ptr<Impl> m_impl;
     };

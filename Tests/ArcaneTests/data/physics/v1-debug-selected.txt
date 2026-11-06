@@ -1,0 +1,2 @@
+arcane-physics-v1-debug 1 selected alpha 0 offset 640 360 scale 100 -100
+circle 44246782 43b400e2 42480000 3eb33333 3dfae147 3dfae147 3f800000

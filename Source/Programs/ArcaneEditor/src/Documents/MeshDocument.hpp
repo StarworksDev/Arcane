@@ -26,8 +26,8 @@
 // this window the instant it lands. The SCENE is the other story, and it is
 // not this document's preview at all: SceneRenderResolver owns a live
 // MeshCache (Host/SceneRenderResolver.cpp) whose published MeshTable both
-// hosts sweep every frame through GpuSceneSync (PrepareSceneForRender in
-// EditorAppFrame.cpp / RuntimeFrame.cpp), and MeshCache::Request memoises per Guid --
+// hosts publish every frame through GpuSceneSync inside ExtractFrame
+// (EditorAppFrame.cpp / RuntimeFrame.cpp), and MeshCache::Request memoises per Guid --
 // entries leave only via Invalidate/Clear. So a save or an undo that
 // invalidates nothing leaves every MeshRenderer in the open scene drawing the
 // PRE-edit geometry until the project is switched.

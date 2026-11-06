@@ -28,9 +28,32 @@ namespace Arcane
         if (name.empty()) return false;
         if (name.find('/') != std::string::npos)  return false;
         if (name.find('\\') != std::string::npos) return false;
+        // Servitor final fix pass (G-3): ':' makes "C:shot" a drive-relative
+        // path (an append onto a D: root replaces it) and "foo:bar" an NTFS
+        // alternate data stream. Kept identical to ArcaneRemote's copy
+        // (CompareReferenceNameIsSafe); a test pins the two.
+        if (name.find(':') != std::string::npos)  return false;
         if (name.find("..") != std::string::npos) return false;
         if (name.front() == '.') return false;
         return true;
+    }
+
+    bool ReferencePathIsContained(const fs::path& root, const fs::path& joined) noexcept
+    {
+        try
+        {
+            // A different root-name (the append replaced the left side) is
+            // never under root; lexically_relative is empty for it anyway.
+            if (joined.root_name() != root.root_name()) return false;
+            const fs::path rel = joined.lexically_normal().lexically_relative(root.lexically_normal());
+            if (rel.empty() || rel.is_absolute() || rel.has_root_name()) return false;
+            const fs::path first = *rel.begin();
+            return first != ".." && first != ".";
+        }
+        catch (...)
+        {
+            return false;   // a path the platform cannot represent is never contained
+        }
     }
 
     std::string ReferenceAdapterSet(const std::string& backend, const std::string& adapterName,
@@ -70,6 +93,12 @@ namespace Arcane
 
         const fs::path shared = root / (name + ".png");
         const fs::path keyed  = root / backend / (name + ".png");
+        // After every join (G-3): a path that left `root` is refused like a
+        // bad name -- level None, an empty blessTarget, so a bless writes nothing.
+        if (!ReferencePathIsContained(root, shared) || !ReferencePathIsContained(root, keyed))
+            return out;
+        if (!adapterSet.empty() && !ReferencePathIsContained(root, root / adapterSet / (name + ".png")))
+            return out;
 
         std::error_code ec;
         fs::path adapter;
@@ -141,6 +170,8 @@ namespace Arcane
 
         const fs::path verify = Arcane::Paths::Join(Arcane::Paths::Location::ProjectSaved, Arcane::Paths::ForProject(projectRoot), "Verify");
         if (verify.empty()) return fs::path{};   // refused: nowhere safe to write
-        return verify / (name + "-" + backend + "-diff.png");
+        const fs::path diff = verify / (name + "-" + backend + "-diff.png");
+        if (!ReferencePathIsContained(verify, diff)) return fs::path{};   // G-3: never written outside Saved/Verify
+        return diff;
     }
 }

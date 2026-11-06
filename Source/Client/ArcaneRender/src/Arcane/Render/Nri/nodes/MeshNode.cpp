@@ -11,6 +11,7 @@
 
 #include "MeshNode.hpp"
 
+#include <Arcane/Render/DepthConventionMap.hpp>
 #include <Arcane/Render/Nri/GpuScene.hpp>                  // the instance / args / visible-index buffers Record draws from (F3 plan 1 T7)
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriGraphContext.hpp>
@@ -73,14 +74,6 @@ namespace Arcane
             }
             return kPsEntry;
         }
-
-        // THE DEPTH CLEAR. 1.0 is "far" under the engine's FORWARD-Z, [0,1]
-        // convention (SceneCamera.hpp's DEPTH CONVENTION block -- reverse-Z is
-        // a separately-decided-against choice), which is the value that pairs
-        // with CompareOp::LESS below. Flipping one without the other is
-        // exactly the mistake that renders an empty frame.
-        ARC_CONSTANT("convention: standard-Z depth clear with a LESS compare; changing it is a bug")
-        constexpr float kDepthClear = 1.0f;
 
         // THE ROOT BLOCK is MeshRootConstants (MeshNode.hpp, 8 bytes) since
         // F3 plan 1 T7. The 128-byte per-instance MeshConstants block that
@@ -824,12 +817,13 @@ namespace Arcane
             // FORWARD-Z, [0,1]: near maps to 0 and far to 1
             // (SceneCamera.hpp's DEPTH CONVENTION -- reverse-Z is a
             // separately-decided-against choice), so LESS is "nearer wins" and
-            // the clear value is 1.0 (kDepthClear above). All six variants
+            // the clear value is DepthClearValue(kSelectedDepthConvention), the
+            // depth load op AddMeshNode declares. All six variants
             // TEST depth; whether one also WRITES it is the blend mode's
             // (PipelineStateFor: opaque and masked write, transparent tests
             // only), carried in `key.depthWrite` above and stamped by the
             // cache -- so this callback sets only the shared compare op.
-            desc.outputMerger.depth.compareOp = nri::CompareOp::LESS;
+            desc.outputMerger.depth.compareOp = NearerWinsOp(kSelectedDepthConvention);
         });
     }
 
@@ -939,22 +933,10 @@ namespace Arcane
             ~ResidentScope() { table->clear(); }
         } residentScope{ &m_residents };
 
-        // ============ THE DEPTH CLEAR, and ONLY the depth clear ============
-        // Graph attachments are LOAD/STORE and the declaration API carries no
-        // clear op, so a node that needs a cleared target clears it from its
-        // own exec fn (NriGraphContext::DeclareGraphFrame's THE CLEAR SEAM).
-        // The depth target is a fresh transient pool slot whose contents are
-        // undefined, so this is mandatory rather than tidy.
-        //
-        // THE COLOUR PLANE IS NOT CLEARED: batch2d already cleared the canvas
-        // and drew this frame's 2D content into it, and clearing here would
-        // erase that. That asymmetry is the whole reason this node clears by
-        // PLANE rather than by attachment.
-        nri::ClearAttachmentDesc clear = {};
-        clear.planes = nri::PlaneBits::DEPTH;
-        clear.value.depthStencil.depth   = kDepthClear;
-        clear.value.depthStencil.stencil = 0;
-        core.CmdClearAttachments(context.cmd, &clear, 1, nullptr, 0);
+        // The depth target was cleared when rendering began: AddMeshNode
+        // declares a CLEAR depth load op to DepthClearValue(
+        // kSelectedDepthConvention). The colour attachment LOADs -- batch2d
+        // already cleared the canvas and drew this frame's 2D content into it.
 
         // NOTHING TO DRAW is a cleared depth buffer, not an error: no emitted
         // batch and no ad-hoc row. That includes ruling R-D's frame -- rows
@@ -1306,7 +1288,7 @@ namespace Arcane
                 desc.width        = width;
                 desc.height       = height;
                 desc.depthStencil = true;
-                desc.optimizedClearValue.depthStencil.depth = kDepthClear;
+                desc.optimizedClearValue.depthStencil.depth = DepthClearValue(kSelectedDepthConvention);
                 desc.hasOptimizedClearValue = true;
                 depth = builder.CreateTexture("depth", desc);
 
@@ -1318,6 +1300,19 @@ namespace Arcane
                 builder.Write(depth, RgUsage::DepthWrite);
                 graph.SetColorAttachments(std::span<const RgTexture>(&canvas, 1));
                 graph.SetDepthAttachment(depth);
+
+                // Declarative load ops (F5 plan 1, Task 2): colour LOADs (it
+                // carries batch2d's content), depth CLEARs to the one
+                // depth-convention value. The depth target is a fresh transient
+                // pool slot whose contents are undefined, so its clear is
+                // mandatory rather than tidy.
+                Arcane::RgAttachmentOp colorOp;   // load defaults to Load
+                graph.SetColorAttachmentOps(std::span<const Arcane::RgAttachmentOp>(&colorOp, 1));
+                Arcane::RgAttachmentOp depthOp;
+                depthOp.load = Arcane::RgLoadOp::Clear;
+                depthOp.clear.depthStencil.depth = Arcane::DepthClearValue(Arcane::kSelectedDepthConvention);
+                depthOp.clear.depthStencil.stencil = 0;
+                graph.SetDepthAttachmentOp(depthOp);
 
                 // The GPU scene's buffers, as this pass consumes them: the
                 // instance rows and the visible indices from the vertex

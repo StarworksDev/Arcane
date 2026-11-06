@@ -9,7 +9,7 @@
 //     OUTSIDE COMMENTS only (ScanMode::CommentsOnly). An #include of a
 //     library header, a #define, a string literal or an ARC_INTERNAL fence
 //     in game code is exactly the leak the guard exists to catch.
-//   - The 20 headers a game module reads (kGameFacingHeaders): PUBLIC
+//   - The 21 headers a game module reads (kGameFacingHeaders): PUBLIC
 //     DECLARATIONS only (ScanMode::PublicDeclarations) -- comments, string
 //     literals, preprocessor directives (incl. #define continuations) and
 //     `// ARC_INTERNAL_BEGIN: <why>` ... `// ARC_INTERNAL_END` fences are
@@ -43,10 +43,11 @@ namespace
         "Source/Runtime/ArcaneCore/src/Arcane/Base/Log.hpp",
         "Source/Client/ArcaneClient/src/Arcane/Client/ClientRuntime.hpp",
         "Source/Runtime/ArcaneScene/src/Arcane/Scene/SceneResources.hpp",
+        "Source/Runtime/ArcaneScene/src/Arcane/Scene/SceneCacheRecords.hpp",
         "Source/Runtime/ArcaneScene/src/Arcane/Scene/Components.hpp",
         "Source/Runtime/ArcaneScene/src/Arcane/Scene/TransformSystems.hpp",
-        "Source/Runtime/ArcanePhysics2D/src/Arcane/Scene/PhysicsComponents.hpp",
-        "Source/Runtime/ArcanePhysics2D/src/Arcane/Scene/PhysicsSystem.hpp",
+        "Source/Runtime/ArcaneScene/src/Arcane/Scene/PhysicsComponents.hpp",
+        "Source/Runtime/ArcaneScene/src/Arcane/Scene/PhysicsSystem2D.hpp",
         "Source/Runtime/ArcanePhysics2D/src/Arcane/Scene/PhysicsEvents2D.hpp",
         "Source/Runtime/ArcanePhysics2D/src/Arcane/Physics2D.hpp",
         "Source/Runtime/ArcanePhysics2D/src/Arcane/Physics2DFwd.hpp",
@@ -59,7 +60,7 @@ namespace
     enum class ScanMode
     {
         CommentsOnly,       // game sources + template renders: only comments are exempt
-        PublicDeclarations, // the 20 headers: comments, strings, preprocessor lines and fences are exempt
+        PublicDeclarations, // the 21 headers: comments, strings, preprocessor lines and fences are exempt
     };
 
     // Line-oriented scan. Comments are always stripped; PublicDeclarations also
@@ -215,7 +216,7 @@ TEST_CASE("guard: every editor C++ template render spells Arcane:: only (outside
     Report(hits);
 }
 
-TEST_CASE("guard: the 20 game-facing engine headers spell Arcane:: outside comments, preprocessor lines and fences", "[guard]")
+TEST_CASE("guard: the 21 game-facing engine headers spell Arcane:: outside comments, preprocessor lines and fences", "[guard]")
 {
     const auto root = Arcane::Test::FindReferenceProjectDir().parent_path();
     std::vector<Hit> hits;

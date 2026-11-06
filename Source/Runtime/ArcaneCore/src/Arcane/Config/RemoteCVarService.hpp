@@ -40,12 +40,25 @@ namespace Arcane
         std::string name;        // the cvar or command; list: an optional dotted prefix
         std::string value;       // set: the new value as console text; a command: its arguments
         std::string callerId;    // who is asking, as the transport authenticated it
+        CVarContext context = CVarContext::ServerAdmin;   // LAST: {op, name, value, callerId} still compiles
     };
 
     struct RemoteCVarResponse
     {
         bool ok = false;
         std::string text;
+        // Structured form (Servitor P0). valueJson is the JSON text "null" when
+        // there is no value; the other strings are empty when not filled.
+        std::string valueJson = "null";
+        std::string type;
+        std::string setBy;
+        std::string audience;
+        std::string scope;
+        std::string apply;
+        std::string flags;
+        std::string publishedJson;
+        std::string pendingJson;
+        std::string historyJson;   // JSON array of {by, value, module}, oldest first
     };
 
 #if defined(_MSC_VER)
@@ -64,12 +77,14 @@ namespace Arcane
         struct Target { Kind kind = Kind::Unknown; CVarFlags flags = CVarFlags::None; };
 
         [[nodiscard]] Target Resolve(std::string_view name) const;
-        [[nodiscard]] std::string ReadValue(std::string_view name, const CVarCaller& caller);
-        RemoteCVarResponse List(const std::string& prefix, const CVarCaller& caller);
+        void FillStructured(RemoteCVarResponse& res, const std::string& name) const;
+        [[nodiscard]] std::string ReadValue(std::string_view name, const CVarCaller& caller, CVarContext context);
+        RemoteCVarResponse List(const std::string& prefix, const CVarCaller& caller, CVarContext context);
         RemoteCVarResponse RunCommand(const std::string& op, const std::string& name, const std::string& args,
-                                      const std::string& callerId, const CVarCaller& caller, CVarFlags flags);
+                                      const std::string& callerId, const CVarCaller& caller, CVarFlags flags,
+                                      CVarContext context);
         void Audit(std::string_view name, std::string_view callerId, std::string before, std::string after,
-                   PolicyVerdict verdict);
+                   PolicyVerdict verdict, CVarContext context);
 
         CVarRegistry* m_registry;
         CVarAuditFn m_sink;

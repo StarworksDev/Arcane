@@ -241,6 +241,8 @@ namespace Arcane::Log
             // later goes inside this dist sink instead (see its declaration).
             s_distSink = std::make_shared<spdlog::sinks::dist_sink_mt>();
             s_engine->sinks().push_back(s_distSink);
+            // The remote log ring sees every line from the first one on.
+            s_distSink->add_sink(MakeRingSink());
             // THIS module's (ArcaneCore.dll's) Mosaic copy -- Astra/Manifold2D code
             // running inside Core routes here; Client and the hosts keep installing
             // into their own copies via InstallMosaicSink()/InstallMosaicHandler().

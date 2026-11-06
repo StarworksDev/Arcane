@@ -97,6 +97,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include "Remote/SelectionCommand.hpp"   // StopEditorRemote (Servitor final fix round 4, N3-3)
 #include <string>
 #include <utility>
 #include <vector>
@@ -1395,15 +1396,19 @@ namespace Arcane::Editor
         // and then watch the editor's own world diverge from it.
         if (!m_config.playAs.empty())
         {
-            using Topo = Arcane::Editor::PlayTopology;
-            const Topo topo = m_config.playAs == "listen-server"   ? Topo::ListenServer
-                             : m_config.playAs == "embedded-server" ? Topo::EmbeddedServer
-                             : m_config.playAs == "client"          ? Topo::ClientOnly
-                                                                    : Topo::Standalone;
-            // HostConfig::Parse already refused every other spelling, so the
-            // fall-through above is "standalone" and nothing else.
+            // HostConfig::Parse already refused every other spelling, so
+            // EnterScriptedPlay's fall-through is "standalone" and nothing else.
             m_documents.FlushGestures();
-            if (!m_play.Play(m_runtime->Core(), m_plugin ? &*m_plugin : nullptr, topo))
+            // Servitor final fix round 3 (N-3): the remote session arms first,
+            // in the edit-mode topology, exactly as when the same session is
+            // entered interactively (arm, then Play), so --remote --play-as
+            // embedded-server|client keeps its remote surface.
+            void (*armRemote)(void*) = nullptr;
+#if !defined(ARC_BUILD_DIST)
+            armRemote = [](void* user) { static_cast<EditorApp*>(user)->UpdateRemoteSession(); };
+#endif
+            if (!Arcane::Editor::EnterScriptedPlay(m_play, m_runtime->Core(), m_plugin ? &*m_plugin : nullptr,
+                                                   m_config.playAs, armRemote, this))
                 ARC_ERROR("--play-as {}: Play refused", m_config.playAs);
         }
         return true;
@@ -1998,10 +2003,12 @@ namespace Arcane::Editor
     // (a hand-placed <Name>.png beside the .arcproj outranks it -- see the
     // Hub's resolve.rs). Refreshed on scene save and clean exit, so the tile
     // shows roughly what the project looked like when it was last worked on.
-    // The capture is the viewport output AS COMPOSITED: post-tonemap LDR,
-    // including the selection outline in Edit mode and the game HUD in Play.
-    // Accepted deliberately -- an outline-free shot would need a second scene
-    // render, and this is a memory aid, not a render product. Saved/ sits
+    // The capture is one extra viewport frame: post-tonemap LDR of the scene
+    // and its post chain, plus the overlays that extract published for that
+    // frame. The gizmo primitives are cleared on the request (the viewport
+    // frame's gizmo comes from BuildGizmoOverlayPrims into the post-tonemap
+    // overlay). The cover does not call ArmGraphViewportFrame, so the picture
+    // has no selection outline and no game HUD. Saved/ sits
     // OUTSIDE Content/ on purpose: RegisterCreatedAsset would (correctly)
     // refuse to register it, and the asset registry has no business knowing.
     void EditorApp::WriteAutoScreenshot()
@@ -2041,14 +2048,12 @@ namespace Arcane::Editor
     // EVERY viewport frame instead would pay a full-surface copy per frame for
     // an image taken twice a session.
     //
-    // AND THE FRESH FRAME IS THE BETTER PICTURE, which is the part worth
-    // stating: it carries the scene, the post chain and the Edit-mode overlays
-    // (SubmitSceneToBatcher's gizmo + camera rect) but NOT the selection
-    // outline and NOT the game HUD, because it does not call
-    // ArmGraphViewportFrame. WriteAutoScreenshot's own comment calls the
-    // outline-free shot the one it would rather have, and rejects it because
-    // "an outline-free shot would need a second scene render" -- on this arm
-    // the second scene render is what a capture costs anyway.
+    // AND THE FRESH FRAME IS THE PICTURE THE COVER STORES: the scene, the
+    // post chain, and the overlays from its own extracted packet. The gizmo
+    // primitives are cleared on the request; the viewport frame's gizmo is
+    // BuildGizmoOverlayPrims into the post-tonemap overlay. This arm does not
+    // call ArmGraphViewportFrame, so the picture has no selection outline and
+    // no game HUD.
     //
     // BOTH CALL SITES ARE RARE EVENTS (a scene save, shutdown), which is what
     // pays for ReadCapture's DeviceWaitIdle -- the same stall SaveTexturePng
@@ -2067,6 +2072,15 @@ namespace Arcane::Editor
         b.Begin(graph->SurfaceWidth(), graph->SurfaceHeight());
         SubmitSceneToBatcher(b);
 
+        // A SECOND FRAME BUILDER, so it extracts too (F5 plan 1 Task 5): the
+        // sprite sweep runs only inside ExtractFrame, so without it this
+        // batcher would drain empty and the cover would lose its sprites. The
+        // same request builder as the viewport frame, minus the gizmo the
+        // cover has never drawn.
+        Arcane::ExtractRequest req = BuildExtractRequest(graph->SurfaceWidth(), graph->SurfaceHeight());
+        req.gizmoPrims.Clear();
+        const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(m_runtime->Registry(), req, m_packetRing);
+
         const Arcane::GlobalParams globals =
             m_resolver ? m_resolver->Globals() : Arcane::GlobalParams{};
 
@@ -2075,7 +2089,14 @@ namespace Arcane::Editor
         vp.post    = m_resolver ? m_resolver->PostDesc() : nullptr;
         vp.globals = &globals;
         vp.capture = true;
-        if (graph->RenderFrameOffscreen(vp) != Arcane::NriGraphContext::FrameOutcome::Presented)
+        graph->BindPacket(&packet);   // the vehicle unbinds it before RenderFrameOffscreen returns
+        const Arcane::NriGraphContext::FrameOutcome outcome = graph->RenderFrameOffscreen(vp);
+        // The cover's extract synced the mirror and vp.mesh stays unset, so
+        // no mesh pass uploaded that stage. Invalidate on every outcome,
+        // before the non-Presented return, so the next viewport sync is a
+        // full rebuild (ruling R-F).
+        Arcane::GpuSceneInvalidate(m_runtime->Registry());
+        if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
             return false;   // Skipped (collapsed panel) or Failed (already latched + logged)
 
         std::uint32_t w = 0, h = 0;
@@ -2090,6 +2111,71 @@ namespace Arcane::Editor
         // ONE shared definition (Arcane::WriteThumbnailPngRgba).
         return Arcane::WriteThumbnailPngRgba(file, w, h, std::move(rgba), 512);
     }
+
+#if !defined(ARC_BUILD_DIST)
+    // ---- Servitor capture hooks (P0 Task 27, R8-2) ---------------------------
+    // capture.viewport / capture.window reach the editor's graph contexts only
+    // through these (CaptureHooks, installed in UpdateRemoteSession). They
+    // forward to each context's capture ring: Arm stores the ticket, Drain
+    // hands back the retired copy. Never ReadCapture, never DeviceWaitIdle --
+    // CaptureGraphViewportPng above stays the cover path and Remote does not
+    // call it. Viewport = m_viewportTargets.graph, the same target
+    // CaptureGraphViewportPng and --compare read (so the host pair is this
+    // pair, ruling F20); window = ChromeGraph(), the backbuffer after ImGui.
+    // A context that is gone answers a drain with a null map (capture.no-frame).
+    namespace
+    {
+        bool DrainRing(Arcane::NriGraphContext* graph, std::uint64_t ticket, Arcane::Remote::CaptureMapped* raw)
+        {
+            if (!graph)
+                return true;   // raw stays empty: mapped null, the capture is lost
+            Arcane::TicketCaptureBytes bytes;
+            if (!graph->DrainTicketCapture(ticket, bytes))
+                return false;
+            raw->width       = bytes.width;
+            raw->height      = bytes.height;
+            raw->rowPitch    = bytes.rowPitch;
+            raw->bgra        = bytes.bgra;
+            raw->mapped      = bytes.mapped;
+            raw->mappedBytes = bytes.mappedBytes;
+            return true;
+        }
+    }
+
+    bool EditorApp::RemoteArmViewport(std::uint64_t ticket, void* user)
+    {
+        Arcane::NriGraphContext* graph = static_cast<EditorApp*>(user)->m_viewportTargets.graph.get();
+        return graph && graph->ArmTicketCapture(ticket);
+    }
+
+    bool EditorApp::RemoteDrainViewport(std::uint64_t ticket, Arcane::Remote::CaptureMapped* raw, void* user)
+    {
+        return DrainRing(static_cast<EditorApp*>(user)->m_viewportTargets.graph.get(), ticket, raw);
+    }
+
+    bool EditorApp::RemoteArmWindow(std::uint64_t ticket, void* user)
+    {
+        Arcane::NriGraphContext* graph = static_cast<EditorApp*>(user)->ChromeGraph();
+        return graph && graph->ArmTicketCapture(ticket);
+    }
+
+    bool EditorApp::RemoteDrainWindow(std::uint64_t ticket, Arcane::Remote::CaptureMapped* raw, void* user)
+    {
+        return DrainRing(static_cast<EditorApp*>(user)->ChromeGraph(), ticket, raw);
+    }
+
+    void EditorApp::RemoteCancelViewport(std::uint64_t ticket, void* user)
+    {
+        if (Arcane::NriGraphContext* graph = static_cast<EditorApp*>(user)->m_viewportTargets.graph.get())
+            graph->CancelTicketCapture(ticket);
+    }
+
+    void EditorApp::RemoteCancelWindow(std::uint64_t ticket, void* user)
+    {
+        if (Arcane::NriGraphContext* graph = static_cast<EditorApp*>(user)->ChromeGraph())
+            graph->CancelTicketCapture(ticket);
+    }
+#endif
 
     namespace
     {
@@ -2700,6 +2786,10 @@ namespace Arcane::Editor
         if (!CreateGraphVehicles())
             return 1;
         MainLoop();
+#if !defined(ARC_BUILD_DIST)
+        if (m_remoteArmExit != 0)
+            return m_remoteArmExit;   // an open-ended headless --remote run with no remote surface (MainLoop logged why)
+#endif
         return 0;
     }
 
@@ -3289,6 +3379,14 @@ namespace Arcane::Editor
                 exitReason = "compare-blessed";
             else if (compareWriteFailed)
                 exitReason = "compare-failed";
+#if !defined(ARC_BUILD_DIST)
+            // Servitor P0 (Task 16): the loop broke on a remote quit
+            // (host.quit) or the --remote-idle-exit timeout, latched where it
+            // broke (HostSession::DrainFrame) and kept by MainLoop. Mirrors
+            // RuntimeApp::ShutdownGraphPath's place for it.
+            else if (!m_remoteExitReason.empty())
+                exitReason = m_remoteExitReason;
+#endif
             else if (!completedAllFrames)
                 exitReason = "stopped-early";
 
@@ -3363,9 +3461,9 @@ namespace Arcane::Editor
             // (no --report), or one whose frames were all still in flight.
             // NEVER the coarse count under the GPU's name: see
             // VerifyReport::SetVisibility's own contract.
-            report.SetVisibility(m_gpuSceneFrame.stats.total, m_gpuSceneFrame.stats.coarseVisible,
-                                 m_gpuSceneFrame.stats.batches, m_gpuSceneFrame.stats.draws,
-                                 static_cast<std::uint32_t>(m_gpuSceneFrame.transparentDraws.size()),
+            report.SetVisibility(m_gpuSceneStats.stats.total, m_gpuSceneStats.stats.coarseVisible,
+                                 m_gpuSceneStats.stats.batches, m_gpuSceneStats.stats.draws,
+                                 m_gpuSceneStats.transparentDraws,
                                  gpuVisibleRows);
 
             // THE INJECTED MODULES (schemaVersion 10): the scan taken above
@@ -3561,6 +3659,15 @@ namespace Arcane::Editor
 
     void EditorApp::Shutdown()
     {
+#if !defined(ARC_BUILD_DIST)
+        // Servitor final fix round 4 (N3-3): --play-as arms the remote session
+        // inside StageFinalize, so a boot that exits before MainLoop (a splash
+        // close after finalize, a CreateGraphVehicles failure) reaches here with
+        // it live. Stop it first, as MainLoop's end does: parked calls answer
+        // host.died, the descriptor goes, the selection view is cleared. A
+        // no-op when MainLoop already stopped it.
+        (void)Arcane::Editor::StopEditorRemote(m_remote, "exit");
+#endif
         // Deregister both sinks FIRST, before anything below can dispatch into
         // a half-torn-down editor -- see ConsoleDiagnostics::Uninstall()'s doc
         // comment for the ordering rationale (diagnostics store, then console).

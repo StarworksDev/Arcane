@@ -23,6 +23,7 @@
 // create dialog is in-editor ImGui and returns its result synchronously.
 
 #include "App/EditorApp.hpp"
+#include <Arcane/IO/ReadRegularFile.hpp>
 #include "Settings/SettingsHost.hpp"
 #include "Documents/SpriteDocument.hpp"   // SpriteDocument::NewSpriteData (MintOrReuseSpriteForTexture)
 #include "Settings/AssetBrowserSettings.hpp"   // editor.assets.* polls + EditorOpenOptions (settings S6-38)
@@ -1466,22 +1467,7 @@ namespace Arcane::Editor
         // ReadWholeFile takes for extraction ("the cook will refuse it too").
         std::optional<std::vector<std::byte>> ReadWholeGltfSource(const std::filesystem::path& path)
         {
-            std::ifstream in(path, std::ios::binary);
-            if (!in)
-                return std::nullopt;
-            in.seekg(0, std::ios::end);
-            const std::streamoff len = in.tellg();
-            if (len < 0)
-                return std::nullopt;
-            in.seekg(0, std::ios::beg);
-            std::vector<std::byte> out(static_cast<std::size_t>(len));
-            if (!out.empty())
-            {
-                in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
-                if (!in)
-                    return std::nullopt;
-            }
-            return out;
+            return Arcane::ReadRegularFile(path);
         }
 
         // F2c Task 15 (spec s6) Step 6's never-reassign rule: only a slot whose
@@ -2214,7 +2200,11 @@ namespace Arcane::Editor
         if (m_resolver)
             m_resolver->Clear();
         m_consoleDiag.store.ClearAll();
-        ClearSceneReferences("Switched project");
+        // SwitchProject stops Play BEFORE this teardown (a Stop that fails refuses the
+        // switch with the session untouched), so Play is never running here and the
+        // clear cannot refuse.
+        if (!ClearSceneReferences("Switched project"))
+            ARC_ERROR("ResetPerProjectState: Play was still running at teardown; the scene references were NOT cleared");
         RetargetUndoCache(nullptr);   // the outgoing project's UndoCache, now that its steps are gone
         if (m_undo) m_scene.Reset(*m_undo);
         m_recents.scenes = {};
@@ -2471,6 +2461,20 @@ namespace Arcane::Editor
             Arcane::Editor::SettingsHostOnProjectSwitch(
                 Arcane::Editor::ProjectSwitchPreTeardown::StageTableMismatch);
             return;
+        }
+
+        // A live Play session is stopped BEFORE anything is torn down. Stop restores
+        // the pre-Play snapshot; when that fails the session stays in Play and the
+        // switch is refused with everything untouched, so the teardown below never
+        // runs over play-time state (ClearSceneReferences would refuse mid-teardown).
+        if (InPlayMode())
+        {
+            if (!m_play.Stop(m_runtime->Core(), m_plugin ? &*m_plugin : nullptr))
+            {
+                PushPlayStopFailedModal();
+                return;   // a refused switch leaves the settings host untouched, like the refusals above
+            }
+            AfterPlayFlip(true);   // the one flip rule (EditorApp.hpp)
         }
 
         // Settings arc S3-13: pending edits belong to the OUTGOING project's

@@ -107,6 +107,14 @@ namespace Arcane::Detail::Physics2D
         return (static_cast<std::uint64_t>(h.index) << 32) | h.generation;
     }
 
+    [[nodiscard]] constexpr Phys::BodyHandle UnpackBody(std::uint64_t packed) noexcept
+    {
+        Phys::BodyHandle h;
+        h.index      = static_cast<std::uint32_t>(packed >> 32);
+        h.generation = static_cast<std::uint32_t>(packed);
+        return h;
+    }
+
     [[nodiscard]] inline Phys::Shape MakeScaledShape(const Fixture2D& f, glm::vec2 scale)
     {
         const float sx   = std::abs(scale.x);

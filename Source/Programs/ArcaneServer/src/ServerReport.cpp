@@ -24,11 +24,13 @@ namespace Arcane::Server
 
         j["framesTicked"] = framesTicked;
         j["fixedDt"]      = fixedDt;
+        j["extractFrameCalls"] = extractFrameCalls;
 
         j["systems"] = { { "fixedUpdate",          fixedUpdate },
                           { "update",               update },
                           { "render",               render },
                           { "hasPhysics",            hasPhysics },
+                          { "hasPhysicsWorld",       hasPhysicsWorld },
                           { "hasPropagation",        hasPropagation },
                           { "hasRenderSubmission",   hasRenderSubmission } };
 

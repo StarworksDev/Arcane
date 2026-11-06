@@ -2,12 +2,16 @@
 
 #include <Arcane/Platform/Process.hpp>
 
+#include <Arcane/Core/Constant.hpp>
+
 #include <cstdlib>
 
 #if ARC_PLATFORM_WINDOWS
     #include <windows.h>
 #else
     #include <dlfcn.h>
+    #include <signal.h>     // kill(SIGKILL): TerminateProcess
+    #include <sys/types.h>
     #include <unistd.h>
     #include <climits>
     #include <cstdlib>
@@ -156,6 +160,95 @@ namespace Arcane::Platform
 #endif
     }
 #endif
+
+    bool IsProcessLive(std::uint32_t pid, std::uint64_t start)
+    {
+        // Pid 0 names no process a record could describe (on macOS
+        // proc_pidinfo answers for kernel_task there).
+        if (pid == 0)
+            return false;
+#if ARC_PLATFORM_WINDOWS
+        // The validation that defeats staleness, in THREE tells -- all of
+        // which must hold before the record is believed:
+        //   1. the pid still OPENS (a pid nobody holds is simply gone),
+        //   2. its creation time MATCHES what the record holds (a recycled
+        //      pid has a different birth; a crashed process has none), and
+        //   3. it has NOT exited -- zero exit time.
+        HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!h)
+        {
+            // Access denied means the pid names a RUNNING process this
+            // caller may not query (an elevated host seen from a normal
+            // user, a SYSTEM service). Its start time cannot be compared,
+            // so it counts as live: a record of a live process must never
+            // read as dead (a dead read lets a caller delete it). Every
+            // other failure (no such pid) is not live.
+            return ::GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const bool ok = ::GetProcessTimes(h, &created, &exited, &kernel, &user);
+        ::CloseHandle(h);
+        if (!ok)
+            return false;
+        const std::uint64_t created64 = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) |
+                                        created.dwLowDateTime;
+        if (start != 0 && start != created64)
+            return false;
+        // Tell 3, and why tells 1+2 alone were not enough (2026-09-08 desk
+        // pass): a process OBJECT outlives its process for as long as any
+        // handle to it survives, and the pid is reserved that whole time.
+        // A parent holding a dead editor's handle -- the Hub does exactly
+        // this -- kept OpenProcess succeeding with the ORIGINAL creation
+        // time intact, so the project read as "already open" forever. Exit
+        // time is the tell that cannot be faked by a lingering handle:
+        // nonzero means it exited, however many handles remain.
+        if (exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0)
+            return false;
+        return true;
+#else
+        // The same three tells via the OS process table (QueryProcess): the
+        // pid still has a stat entry, its start time matches, and it is not
+        // a zombie -- the POSIX twin of Windows' lingering process OBJECT.
+        const ProcessStat st = QueryProcess(pid);
+        if (!st.found)
+            return false;
+        if (start != 0 && start != st.start)
+            return false;
+        if (st.exited)
+            return false;
+        return true;
+#endif
+    }
+
+    bool TerminateProcess(std::uint32_t pid, std::uint64_t start)
+    {
+        if (pid == 0 || start == 0)
+            return false;   // no stamp to check: never kill on a bare pid
+#if ARC_PLATFORM_WINDOWS
+        ARC_CONSTANT("the exit code a forced kill leaves, SIGKILL's number, so a log reads it as a kill")
+        constexpr UINT kForcedExitCode = 9;
+        HANDLE h = ::OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!h)
+            return false;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        bool killed = false;
+        if (::GetProcessTimes(h, &created, &exited, &kernel, &user))
+        {
+            const std::uint64_t created64 = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) |
+                                            created.dwLowDateTime;
+            const bool hasExited = exited.dwHighDateTime != 0 || exited.dwLowDateTime != 0;
+            if (created64 == start && !hasExited)
+                killed = ::TerminateProcess(h, kForcedExitCode) != FALSE;
+        }
+        ::CloseHandle(h);
+        return killed;
+#else
+        const ProcessStat st = QueryProcess(pid);
+        if (!st.found || st.exited || st.start != start)
+            return false;
+        return ::kill(static_cast<pid_t>(pid), SIGKILL) == 0;
+#endif
+    }
 
 #if ARC_PLATFORM_MACOS
     ImageExtent MachImageExtent(const void* machHeader, std::intptr_t slide) noexcept

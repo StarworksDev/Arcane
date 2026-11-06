@@ -3,8 +3,8 @@ change them in the Manifold2D repo and re-run scripts\sync-vendor.ps1, or the ne
 sync silently reverts your edit.
 
 source  : D:\dev\starworks\Manifold2D
-commit  : 8b7c9a34069cf9120f4511b9aaf50f920e613cb8
-branch  : main
-subject : docs(license): copyright to Ethan Temprovich (Starworks); contributions sign off under the DCO (MIT unchanged)
-synced  : 2026-10-10 10:48:53
+commit  : 15ca24cb760703e9561eef236df7cd57c197abcd
+branch  : detached
+subject : Merge pull request #4 from StarworksDev/chore/mosaic-result
+synced  : 2026-10-13 17:04:44
 scope   : include/ + src/ + LICENSE (premake5.lua is the consumer wrapper and is never synced)

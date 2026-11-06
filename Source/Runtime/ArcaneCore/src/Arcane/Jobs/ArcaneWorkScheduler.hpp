@@ -22,6 +22,7 @@
 
 #include <Mosaic/Jobs/WorkScheduler.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -36,29 +37,31 @@ namespace Arcane
 
         // Re-point the backing executor (persistent-adapter pattern: one adapter
         // instance outlives many freshly-minted physics worlds).
-        void SetExecutor(Arcane::ITaskExecutor* exec) noexcept { m_exec = exec; }
+        void SetExecutor(Arcane::ITaskExecutor* exec) noexcept { m_exec.store(exec, std::memory_order_release); }
 
         void ParallelFor(std::size_t count, std::size_t minBatch,
                          Mosaic::FunctionRef<void(std::size_t, std::size_t,
                                                   std::uint32_t)> fn) override
         {
-            if (m_exec == nullptr)
+            Arcane::ITaskExecutor* const exec = m_exec.load(std::memory_order_acquire);
+            if (exec == nullptr)
             {
                 // Serial fallback == Mosaic::SerialWorkScheduler: run the whole
                 // range inline as worker 0. count==0 is a no-op.
                 if (count != 0) fn(0, count, 0);
                 return;
             }
-            m_exec->ParallelFor(count, minBatch,
+            exec->ParallelFor(count, minBatch,
                 [&](std::size_t b, std::size_t e, std::uint32_t w) { fn(b, e, w); });
         }
 
         std::uint32_t WorkerCount() const noexcept override
         {
-            return m_exec ? m_exec->WorkerCount() : 1u;
+            Arcane::ITaskExecutor* const exec = m_exec.load(std::memory_order_acquire);
+            return exec ? exec->WorkerCount() : 1u;
         }
 
     private:
-        Arcane::ITaskExecutor* m_exec = nullptr;
+        std::atomic<Arcane::ITaskExecutor*> m_exec{nullptr};
     };
 }

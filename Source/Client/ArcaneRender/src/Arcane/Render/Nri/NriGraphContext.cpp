@@ -9,6 +9,7 @@
 // #defines ERROR via wingdi.h.
 #include <NRI.h>
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/IO/ReadRegularFile.hpp>
 #include <Extensions/NRISwapChain.h>
 
 #include "NriGraphContext.hpp"
@@ -26,10 +27,13 @@
 #include <Arcane/Render/GpuInstrumentation.hpp>       // GpuDeviceLostObserved -- the device-lost teardown gate
 #include <Arcane/Render/ShaderPaths.hpp>            // ShaderPaths::ResolveFlavorDir
 #include <Arcane/Render/FramePacing.hpp>              // FramesInFlight(), LatchFramesInFlight()
+#include <Arcane/Assets/ImageIo.hpp>                 // NormalizeCaptureRows -- the one capture normalization
 
 #include <SDL3/SDL_timer.h>                         // SDL_DelayNS -- the offscreen pacing wait's sleep
 
 #undef ERROR
+
+#include <Arcane/Render/RenderFramePacket.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -65,6 +69,16 @@ namespace Arcane
         {
             RenderErrorLatch::Instance().NoteError("nri-graph", text.c_str());
         }
+
+        // BindPacket's pointer lives for exactly one RenderFrame /
+        // RenderFrameOffscreen call: this resets it on every return path of
+        // the function that declares it, so a later frame -- one whose host
+        // bound nothing -- can never draw a stale packet.
+        struct PacketBindingReset
+        {
+            const RenderFramePacket*& packet;
+            ~PacketBindingReset() { packet = nullptr; }
+        };
 
         // Where the offline shader artifacts live, relative to the
         // executable. Resolved through ShaderPaths::ResolveFlavorDir, so a
@@ -470,6 +484,10 @@ namespace Arcane
         m_grid = GridNode::Create(*this);
         if (!m_grid)
             return false;   // already logged
+        // The post-tonemap overlay pass (F5 plan 1 T3), eagerly -- see Overlay().
+        m_overlay = OverlayNode::Create(*this);
+        if (!m_overlay)
+            return false;   // already logged
         m_post = PostChainNode::Create(*this);
         if (!m_post)
             return false;   // already logged
@@ -630,16 +648,15 @@ namespace Arcane
             return std::span<const std::uint8_t>(cached->second);
 
         const std::filesystem::path path = m_shaderDir / (std::string(name) + ".bin");
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
+        const auto raw = Arcane::ReadRegularFile(path);
+        if (!raw)
         {
             ARC_ERROR("[nri-graph] shader artifact missing/unreadable: {}", path.string());
             return {};
         }
-        const std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
-        std::vector<std::uint8_t> bytes(size > 0 ? (std::size_t)size : 0);
-        if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), size))
+        const auto* first = reinterpret_cast<const std::uint8_t*>(raw->data());
+        std::vector<std::uint8_t> bytes(first, first + raw->size());
+        if (bytes.empty())
         {
             ARC_ERROR("[nri-graph] shader artifact could not be read: {}", path.string());
             return {};
@@ -808,6 +825,12 @@ namespace Arcane
             graves.Bury(fence, [graveCore, b = m_capture] { graveCore->DestroyBuffer(b); });
             m_capture = nullptr;
         }
+#if !defined(ARC_BUILD_DIST)
+        // The Servitor capture ring's staging buffer, at the same fence. No
+        // retire: the device may be lost here, and a capture still waiting on
+        // this context is answered capture.no-frame by its host hook.
+        ReleaseTicketRing(graves, fence, false);
+#endif
 
         // The nodes' own objects go out at the same fence, and BEFORE the
         // graph releases its transient pool below -- the tonemap's source view
@@ -828,6 +851,8 @@ namespace Arcane
             m_tonemap->Release(graves, fence);
         if (m_post)
             m_post->Release(graves, fence);
+        if (m_overlay)
+            m_overlay->Release(graves, fence);
         if (m_grid)
             m_grid->Release(graves, fence);
         if (m_meshCull)
@@ -1018,6 +1043,12 @@ namespace Arcane
             m_capture = nullptr;
         }
         m_captureRecorded = false;
+#if !defined(ARC_BUILD_DIST)
+        // The capture ring's buffer is extent-sized too. The idle above means
+        // a pending slot's copy has landed, so it is retired (kept for its
+        // ticket) before the buffer goes: a resize mid-capture still answers.
+        ReleaseTicketRing(graves, m_graph ? m_graph->DebugSubmitCount() : 0, true);
+#endif
 
         // Both fullscreen nodes hold SHADER_RESOURCE views over pool textures
         // -- the tonemap over whatever it samples, the chain over the canvas
@@ -1132,6 +1163,9 @@ namespace Arcane
             m_capture = nullptr;
         }
         m_captureRecorded = false;
+#if !defined(ARC_BUILD_DIST)
+        ReleaseTicketRing(graves, fence, true);   // see Resize(): idled above, so pending copies retire
+#endif
 
         if (m_tonemap)
             m_tonemap->InvalidateSource(graves, fence);
@@ -1238,39 +1272,34 @@ namespace Arcane
                                       NriGraphContext* context)
     {
         // ---------------------------------------------------------------
-        // THE CLEAR SEAM (Task 7's decision; Task 8 is its first real user).
+        // THE CLEAR IS DECLARATIVE (F5 plan 1, Task 2; it replaced Task 7's
+        // clear-in-the-exec-fn seam). A node that wants a cleared attachment
+        // declares a load op beside the attachment
+        // (RenderGraph::SetColorAttachmentOps / SetDepthAttachmentOp) and the
+        // executor lowers it to nri::LoadOp::CLEAR at CmdBeginRendering. An
+        // attachment with no declared op LOADs; the store op is always STORE.
+        //   - batch2d (and, on a chrome frame, letterbox) CLEARs the canvas to
+        //     render.clearColor. The canvas is a TRANSIENT whose pool slot the
+        //     graph hands over with a contents-discarding barrier, so its
+        //     LOADed contents would be undefined.
+        //   - mesh LOADs the canvas (it carries batch2d's content) and CLEARs
+        //     its fresh depth transient to DepthClearValue(
+        //     kSelectedDepthConvention).
+        //   - The BACKBUFFER needs no clear: the tonemap covers it with a
+        //     fullscreen triangle, and neither does a POST-CHAIN target, for
+        //     the same reason.
+        //   - Pick keeps its own exec-fn clear (PickOutlineNodes.cpp).
         //
-        // Task 6's executor begins every raster pass with `nri::AttachmentDesc
-        // = {}`, i.e. LoadOp::LOAD + StoreOp::STORE, and the graph's
-        // declaration API carries no clear ops at all. So a node that wants a
-        // cleared attachment has exactly two options: CmdClearAttachments
-        // inside its own exec fn, or a new declarative clear-op on the
-        // attachment declaration.
-        //
-        // THIS TAKES THE FIRST, on purpose:
-        //   - It changes NO frozen API mid-phase. RgExecuteDesc,
-        //     RenderGraphNodeContext and the attachment setters are contracts
-        //     Tasks 8-12 are already written against; a declarative clear op
-        //     is a real design (per-attachment load op + clear value, its
-        //     interaction with the swapchain's fixed discarding entry state,
-        //     depth/stencil planes, and the compile-time validation that a
-        //     CLEAR attachment is also declared as a Write) and deserves its
-        //     own task rather than a rushed corner of this one.
-        //   - It is correct here. The canvas is a TRANSIENT whose pool slot
-        //     the graph hands over with a contents-discarding barrier, so its
-        //     LOADed contents are undefined -- and Batch2DNode::Record clears
-        //     it in full before drawing. The BACKBUFFER needs no clear at all:
-        //     the tonemap covers it with a fullscreen triangle, and neither
-        //     does a POST-CHAIN target, for the same reason (an opaque
-        //     fullscreen pass writes every pixel of it).
-        //   - It costs nothing measurable at Phase 2's scale: one full-target
-        //     clear per frame on an immediate-mode desktop GPU is what
-        //     LoadOp::CLEAR lowers to anyway.
-        // WHEN TO REVISIT: tile-based hardware (where LoadOp::CLEAR genuinely
-        // avoids a tile read) or a node that needs a partial/multi-attachment
-        // clear pattern CmdClearAttachments makes awkward. Both are a Phase
-        // 4+ concern, and both want the declarative version -- so this is a
-        // deferral, not a rejection.
+        // WORLD vs CHROME. A world frame (shape.world, the default) declares
+        // the empty D1 slots "gbuffer" and "lighting" ahead of batch2d and
+        // "taa" just before the tonemap: compute nodes with no access and no
+        // attachment, so Compile gives them no barrier and no pool slot. They
+        // are not literally free on the command buffer: the executor wraps
+        // every node in its NodeScope, so each records one empty
+        // begin/end annotation pair (and a breadcrumb scope while a crash
+        // backend is armed) -- three empty scopes in a PIX/RenderDoc capture,
+        // no draw, dispatch or barrier. A chrome frame (world == false) declares none of the world nodes --
+        // only "letterbox", which clears the canvas the tonemap samples.
         //
         // RING FOOTGUN, for whoever adds the next node here: the vehicle calls
         // ring.BeginFrame(slot) AFTER this function returns, so an allocation
@@ -1280,7 +1309,33 @@ namespace Arcane
         // ---------------------------------------------------------------
         RgFrameHandles handles;
 
-        handles.canvas = AddBatch2DNode(graph, context, shape.canvasWidth, shape.canvasHeight);
+        const auto addEmpty = [&](const char* name) {
+            graph.AddNode(name, RenderGraph::NodeKind::Compute,
+                [](RenderGraphBuilder&) {},
+                [](RenderGraphNodeContext&) {});
+        };
+
+        if (shape.world)
+        {
+            addEmpty("gbuffer");
+            addEmpty("lighting");
+            handles.canvas = AddBatch2DNode(graph, context, shape.canvasWidth, shape.canvasHeight);
+        }
+        else
+        {
+            // THE CHROME LETTERBOX: AddBatch2DNode's setup minus the batch --
+            // the SAME DeclareClearedCanvas call, so chrome and world can never
+            // disagree on the canvas. The canvas is still minted (the tonemap
+            // samples it) and cleared by its load op; the exec records nothing.
+            // The attachment is required anyway: Compile refuses a Raster node
+            // with no attachment.
+            graph.AddNode("letterbox", RenderGraph::NodeKind::Raster,
+                [&](RenderGraphBuilder& builder)
+                {
+                    handles.canvas = DeclareClearedCanvas(graph, builder, shape.canvasWidth, shape.canvasHeight);
+                },
+                [](RenderGraphNodeContext&) {});
+        }
 
         // ---------------------------------------------------------------
         // THE MESH PASS (Task 4 declared its depth target; Task 7 is the pass
@@ -1292,8 +1347,8 @@ namespace Arcane
         //
         // POSITIONED AFTER batch2d, BEFORE the post chain and the tonemap.
         // After batch2d because the canvas is MINTED AND CLEARED there and this
-        // pass draws on top of it (MeshNode::Record clears the DEPTH plane and
-        // deliberately not the colour one); before the tonemap because the
+        // pass draws on top of it (its colour load op LOADs; only its depth
+        // load op CLEARs); before the tonemap because the
         // canvas is linear and the mesh pass writes linear colour.
         //
         // GATED ON A NON-EMPTY SCENE, and an empty span reads exactly like a
@@ -1304,9 +1359,9 @@ namespace Arcane
         // Since F3 plan 1 T6 "non-empty" is MeshSceneDesc::Empty(): ad-hoc
         // instances OR a registry-backed scene with draws OR (T7, ruling R-D)
         // a registry-backed scene with STAGED rows and nothing emitted --
-        // the upload still has to happen; the mesh node records only its
-        // depth clear then.
-        const bool wantsMesh = shape.mesh != nullptr && !shape.mesh->Empty();
+        // the upload still has to happen; the mesh node's pass then only
+        // clears depth through its load op.
+        const bool wantsMesh = shape.world && shape.mesh != nullptr && !shape.mesh->Empty();
         if (wantsMesh)
         {
             // GraphCanvasFormat() is passed EXPLICITLY because it is the format
@@ -1355,7 +1410,7 @@ namespace Arcane
         // transient no node touches has no lifetime and no pool slot",
         // RenderGraph.hpp), so RealizePool never allocates it.
         // ---------------------------------------------------------------
-        else if (shape.depth)
+        else if (shape.world && shape.depth)
         {
             graph.AddNode("depth", RenderGraph::NodeKind::Compute,
                 [&handles, &shape](RenderGraphBuilder& builder)
@@ -1370,37 +1425,9 @@ namespace Arcane
                 [](RenderGraphNodeContext&) {});
         }
 
-        // ---------------------------------------------------------------
-        // THE 3D REFERENCE GRID (F4 plan 1 Task 10, spec s5.2). Declared
-        // AFTER both branches above -- after the mesh pass, before the post
-        // chain and the tonemap -- so it blends over the opaque geometry and
-        // is DEPTH-TESTED against the depth transient AddMeshNode returned
-        // (never writing it: GridNode's PSO has depth.write = false; the
-        // graph-level DepthWrite is just the barrier state of a bound depth
-        // attachment). A frame with no mesh pass hands it an INVALID handle
-        // and the grid draws unoccluded with no depth attachment at all. The
-        // Task 4 placeholder's depth (the `else` above) is deliberately NOT
-        // handed over: that resource is pinned as declared-and-unconsumed,
-        // and a grid attached to it would test against undefined contents.
-        //
-        // THE SPEC S14 LIFETIME RISK, SETTLED AS A DECLARATION FACT: the grid
-        // reads the depth transient MeshNode minted, which must therefore
-        // outlive MeshNode's record. It does, with NO ownership move and NO
-        // MeshNode change: RenderGraph::Compile derives every transient's
-        // pool tenancy as [first toucher, LAST toucher] (RgCompiled::
-        // Lifetime), so AddGridNode's Write(depth, DepthWrite) alone carries
-        // the depth's life through the grid node. RenderGraphTest.cpp's
-        // (T10F4) case pins that lifetime -- mesh first, grid last.
-        //
-        // GATED ON THE DESC ALONE, like `mesh`: null declares nothing, and a
-        // frame that never sets it is byte for byte the pre-T10 frame.
-        // ---------------------------------------------------------------
-        if (shape.grid)
-        {
-            AddGridNode(graph, context, handles.canvas, GraphCanvasFormat(),
-                        wantsMesh ? handles.depth : RgTexture{}, *shape.grid,
-                        shape.canvasWidth, shape.canvasHeight);
-        }
+        // THE 3D REFERENCE GRID is no longer a canvas node here (F5 plan 1
+        // Task 3): it is drawn after the tonemap by the overlay pass below,
+        // which SAMPLES the mesh depth instead of attaching it.
 
         // ---------------------------------------------------------------
         // THE POST CHAIN (Task 10). One node per chain pass, between the
@@ -1416,7 +1443,7 @@ namespace Arcane
         // works the same way, off FrameDesc::imgui.
         // ---------------------------------------------------------------
         RgTexture sceneColor = handles.canvas;
-        if (shape.post && !shape.post->passes.empty())
+        if (shape.world && shape.post && !shape.post->passes.empty())
         {
             // With a context the NODE decides: PrepareChain builds the
             // pipelines, the descriptor sets and the packed constants, and
@@ -1443,12 +1470,90 @@ namespace Arcane
             }
         }
 
+        // The empty TAA slot (D1), last of the world nodes, just ahead of the
+        // tonemap. A chrome frame has no world and no TAA.
+        if (shape.world)
+            addEmpty("taa");
+
         // The frame's FINAL TARGET: the acquired backbuffer, or -- when the
         // shape carries one -- the vehicle's persistent offscreen output
         // (Task 7). Everything below writes `handles.backbuffer` and neither
         // knows nor cares which it got, which is what keeps the two modes one
         // frame shape rather than two.
         handles.backbuffer = AddTonemapNode(graph, context, sceneColor, shape.offscreenOutput);
+
+        // ---------------------------------------------------------------
+        // THE POST-TONEMAP OVERLAY PASS (F5 plan 1 Task 3, spec s3.3),
+        // declared right AFTER the tonemap and BEFORE the game HUD: the 3D
+        // grid, then depth-tested lines and fills (the 2D grid), then
+        // always-on-top ones (physics debug, the camera rect, the gizmo),
+        // each class in submission order, blended
+        // straight-alpha onto the DISPLAY-REFERRED target -- so the post
+        // chain never grades them. Linear colours run the tonemap operator in
+        // overlay.hlsl; display-referred ones are written as given.
+        //
+        // DEPTH IS SAMPLED, NOT ATTACHED: with a mesh pass the node Reads that
+        // pass's depth transient as ShaderRead (its lifetime then runs mesh ->
+        // overlay); with none it Reads no depth at all -- in particular NOT the
+        // placeholder `depth` node above, which stays declared-and-unconsumed.
+        //
+        // GATED ON CONTENT: a frame with no grid and an empty (or null) list
+        // declares nothing, so the runtime's frame is unchanged.
+        // ---------------------------------------------------------------
+        // A bound packet owns the overlay. FrameDesc's list, grid and world
+        // camera are the packet-less path (tests and any caller that does
+        // not extract).
+        const RenderFramePacket* packet = context ? context->Packet() : nullptr;
+        bool wantOverlay = false;
+        const OverlayPrimitiveList* overlayList = nullptr;
+        const GridSceneDesc* overlayGrid = nullptr;
+        const glm::mat4* worldVp = nullptr;
+        const glm::mat4* meshVp = nullptr;
+        glm::mat4 packetWorldVp{ 1.0f };
+        glm::mat4 packetMeshVp{ 1.0f };
+        glm::mat4 shapeMeshVp{ 1.0f };
+        if (packet)
+        {
+            wantOverlay = !packet->overlay.prims.empty() || packet->overlay.hasGrid3d;
+            overlayList = &packet->overlay;
+            overlayGrid = packet->overlay.hasGrid3d ? &packet->overlay.grid3d : nullptr;
+            packetWorldVp = packet->spriteView
+                ? packet->spriteView->view.ViewProjection()
+                : packet->viewProjection;
+            worldVp = &packetWorldVp;
+            if (packet->meshView)
+            {
+                packetMeshVp = packet->meshView->ViewProjection();
+                meshVp = &packetMeshVp;
+            }
+            else
+            {
+                // No mesh view: a null mesh VP cannot compare equal, so
+                // world-space primitives are not depth-tested.
+                meshVp = nullptr;
+            }
+        }
+        else
+        {
+            wantOverlay = (shape.grid != nullptr) ||
+                (shape.overlay != nullptr &&
+                 (!shape.overlay->prims.empty() || shape.overlay->hasGrid3d));
+            overlayList = shape.overlay;
+            overlayGrid = shape.grid;
+            worldVp = shape.overlayWorldViewProjection;
+            if (wantsMesh)
+            {
+                shapeMeshVp = shape.mesh->projection * shape.mesh->view;
+                meshVp = &shapeMeshVp;
+            }
+        }
+        if (shape.world && wantOverlay)
+        {
+            AddOverlayNode(graph, context, handles.backbuffer,
+                           wantsMesh ? handles.depth : RgTexture{},
+                           overlayGrid, overlayList, shape.canvasWidth, shape.canvasHeight,
+                           worldVp, meshVp);
+        }
 
         // ---------------------------------------------------------------
         // THE GAME HUD (Task 9), declared BETWEEN the tonemap and the
@@ -1528,6 +1633,42 @@ namespace Arcane
         if (shape.imgui)
             if (auto addNode = GetRenderOverlayHooks().addNode)
                 addNode(graph, context, handles.backbuffer, false);
+
+#if !defined(ARC_BUILD_DIST)
+        // The Servitor capture ring's copy node (Task 27): the backbuffer, after
+        // every node that writes it, into this frame's slot of the ring's
+        // HOST_READBACK buffer. Declared beside (before) the --screenshot
+        // `capture` node; both only READ the backbuffer, so their order is
+        // free. The exec fn drains first and records second
+        // (NriGraphContext::NoteRenderSubmission), the PickNode rule.
+        if (shape.ticketCapture && shape.ticketCaptureBuffer)
+        {
+            auto ringHandle = std::make_shared<RgBuffer>();
+            const RgTexture ringSource = handles.backbuffer;
+            graph.AddNode("ticket-capture", RenderGraph::NodeKind::Copy,
+                [shape, ringSource, ringHandle](RenderGraphBuilder& builder)
+                {
+                    *ringHandle = builder.ImportBuffer("ticket-capture", shape.ticketCaptureBuffer,
+                                                        shape.ticketCaptureBytes);
+                    builder.Read(ringSource, RgUsage::CopySrc);
+                    builder.Write(*ringHandle, RgUsage::ReadbackHost);
+                },
+                [context, ringSource, ringHandle](RenderGraphNodeContext& ctx)
+                {
+                    if (!context)
+                        return;   // device-less declaration-shape drive
+                    nri::Texture* source = ctx.Resolve(ringSource);
+                    nri::Buffer*  dest   = ctx.Resolve(*ringHandle);
+                    if (!source || !dest)
+                    {
+                        GraphError("NriGraphContext: the ticket-capture node could not resolve its "
+                                   "backbuffer or the capture ring's buffer");
+                        return;
+                    }
+                    context->NoteRenderSubmission(ctx.core, ctx.cmd, *source, *dest);
+                });
+        }
+#endif
 
         if (!shape.capture)
             return handles;
@@ -1631,6 +1772,7 @@ namespace Arcane
         if (m_post)     m_post->SyncPoolEpoch(*m_graph);
         if (m_tonemap)  m_tonemap->SyncPoolEpoch(*m_graph);
         if (m_outline)  m_outline->SyncPoolEpoch(*m_graph);
+        if (m_overlay)  m_overlay->SyncPoolEpoch(*m_graph);
 
         // Thin on purpose: the frame's SHAPE lives in DeclareGraphFrame so the
         // device-less [nri] frame-shape cases drive the real declarations instead
@@ -1640,10 +1782,36 @@ namespace Arcane
         // that would go stale on the next Reset().
         RgFrameShape shape;
         shape.capture       = frame.capture;
+        // World or host-chrome frame (F5 plan 1, Task 2). Default true, so every
+        // caller stays a world frame until it opts out.
+        shape.world         = frame.world;
+        // A chrome frame declares no world node, so world inputs on it are
+        // dropped -- and a `batch` is never drained. Nothing sets them today
+        // (PresentChromeFrame passes only `imgui`); say so loudly, once, if a
+        // future caller does.
+        if (!frame.world && (frame.batch != nullptr || frame.mesh != nullptr
+                             || frame.grid != nullptr || frame.post != nullptr
+                             || frame.overlay != nullptr))
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                ARC_WARN("[nri-graph] a world=false (chrome) frame carries world inputs "
+                         "(batch/mesh/grid/post/overlay); they are ignored and the batch is not drained");
+            }
+        }
         shape.canvasWidth   = SurfaceWidth();
         shape.canvasHeight  = SurfaceHeight();
         shape.captureBuffer = m_capture;
         shape.captureBytes  = m_captureSlicePitch;
+#if !defined(ARC_BUILD_DIST)
+        // The Servitor capture ring (Task 27): declared only while a copy is
+        // wanted or pending, so a frame with no remote capture keeps its shape.
+        shape.ticketCapture       = PrepareTicketCapture();
+        shape.ticketCaptureBuffer = m_ringBuffer;
+        shape.ticketCaptureBytes  = m_ringSlicePitch * kMaxFramesInFlight;
+#endif
         shape.post          = frame.post;
         // The mesh pass (Task 7). Belt-and-braces the same way
         // `pickOutline` and the two HUDs are: a scene for THIS frame and a node
@@ -1652,7 +1820,11 @@ namespace Arcane
         // declaring a node that does not exist.
         shape.mesh          = m_mesh ? frame.mesh : nullptr;
         // The 3D reference grid (F4 plan 1 T10), belt-and-braces the same way.
-        shape.grid          = m_grid ? frame.grid : nullptr;
+        shape.grid          = m_overlay ? frame.grid : nullptr;
+        // The post-tonemap overlay (F5 plan 1 T3), against ITS node the same way.
+        shape.overlay       = m_overlay ? frame.overlay : nullptr;
+        shape.overlayWorldViewProjection =
+            frame.overlayWorldViewProjection ? &*frame.overlayWorldViewProjection : nullptr;
         // THE ONE LINE THAT MAKES A FRAME OFFSCREEN (Task 7). Null in
         // host-window mode, so the tonemap imports the swapchain exactly as it
         // always has; the vehicle's output texture otherwise. Nothing else in
@@ -1693,6 +1865,8 @@ namespace Arcane
 
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrame(const FrameDesc& frame)
     {
+        const PacketBindingReset packetReset{ m_packet };
+
         // HOST-WINDOW ONLY. An offscreen context has no swapchain, so every
         // line below would dereference null; the twin is RenderFrameOffscreen.
         if (m_mode == Mode::Offscreen)
@@ -1840,6 +2014,9 @@ namespace Arcane
         // until here.
         if (m_scene)
             m_scene->FlushGraves(m_graves);
+#if !defined(ARC_BUILD_DIST)
+        ConfirmCaptureRingSubmission(m_captureRing, m_frameIndex);   // this frame's ring copy was submitted
+#endif
         ++m_frameIndex;
 
         // THE GPU-PROGRESS HEARTBEAT, after the frame's present and
@@ -1860,6 +2037,8 @@ namespace Arcane
 
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrameOffscreen(const FrameDesc& frame)
     {
+        const PacketBindingReset packetReset{ m_packet };
+
         if (m_mode != Mode::Offscreen)
         {
             GraphError("NriGraphContext: RenderFrameOffscreen() on a HOST-WINDOW context -- call "
@@ -1991,6 +2170,9 @@ namespace Arcane
                                          m_graph ? m_graph->DebugSubmitCount() : 0);
         if (m_scene)
             m_scene->FlushGraves(m_graves);   // same contract as RenderFrame() above
+#if !defined(ARC_BUILD_DIST)
+        ConfirmCaptureRingSubmission(m_captureRing, m_frameIndex);   // this frame's ring copy was submitted
+#endif
         ++m_frameIndex;
 
         // THE GPU-PROGRESS HEARTBEAT, published ONLY when the caller has said
@@ -2111,29 +2293,230 @@ namespace Arcane
         // Tight RGBA8 out, whatever came in: the row pitch is dropped and
         // BGRA is swizzled. NRI cannot be told which channel order to
         // resolve, so the normalization has to happen HERE -- and then a
-        // capture's bytes mean the same thing on every backend.
-        const bool swizzle = IsBgraFormat(m_format);
-        rgba.resize(static_cast<std::size_t>(m_captureWidth) * m_captureHeight * 4);
-        for (std::uint32_t y = 0; y < m_captureHeight; ++y)
-        {
-            const std::uint8_t* src = mapped + static_cast<std::size_t>(y * m_captureRowPitch);
-            unsigned char* dst = rgba.data() + static_cast<std::size_t>(y) * m_captureWidth * 4;
-            std::memcpy(dst, src, static_cast<std::size_t>(m_captureWidth) * 4);
-            if (swizzle)
-            {
-                for (std::uint32_t x = 0; x < m_captureWidth; ++x)
-                {
-                    unsigned char* p = dst + static_cast<std::size_t>(x) * 4;
-                    const unsigned char b = p[0];
-                    p[0] = p[2];
-                    p[2] = b;
-                }
-            }
-        }
+        // capture's bytes mean the same thing on every backend. The one copy
+        // of that loop is NormalizeCaptureRows (ImageIo.hpp), which the
+        // Servitor capture job shares.
+        NormalizeCaptureRows(mapped, m_captureWidth, m_captureHeight,
+                             static_cast<std::uint32_t>(m_captureRowPitch),
+                             IsBgraFormat(m_format), rgba);
         core.UnmapBuffer(*m_capture);
 
         width  = m_captureWidth;
         height = m_captureHeight;
         return true;
     }
+
+#if !defined(ARC_BUILD_DIST)
+    // =====================================================================
+    // THE SERVITOR CAPTURE RING (Task 27). See CaptureRing in the header.
+    // Main thread throughout: Arm/Drain run inside the host's remote Drain,
+    // PrepareTicketCapture inside BuildFrame, NoteRenderSubmission inside
+    // Execute's record pass.
+    // =====================================================================
+    bool NriGraphContext::ArmTicketCapture(std::uint64_t ticket)
+    {
+        if (ticket == 0 || !m_device)
+            return false;
+        CaptureRing& ring = m_captureRing;
+        ring.framesInFlight = FramesInFlight();
+        ring.wanted         = ticket;
+        // One capture in flight per host (CaptureInFlight in ArcaneRemote), so
+        // the previous capture's bytes have been consumed by now.
+        ring.haveRetired   = false;
+        ring.retiredTicket = 0;
+        ring.retiredBytes.clear();
+        ring.retiredBytes.shrink_to_fit();
+        return true;
+    }
+
+    void NriGraphContext::CancelTicketCapture(std::uint64_t ticket)
+    {
+        CancelCaptureRingTicket(m_captureRing, ticket);
+    }
+
+    bool NriGraphContext::DrainTicketCapture(std::uint64_t ticket, TicketCaptureBytes& out) const
+    {
+        out = {};
+        if (ticket == 0)
+            return false;
+        if (m_lostTicket == ticket)
+            return true;   // the copy never happened or was dropped: a true drain with a null map
+        const CaptureRing& ring = m_captureRing;
+        if (!ring.haveRetired || ring.retiredTicket != ticket)
+            return false;
+        out.width       = ring.retiredW;
+        out.height      = ring.retiredH;
+        out.rowPitch    = ring.retiredPitch;
+        out.bgra        = ring.retiredBgra;
+        out.mapped      = ring.retiredBytes.empty() ? nullptr : ring.retiredBytes.data();
+        out.mappedBytes = static_cast<std::uint32_t>(ring.retiredBytes.size());
+        return true;
+    }
+
+    bool NriGraphContext::PrepareTicketCapture()
+    {
+        CaptureRing& ring = m_captureRing;
+        bool anyPending = false;
+        for (std::uint32_t i = 0; i < kMaxFramesInFlight; ++i)
+            anyPending = anyPending || ring.pending[i];
+        if (ring.wanted == 0)
+            return anyPending && m_ringBuffer != nullptr;
+
+        const std::uint32_t width  = SurfaceWidth();
+        const std::uint32_t height = SurfaceHeight();
+        const bool sized = m_ringBuffer && m_ringWidth == width && m_ringHeight == height;
+        if (sized || anyPending)
+            return m_ringBuffer != nullptr;   // a pending slot keeps the old buffer; the wanted copy waits
+
+        const nri::CoreInterface& core = m_device->Core();
+        ReleaseTicketRing(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0, false);
+
+        // The --screenshot buffer's alignment rules (EnsureCaptureBuffer),
+        // one aligned slice per frame slot.
+        const nri::DeviceDesc& deviceDesc = core.GetDeviceDesc(m_device->Device());
+        const std::uint64_t rowPitch   = AlignUp(std::uint64_t(width) * 4,
+                                                 deviceDesc.memoryAlignment.uploadBufferTextureRow);
+        const std::uint64_t slicePitch = AlignUp(rowPitch * height,
+                                                 deviceDesc.memoryAlignment.uploadBufferTextureSlice);
+        nri::BufferDesc bufferDesc = {};
+        bufferDesc.size  = slicePitch * kMaxFramesInFlight;
+        bufferDesc.usage = nri::BufferUsageBits::NONE;   // copy destination only
+        nri::Buffer* buffer = nullptr;
+        const void* cpu = nullptr;
+        if (width != 0 && height != 0
+            && ARC_NRI_CHECK(core.CreateCommittedBuffer(m_device->Device(), nri::MemoryLocation::HOST_READBACK,
+                                                         0.0f, bufferDesc, buffer))
+            && buffer)
+        {
+            core.SetDebugName(buffer, "nri-graph ticket capture");
+            cpu = core.MapBuffer(*buffer, 0, nri::WHOLE_SIZE);
+        }
+        if (!buffer || !cpu)
+        {
+            ARC_ERROR("[nri-graph] the capture ring's staging buffer ({}x{}) could not be created or mapped -- "
+                      "the remote capture for ticket {} is lost", width, height, ring.wanted);
+            if (buffer)
+                core.DestroyBuffer(buffer);   // never recorded into: nothing in flight names it
+            m_lostTicket = ring.wanted;
+            ring.wanted  = 0;
+            return false;
+        }
+        m_ringBuffer     = buffer;
+        m_ringCpu        = static_cast<const std::uint8_t*>(cpu);
+        m_ringRowPitch   = rowPitch;
+        m_ringSlicePitch = slicePitch;
+        m_ringWidth      = width;
+        m_ringHeight     = height;
+        return true;
+    }
+
+    void NriGraphContext::NoteRenderSubmission(const nri::CoreInterface& core, nri::CommandBuffer& cmd,
+                                               nri::Texture& source, nri::Buffer& dest)
+    {
+        CaptureRing& ring = m_captureRing;
+        // The ring's slot IS this frame's slot (FrameSlot(), m_frameIndex %
+        // FramesInFlight()): `submission` follows the context's own clock, so
+        // the pacing wait this frame already paid for its slot covers the ring's.
+        ring.submission = static_cast<std::uint32_t>(m_frameIndex);
+        if (ring.framesInFlight == 0)
+            ring.framesInFlight = 1;
+        const std::uint32_t slot = ring.submission % ring.framesInFlight;
+        if (slot >= kMaxFramesInFlight || &dest != m_ringBuffer || !m_ringCpu)
+        {
+            GraphError("NriGraphContext: the ticket-capture node ran with a slot outside the ring or "
+                       "without its buffer");
+            return;
+        }
+
+        const CaptureRingStep step = PlanCaptureRingSlot(
+            ring, slot, m_frameIndex, m_ringWidth == SurfaceWidth() && m_ringHeight == SurfaceHeight());
+
+        // DRAIN FIRST: the copy in this slot was SUBMITTED FramesInFlight() or
+        // more frames ago, so the pacing wait this frame paid has retired it
+        // (PickNode::RecordReadback's argument). No fence query, no idle.
+        if (step.drain)
+        {
+            const std::size_t bytes = static_cast<std::size_t>(m_ringRowPitch) * m_ringHeight;
+            const std::uint8_t* src = m_ringCpu + static_cast<std::size_t>(slot) * m_ringSlicePitch;
+            ring.retiredBytes.assign(src, src + bytes);
+            ring.retiredW      = m_ringWidth;
+            ring.retiredH      = m_ringHeight;
+            ring.retiredPitch  = static_cast<std::uint32_t>(m_ringRowPitch);
+            ring.retiredBgra   = IsBgraFormat(m_format);
+            RetireCaptureRingSlot(ring, slot);
+        }
+
+        // RECORD SECOND: the wanted copy into this slot, only at the buffer's
+        // extent (PrepareTicketCapture resizes it only while nothing is pending).
+        if (step.record)
+        {
+            nri::TextureDataLayoutDesc layout = {};
+            layout.offset     = static_cast<std::uint64_t>(slot) * m_ringSlicePitch;
+            layout.rowPitch   = static_cast<std::uint32_t>(m_ringRowPitch);
+            layout.slicePitch = static_cast<std::uint32_t>(m_ringSlicePitch);
+
+            nri::TextureRegionDesc region = {};
+            region.width  = static_cast<nri::Dim_t>(m_ringWidth);
+            region.height = static_cast<nri::Dim_t>(m_ringHeight);
+            region.depth  = 1;
+
+            core.CmdReadbackTextureToBuffer(cmd, dest, layout, source, region);
+            RecordCaptureRingSlot(ring, slot, m_frameIndex);
+        }
+        ++ring.submission;
+    }
+
+    void NriGraphContext::ReleaseTicketRing(Graveyard& graves, std::uint64_t fence, bool retire)
+    {
+        CaptureRing& ring = m_captureRing;
+        const bool canRetire = retire && m_ringCpu != nullptr;
+        for (std::uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot)
+        {
+            if (!ring.pending[slot])
+                continue;
+            if (ring.abandoned[slot])
+            {
+                // Its job gave up (CancelCaptureRingTicket): drop it, never retire it.
+                ring.pending[slot]   = false;
+                ring.abandoned[slot] = false;
+                continue;
+            }
+            if (canRetire && ring.submitted[slot])
+            {
+                const std::size_t bytes = static_cast<std::size_t>(m_ringRowPitch) * m_ringHeight;
+                const std::uint8_t* src = m_ringCpu + static_cast<std::size_t>(slot) * m_ringSlicePitch;
+                ring.retiredBytes.assign(src, src + bytes);
+                ring.retiredW      = m_ringWidth;
+                ring.retiredH      = m_ringHeight;
+                ring.retiredPitch  = static_cast<std::uint32_t>(m_ringRowPitch);
+                ring.retiredBgra   = IsBgraFormat(m_format);
+                ring.retiredTicket = ring.ticket[slot];
+                ring.haveRetired   = true;
+            }
+            else if (ring.submitted[slot])
+            {
+                m_lostTicket = ring.ticket[slot];   // its drain answers with a null map: capture.no-frame
+            }
+            else if (ring.wanted == 0)
+            {
+                ring.wanted = ring.ticket[slot];    // never submitted: copy it again from the next frame
+            }
+            ring.pending[slot] = false;
+        }
+        if (m_ringBuffer)
+        {
+            const nri::CoreInterface* graveCore = &m_device->Core();
+            graves.Bury(fence, [graveCore, b = m_ringBuffer] {
+                graveCore->UnmapBuffer(*b);
+                graveCore->DestroyBuffer(b);
+            });
+        }
+        m_ringBuffer     = nullptr;
+        m_ringCpu        = nullptr;
+        m_ringRowPitch   = 0;
+        m_ringSlicePitch = 0;
+        m_ringWidth      = 0;
+        m_ringHeight     = 0;
+    }
+#endif
 }

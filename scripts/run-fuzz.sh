@@ -45,11 +45,11 @@ CXXFLAGS=(-std=c++23 -g -O1 -fno-omit-frame-pointer
 # The engine sources each target links besides its harness (relative to the repo root).
 sources_for() {
     case "$1" in
-        protocol) ;;                                                # header-only
-        artifact) echo "Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp" ;;
-        scene)    echo "Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp" ;;
-        sprite)   echo "Source/Runtime/ArcaneAssets/src/Arcane/Sprite/SpriteAsset.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp fuzz/support/LogStub.cpp" ;;
-        cli)      echo "Source/Runtime/ArcaneCore/src/Arcane/Cli/Cli.cpp Source/Programs/ArcaneServer/src/ServerConfig.cpp" ;;
+        protocol) echo "Source/Runtime/ArcaneCore/src/Arcane/Config/CVarRegistry.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarFormat.cpp Source/Runtime/ArcaneCore/src/Arcane/Base/Assert.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp" ;;
+        artifact) echo "Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactReader.cpp Source/Runtime/ArcaneAssets/src/Arcane/Assets/ArtifactCodec.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/IO/ReadRegularFile.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/LogStub.cpp" ;;
+        scene)    echo "Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp" ;;
+        sprite)   echo "Source/Runtime/ArcaneAssets/src/Arcane/Sprite/SpriteAsset.cpp Source/Runtime/ArcaneCore/src/Arcane/Guid.cpp Source/Runtime/ArcaneCore/src/Arcane/Platform/SecureRandom.cpp fuzz/support/LogStub.cpp" ;;
+        cli)      echo "Source/Runtime/ArcaneCore/src/Arcane/Cli/Cli.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarRegistry.cpp Source/Runtime/ArcaneCore/src/Arcane/Config/CVarFormat.cpp Source/Runtime/ArcaneCore/src/Arcane/Base/Assert.cpp fuzz/support/DiagnosticsStub.cpp fuzz/support/LogStub.cpp Source/Programs/ArcaneServer/src/ServerConfig.cpp" ;;
         *) echo "unknown target '$1' (known: ${ALL_TARGETS[*]})" >&2; return 1 ;;
     esac
 }
@@ -73,8 +73,17 @@ build() {
     local abs=()
     for s in $srcs; do abs+=("$ROOT/$s"); done
     echo "[run-fuzz] building $t with $CXX" >&2
-    "$CXX" "${CXXFLAGS[@]}" "${INCLUDES[@]}" "$ROOT/fuzz/${t}_fuzz.cpp" "${abs[@]}" \
-        -o "$OUT/${t}_fuzz"
+    local log="$OUT/build-$t.log"
+    if ! "$CXX" "${CXXFLAGS[@]}" "${INCLUDES[@]}" "$ROOT/fuzz/${t}_fuzz.cpp" "${abs[@]}" \
+        -o "$OUT/${t}_fuzz" >"$log" 2>&1; then
+        cat "$log" >&2
+        # The source lists in sources_for() are hand-kept; name the usual cause.
+        if grep -q "undefined (reference|symbol)" -E "$log"; then
+            echo "[run-fuzz] $t: LINK FAILED on undefined symbols -- sources_for() is stale; add the .cpp (or a fuzz/support stub) defining:" >&2
+            grep -oE "undefined (reference to|symbol:) .*" "$log" | sort -u | head -20 >&2
+        fi
+        return 1
+    fi
 }
 
 # Per-target libFuzzer flags. The Cli parser prints usage on every rejected

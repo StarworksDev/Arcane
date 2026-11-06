@@ -16,7 +16,7 @@
 
 #include <Arcane/Base/Runtime.hpp>
 #include <Arcane/Client/ClientRuntime.hpp>
-#include <Arcane/Scene/PhysicsSystem.hpp>
+#include <Arcane/Scene/Physics2DWorld.hpp>
 #include <Arcane/Render/RenderSystems.hpp>
 #include <Arcane/Scene/TransformSystems.hpp>
 
@@ -88,12 +88,14 @@ TEST_CASE("A module built against ABI 28 that still registers the pair is refuse
     // old modules std::ignore it, so an unconverted DLL keeps working.
     CHECK(sch.fixedUpdate.AddSystem<Arcane::TransformPropagationSystem>().IsErr());
 
-    // RenderSubmissionSystem is the client's since the Core-DLL split, so the
-    // SAME refusal is pinned against a ClientRuntime -- an unconverted module in
-    // an interactive host is still refused harmlessly, and a headless host never
-    // had the system to collide with (ClientRuntimeTest pins that half).
+    // RenderSubmissionSystem is installed by NO runtime since F5 plan 1 Task 5
+    // (ExtractFrame runs the sprite sweep), so an unconverted module's
+    // registration into a ClientRuntime's render scheduler is now ACCEPTED --
+    // and inert: no host runs that scheduler (RunLoop::SubmitRender has no
+    // caller), so the sweep still runs exactly once per frame.
+    // ClientRuntimeTest pins that the client installs nothing.
     Arcane::ClientRuntime crt(Arcane::Test::Process());
-    CHECK(crt.Schedulers().render.AddSystem<Arcane::RenderSubmissionSystem>().IsErr());
+    CHECK(crt.Schedulers().render.AddSystem<Arcane::RenderSubmissionSystem>().IsOk());
 }
 
 TEST_CASE("A game system places itself with Before/After against the engine's systems", "[runtime]")

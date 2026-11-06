@@ -1120,8 +1120,9 @@ namespace Arcane
                         node->Record(nodeContext, p, sources, (*targets)[p], context->FrameSlot());
                 });
         }
-        // NO CLEAR anywhere above, deliberately (the clear seam, stated in
-        // NriGraphContext's DeclareGraphFrame): a fullscreen pass writes every
+        // NO CLEAR anywhere above -- no clear load op is declared -- deliberately
+        // (NriGraphContext's DeclareGraphFrame, THE CLEAR IS DECLARATIVE): a
+        // fullscreen pass writes every
         // pixel of its target with an OPAQUE pipeline, so a LOADed undefined
         // pool slot is fully overwritten before it can be read.
         return passCount > 0 ? (*targets)[passCount - 1] : scene;

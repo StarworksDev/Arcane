@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "picosha2.hpp"
 #include <Arcane/Core/Api.hpp>
@@ -276,6 +277,14 @@ namespace Arcane
         static std::string HmacSha256Hex(const std::string& key, const std::string& message)
         {
             return ToHex(HMAC_SHA256(key, message));
+        }
+
+        // Plain SHA-256 of `bytes` as lowercase hex (64 chars). Unkeyed: a
+        // content digest (e.g. the remote audit's argsDigest), never a MAC --
+        // use HmacSha256Hex when a secret is involved.
+        static std::string Sha256Hex(std::string_view bytes)
+        {
+            return ToHex(SHA256_Raw(std::vector<uint8_t>(bytes.begin(), bytes.end())));
         }
 
         // Constant-time comparison of two equal-length hex strings. Distinct

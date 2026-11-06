@@ -6,8 +6,8 @@
 //   2. Binary round-trip (single fixture): a Registry with Arcane::RigidBody2D +
 //      single-fixture Arcane::Collider2D authored values survives Save/Load with all
 //      per-fixture fields intact.
-//      (Arcane::PhysicsBodyRef2D.handle is Serializable(false) on the name-keyed path;
-//       it harmlessly round-trips on the binary/trivially-copyable path.)
+//      (Arcane::PhysicsBodyRef2D's binary form is SerializationTraits v2: the
+//       handle is runtime state and loads as 0; appliedScale round-trips.)
 //   3. Binary round-trip (two fixtures): a Arcane::Collider2D with TWO fixtures
 //      (fixture0 = circle r=4 @ local(0,0) density 1 friction 0.3;
 //       fixture1 = aabb(2,2) @ local(10,0) restitution 0.5, isSensor=true)
@@ -16,6 +16,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <Arcane/Scene/Physics2DDetail.hpp>
 #include <Arcane/Scene/PhysicsComponents.hpp>
 #include <Arcane/Scene/SceneModule.hpp>
 
@@ -120,9 +121,10 @@ TEST_CASE("physics components binary round-trip preserves authored field values 
         reg.AddComponent<Arcane::Collider2D>(savedEntity, col);
 
         // Arcane::PhysicsBodyRef2D holds runtime state; we add it with a non-default
-        // handle to ensure the binary trivially-copyable path round-trips it.
+        // handle and scale to prove the binary form keeps the scale and drops the handle.
         Arcane::PhysicsBodyRef2D bref;
-        bref.handle = Manifold2D::Physics::BodyHandle{ 7u, 3u };
+        bref.handle       = Arcane::Detail::Physics2D::PackBody(Manifold2D::Physics::BodyHandle{ 7u, 3u });
+        bref.appliedScale = glm::vec2{ 2.f, 3.f };
         reg.AddComponent<Arcane::PhysicsBodyRef2D>(savedEntity, bref);
 
         auto saved = reg.Save(path);
@@ -164,12 +166,11 @@ TEST_CASE("physics components binary round-trip preserves authored field values 
     // Arcane::PhysicsBodyRef2D present on the entity.
     const auto* bref = reg->GetComponent<Arcane::PhysicsBodyRef2D>(savedEntity);
     REQUIRE(bref != nullptr);
-    // Empirically verify what the binary (trivially-copyable) path does with the
-    // Serializable(false) handle field.  We wrote {7u, 3u} before Save -- assert
-    // the actual post-Load values so the comment in PhysicsComponents.hpp matches
-    // reality rather than being an untested claim.
-    CHECK(bref->handle.index      == 7u);
-    CHECK(bref->handle.generation == 3u);
+    // The traits (not the reflection attribute) drop the handle: we wrote the
+    // packed {7u, 3u} before Save and the load sees 0, with the scale intact.
+    CHECK(bref->handle         == 0u);
+    CHECK(bref->appliedScale.x == 2.f);
+    CHECK(bref->appliedScale.y == 3.f);
 
     std::filesystem::remove(path);
 }

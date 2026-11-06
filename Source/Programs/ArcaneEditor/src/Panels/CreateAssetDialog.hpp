@@ -463,7 +463,7 @@ namespace Arcane::Editor
         // CppClass/System only. Keep UI indices here, not engine enums: stale
         // persisted or test-injected values are clamped at the dialog boundary,
         // then converted once by ClassTemplates when the files are minted.
-        int  systemPhaseIndex = 0;  // Fixed Update / Update / Render
+        int  systemPhaseIndex = 0;  // Fixed Update / Update (Render is retired)
         int  systemRoleIndex = 0;   // Both / Server / Client
         // Set once DrawCreateAssetDialog has seeded folderIndex for THIS
         // request; BeginCreateAsset resets it to false along with everything

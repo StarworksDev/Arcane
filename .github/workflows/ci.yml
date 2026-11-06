@@ -14,8 +14,10 @@ name: CI
 #                     (scripts/ci/image-tag.sh: a hash of ci/linux/Dockerfile
 #                     and the repo files it copies)
 #   ci-image          ghcr.io/starworksdev/arcane-ci:<tag> -- reused, or built +
-#                     pushed + verified when missing (scripts/ci/ci-image.sh; the
-#                     ONLY job with packages: write); outputs its digest
+#                     verified, then pushed only when PUBLISH is true (main,
+#                     not a pull request). A missing tag on a pull request is
+#                     verified and not pushed; the Linux legs then skip
+#                     (scripts/ci/ci-image.sh; the ONLY job with packages: write).
 #   build-test-linux  the Linux legs, inside that image pinned by digest
 #   build-test        the Windows and macOS legs, on the hosted runners
 #   notify            Discord FAILED / RECOVERED, never for pull requests
@@ -75,6 +77,7 @@ jobs:
           scripts/ci/tests/test-image-tag.sh
           scripts/ci/tests/test-build-sh.sh
           scripts/ci/tests/test-ci-image.sh
+          scripts/ci/test-ci-image-policy.sh
           pwsh -NoProfile -File scripts/ci/tests/test-arcane-ci.ps1
 
       - name: Image tag
@@ -103,9 +106,12 @@ jobs:
     env:
       TAG: ${{ needs.image-tag.outputs.tag }}
       # A fork pull request never publishes (scripts/ci/ci-image.sh), and
-      # neither does Dependabot: its same-repo PRs get a read-only token, so a
-      # build would run ~30 min and then fail at the push.
+      # neither does Dependabot: its token cannot push, so SAME_REPO stays
+      # false and the run hits the fork error instead of building.
       SAME_REPO: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]' }}
+      # true only on main, and never for a pull request. workflow_dispatch on
+      # main publishes. The string is true or false (GitHub stringifies the bool).
+      PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,9 +130,21 @@ jobs:
         shell: bash
         run: scripts/ci/ci-image.sh "$CI_IMAGE" "$TAG"
 
+      - name: Note a locally verified image
+        if: steps.image.outputs.verified == 'local'
+        shell: bash
+        run: |
+          msg="A pull request that introduces a new tag verifies the image in ci-image and skips the Linux legs until main publishes. That skip is the cost of not pushing an unreviewed Dockerfile."
+          echo "$msg"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+
   build-test-linux:
     name: ${{ matrix.leg }} ${{ matrix.config }}
     needs: ci-image
+    # An empty digest is a locally verified, unpublished tag. Skip the legs
+    # rather than pull a digest that was never pushed. A failed ci-image
+    # writes no digest, so the legs stay skipped.
+    if: needs.ci-image.outputs.digest != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
@@ -157,10 +175,6 @@ jobs:
       ARCANE_CI_LEG: ${{ matrix.leg }}
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      # Two seeds per leg (ArcaneTests runs in RANDOM order). Both are printed
-      # in the suite banner and in each JUnit file name.
-      SEED_A: ${{ github.run_number }}
-      SEED_B: ${{ github.run_number }}50021
       LINUX_GPU_LANE: ${{ matrix.leg == 'linux-gcc-14' && matrix.config == 'Debug' }}
       # The package lane: Release on linux-gcc-14 (engine modularization s6).
       PACKAGE_LANE: ${{ matrix.leg == 'linux-gcc-14' && matrix.config == 'Release' }}
@@ -175,6 +189,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Derive the uint32 CI seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed_a="${{ github.run_number }}"
+          case "$seed_a" in
+            ''|*[!0-9]*) echo "run_number is not an integer" >&2; exit 1 ;;
+          esac
+          if [ "$seed_a" -gt 4294967295 ]; then
+            echo "run_number does not fit uint32" >&2
+            exit 1
+          fi
+          # bash $(( )) is signed 64-bit. This sum fits.
+          seed_b=$(( (seed_a + 50021) % 4294967296 ))
+          echo "SEED_A=${seed_a}" >> "$GITHUB_ENV"
+          echo "SEED_B=${seed_b}" >> "$GITHUB_ENV"
+
       - name: Toolchain (CI image)
         run: |
           echo "image ${{ needs.ci-image.outputs.tag }} @ ${{ needs.ci-image.outputs.digest }}"
@@ -183,6 +214,18 @@ jobs:
 
       - name: Build
         run: scripts/ci/build.sh ${{ matrix.config }} -j "$MAKE_JOBS"
+
+      # After the image toolchain is on PATH and the tree is built, before the
+      # Catch2 seed loop. Debug gcc only: that leg has the compiler. Replay is CPU.
+      - name: Replay fuzz regressions and namespace compile-fail
+        if: matrix.leg == 'linux-gcc-14' && matrix.config == 'Debug'
+        run: |
+          set -euo pipefail
+          bash scripts/namespace-compile-fail.sh
+          # Job CXX is g++-14. libFuzzer needs clang; unset so run-fuzz.sh
+          # keeps its default (clang++-19, else clang++). `all` is required:
+          # regress with no target hits ${2:?target} and replays nothing.
+          env -u CXX bash scripts/run-fuzz.sh regress all
 
       # Under Xvfb with SDL's x11 driver, so windows are real native windows.
       - name: Test (two seeds)
@@ -279,7 +322,8 @@ jobs:
   build-test:
     name: ${{ matrix.leg }} ${{ matrix.config }}
     runs-on: ${{ matrix.os }}
-    # macOS gets a longer budget: its runner builds with fewer jobs (MAKE_JOBS).
+    # macOS gets a longer budget (its runner builds with fewer jobs, MAKE_JOBS),
+    # and Windows one for its Release package lane.
     timeout-minutes: ${{ matrix.timeout || 150 }}
     strategy:
       fail-fast: false
@@ -290,6 +334,9 @@ jobs:
           - leg: windows-msvc
             os: windows-2025
             compiler: msvc
+            # Release also runs the package lane: ~2h29m on main (run
+            # 39728545742), right at the 150-minute default.
+            timeout: 210
           - leg: macos-appleclang
             os: macos-15
             compiler: appleclang
@@ -301,8 +348,6 @@ jobs:
       ARCANE_CI_LEG: ${{ matrix.leg }}
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      SEED_A: ${{ github.run_number }}
-      SEED_B: ${{ github.run_number }}50021
       MACOS_GPU_LANE: ${{ matrix.leg == 'macos-appleclang' && matrix.config == 'Debug' }}
       PACKAGE_LANE: ${{ matrix.config == 'Release' }}
       # macos-15 arm64 runners are 3 vCPU / 7 GB, and since the settings arc
@@ -318,6 +363,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Derive the uint32 CI seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed_a="${{ github.run_number }}"
+          case "$seed_a" in
+            ''|*[!0-9]*) echo "run_number is not an integer" >&2; exit 1 ;;
+          esac
+          if [ "$seed_a" -gt 4294967295 ]; then
+            echo "run_number does not fit uint32" >&2
+            exit 1
+          fi
+          # bash $(( )) is signed 64-bit. This sum fits.
+          seed_b=$(( (seed_a + 50021) % 4294967296 ))
+          echo "SEED_A=${seed_a}" >> "$GITHUB_ENV"
+          echo "SEED_B=${seed_b}" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
       # Toolchains

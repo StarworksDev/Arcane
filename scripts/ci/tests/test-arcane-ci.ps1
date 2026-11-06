@@ -42,10 +42,11 @@ try {
 
     # --- Get-SeedList --------------------------------------------------------
     Check 'seeds: one' ((((Get-SeedList -Seed '123' -Seeds 1) -join ',')) -eq '123')
-    Check 'seeds: the CI pair' ((((Get-SeedList -Seed '123' -Seeds 2) -join ',')) -eq '123,12350021')
-    Check 'seeds: 42949 pair still fits uint32' ((((Get-SeedList -Seed '42949' -Seeds 2) -join ',')) -eq '42949,4294950021')
+    Check 'seeds: the CI pair' ((((Get-SeedList -Seed '123' -Seeds 2) -join ',')) -eq '123,50144')
+    Check 'seeds: 42949 pair stays in uint32' ((((Get-SeedList -Seed '42949' -Seeds 2) -join ',')) -eq '42949,92970')
     Check 'seeds: non-numeric refused' (Throws { Get-SeedList -Seed 'abc' })
-    Check 'seeds: pair overflowing uint32 refused' (Throws { Get-SeedList -Seed '99999' -Seeds 2 })
+    Check 'seeds: wrap stays in uint32' ((((Get-SeedList -Seed '4294967295' -Seeds 2) -join ',')) -eq '4294967295,50020')
+    Check 'seeds: a seed past uint32 is refused' (Throws { Get-SeedList -Seed '4294967296' })
 
     # --- Get-LinuxJobCount ---------------------------------------------------
     Check 'jobs: 16 cpu / 24 GiB -> 12' ((Get-LinuxJobCount -Cpus 16 -MemoryBytes 24GB) -eq 12)
@@ -164,6 +165,9 @@ try {
     Check 'result: tests that never ran fail the leg' ((-not $none.Passed) -and $none.Tests -eq 'tests did not run')
     $tf = New-LegResult -Run $run -Status ([ordered]@{ build = 0; 'tests-7' = 1 }) -OutDir $leg -Seeds @('7') -Image 'build-x'
     Check 'result: test failure' ((-not $tf.Passed) -and $tf.Tests -like 'seed 7: FAILED (1)*')
+    Put (Join-Path $leg 'tests-seed8.log') "build output only, no catch2 summary`n"
+    $nosum = New-LegResult -Run $run -Status ([ordered]@{ build = 0; 'tests-8' = 0 }) -OutDir $leg -Seeds @('8') -Image 'build-x'
+    Check 'result: a seed with no Catch2 summary fails the leg' (-not $nosum.Passed)
     $ce = New-LegResult -Run $run -Status ([ordered]@{ container = 125 }) -OutDir $leg -Seeds @('7') -Image 'build-x'
     Check 'result: container never built' ((-not $ce.Passed) -and $ce.Build -like 'not run (container exit 125*')
     $dk = New-LegResult -Run $run -Status ([ordered]@{ docker = 1 }) -OutDir $leg -Seeds @('7') -Image 'build-x'

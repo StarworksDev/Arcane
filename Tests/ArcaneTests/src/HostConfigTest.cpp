@@ -315,6 +315,86 @@ TEST_CASE("host config: --pick-probe with --headless is refused at parse time", 
     CHECK(headlessOnly.config->headless);
     CHECK_FALSE(headlessOnly.config->pickProbe);
 }
+
+// Servitor P0 Task 10: the host --remote flags. Inside this Dist guard because
+// the HostConfig remote fields are compiled out of Dist, where Parse refuses
+// the three spellings instead (the Dist case at the end of this file).
+TEST_CASE("--remote lifts the open-ended headless refusal", "[remote][host]") {
+    const char* argv[] = {"ArcaneRuntime", "--headless", "--remote", "--project", "ReferenceProject"};
+    auto parsed = Arcane::HostConfig::Parse(5, const_cast<char**>(argv));
+    REQUIRE(parsed.config.has_value());
+    CHECK(parsed.exitCode == 0);
+    CHECK(parsed.config->remote);
+    CHECK(parsed.config->headless);
+    CHECK(parsed.config->remoteIdleExitSeconds == 600);
+    CHECK_FALSE(parsed.config->remoteIdleExitSupplied);
+}
+
+TEST_CASE("headless without --frames and without --remote still exits 2", "[remote][host]") {
+    const char* argv[] = {"ArcaneRuntime", "--headless", "--project", "ReferenceProject"};
+    auto parsed = Arcane::HostConfig::Parse(4, const_cast<char**>(argv));
+    CHECK_FALSE(parsed.config.has_value());
+    CHECK(parsed.exitCode == 2);
+}
+
+TEST_CASE("--remote-idle-exit 0 is never, and the flag is supplied", "[remote][host]") {
+    const char* argv[] = {"ArcaneRuntime", "--headless", "--remote", "--remote-idle-exit", "0",
+                          "--project", "ReferenceProject"};
+    auto parsed = Arcane::HostConfig::Parse(7, const_cast<char**>(argv));
+    REQUIRE(parsed.config);
+    CHECK(parsed.config->remoteIdleExitSeconds == 0);
+    CHECK(parsed.config->remoteIdleExitSupplied);
+}
+
+TEST_CASE("SanitizeRelaunchLine strips the remote flags and the descriptor path", "[remote][host]") {
+    const std::vector<std::string> argv = {
+        "ArcaneRuntime.exe", "--remote", "--remote-descriptor", "C:/secret.json",
+        "--remote-idle-exit", "5", "--remote-idle-exit=9", "--project", "ReferenceProject",
+    };
+    const std::string line = Arcane::SanitizeRelaunchLine(argv);
+    CHECK(line.find("--remote") == std::string::npos);
+    CHECK(line.find("secret.json") == std::string::npos);
+    CHECK(line.find("--project") != std::string::npos);
+    CHECK(line.find("ReferenceProject") != std::string::npos);
+}
+
+TEST_CASE("--remote-descriptor round-trips; a missing descriptor or a non-integer idle exit is exit 2", "[remote][host]") {
+    const auto ok = Run({"--remote", "--remote-descriptor", "C:/d.json", "--remote-idle-exit", "45"});
+    REQUIRE(ok.config.has_value());
+    CHECK(ok.config->remote);
+    CHECK(ok.config->remoteDescriptor == "C:/d.json");
+    CHECK(ok.config->remoteIdleExitSeconds == 45);
+    CHECK(ok.config->remoteIdleExitSupplied);
+    const auto absent = Run({});
+    REQUIRE(absent.config.has_value());
+    CHECK_FALSE(absent.config->remote);
+    CHECK(absent.config->remoteDescriptor.empty());
+    CHECK(absent.config->remoteIdleExitSeconds == 600);
+    CHECK_FALSE(absent.config->remoteIdleExitSupplied);
+
+    // --remote-descriptor without a value (trailing, explicitly empty, or
+    // followed by another flag), and --remote-idle-exit without a whole
+    // number of seconds that fits the field.
+    const std::vector<std::vector<std::string>> refused = {
+        {"--remote", "--remote-descriptor"},
+        {"--remote", "--remote-descriptor="},
+        {"--remote", "--remote-descriptor", ""},
+        {"--remote", "--remote-descriptor", "--project", "P"},
+        {"--remote", "--remote-idle-exit"},
+        {"--remote", "--remote-idle-exit", "soon"},
+        {"--remote", "--remote-idle-exit", "-1"},
+        {"--remote", "--remote-idle-exit", "1.5"},
+        {"--remote", "--remote-idle-exit", ""},
+        {"--remote", "--remote-idle-exit", "4294967296"},   // one past std::uint32_t
+    };
+    for (const auto& args : refused)
+    {
+        INFO("args[1] = " << args[1] << (args.size() > 2 ? " " + args[2] : std::string()));
+        const auto bad = Run(args);
+        CHECK_FALSE(bad.config.has_value());
+        CHECK(bad.exitCode == 2);
+    }
+}
 #endif
 // UNGUARDED, deliberately: every case above this point that touches
 // --nri-graph is Dist-excluded (several pair it with --pick-probe/--crash-gpu,
@@ -1152,3 +1232,55 @@ TEST_CASE("SanitizeRelaunchLine strips --window-size (an automation extent, not 
     };
     CHECK(Arcane::SanitizeRelaunchLine(inlineForm).find("window-size") == std::string::npos);
 }
+
+#if !defined(ARC_BUILD_DIST)
+// Servitor P0 Task 10: --remote lifts the open-ended headless refusal, and
+// ONLY --remote does -- without it the refusal's text is byte-for-byte the
+// one it always was.
+TEST_CASE("--headless without --frames or --remote keeps the refusal text byte-identical", "[remote][host]")
+{
+    const auto o = RunCapturingStderr({ "--headless", "--project", "ReferenceProject" });
+    REQUIRE(o.captured);
+    CHECK_FALSE(o.outcome.config.has_value());
+    CHECK(o.outcome.exitCode == 2);
+    std::string err = o.err;
+    std::erase(err, '\r');   // the capture file is text mode: "\n" lands as "\r\n" on Windows
+    CHECK(err == "error: --headless requires --frames N (an unmapped window has no "
+                 "close button and cannot be focused for the quit action, so an "
+                 "open-ended run has no way to stop itself)\n");
+}
+
+// Servitor P0 Task 29 (ruling B): the AM1 hold is documented where the flag
+// is. Parse registers --remote with exactly this text (HostConfig.cpp).
+TEST_CASE("--remote's help states the held start and how to leave it", "[remote][host]")
+{
+    const std::string_view help = Arcane::kRemoteFlagHelp;
+    CHECK(help.starts_with("DEV: arm the loopback remote surface"));
+    CHECK(help.find("lifts --headless's --frames requirement") != std::string_view::npos);
+    CHECK(help.find("an open-ended runtime starts held at frame 0 (use servitor play/resume, or pass --frames N)")
+          != std::string_view::npos);
+    // Fix round 1 (M4): the editor has no tick gate; it opens in Edit.
+    CHECK(help.find("the editor opens in Edit (servitor play enters Play)") != std::string_view::npos);
+}
+#else
+// Dist: the remote fields and the Remote module are compiled out, so each of
+// the three spellings (both Cli forms) is refused at parse with exit 2 and the
+// one sentence -- never Cli's generic "unknown argument" plus a usage dump.
+TEST_CASE("Dist refuses the remote flags at parse", "[host][dist]")
+{
+    for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
+             { "--remote" }, { "--remote-descriptor", "C:/d.json" }, { "--remote-descriptor=C:/d.json" },
+             { "--remote-idle-exit", "0" }, { "--remote-idle-exit=0" },
+             { "--project", "P", "--headless", "--frames", "1", "--remote" } })
+    {
+        INFO("first arg " << args.front());
+        const auto o = RunCapturingStderr(args);
+        REQUIRE(o.captured);
+        CHECK_FALSE(o.outcome.config.has_value());
+        CHECK(o.outcome.exitCode == 2);
+        std::string err = o.err;
+        std::erase(err, '\r');   // text-mode capture, as above
+        CHECK(err == "Servitor is compiled out of Dist builds\n");
+    }
+}
+#endif

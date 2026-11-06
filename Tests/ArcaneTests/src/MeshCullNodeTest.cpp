@@ -64,7 +64,7 @@ TEST_CASE("mesh cull: frame builder feeds stable batch metadata, zeroed args, an
     Arcane::MeshTable table{ &meshes };
 
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(mirror, nullptr, &table, Arcane::ViewTransform{}, frame);
+    Arcane::BuildGpuSceneFrame(mirror, nullptr, Arcane::MeshSectionRanges(&table), Arcane::ViewTransform{}, frame);
 
     REQUIRE(frame.cullBatches.size() == 3u);
     CHECK(frame.cullBatches[0].firstOutput == 0u);
@@ -107,13 +107,13 @@ TEST_CASE("mesh cull: rebuilding a frame zeroes args and visible indices every t
     Arcane::MeshTable table{ &meshes };
 
     Arcane::GpuSceneFrame frame;
-    Arcane::BuildGpuSceneFrame(mirror, nullptr, &table, Arcane::ViewTransform{}, frame);
+    Arcane::BuildGpuSceneFrame(mirror, nullptr, Arcane::MeshSectionRanges(&table), Arcane::ViewTransform{}, frame);
     REQUIRE(frame.args.size() == 1u);
     REQUIRE(frame.visibleIndices.size() == 1u);
     frame.args[0].instanceNum = 77u;
     frame.visibleIndices[0] = 123u;
 
-    Arcane::BuildGpuSceneFrame(mirror, nullptr, &table, Arcane::ViewTransform{}, frame);
+    Arcane::BuildGpuSceneFrame(mirror, nullptr, Arcane::MeshSectionRanges(&table), Arcane::ViewTransform{}, frame);
 
     REQUIRE(frame.args.size() == 1u);
     CHECK(frame.args[0].instanceNum == 0u);

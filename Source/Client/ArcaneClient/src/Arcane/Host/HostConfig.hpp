@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <Arcane/Base/DiagnosticsSettingsData.hpp>   // kHangMainSeconds derives from hangSeconds
 #include <Arcane/Core/Constant.hpp>
@@ -378,6 +379,35 @@ namespace Arcane
         bool            pickProbe  = false;
         std::int32_t    pickProbeX = 0;   // canvas px, y-down; only read when pickProbe
         std::int32_t    pickProbeY = 0;
+
+        // Servitor P0 (Task 10): the remote surface. --remote arms the
+        // loopback listener a Servitor client attaches to (the host wiring is
+        // HostSession, Task 11; the editor can also be armed by its
+        // editor.remote.enable cvar). With --remote set, --headless no longer
+        // requires --frames: the refusal's reason ("no way to stop itself")
+        // is gone, because `servitor quit` is a stop path, and an abandoned
+        // host ends itself after remoteIdleExitSeconds without a request.
+        //
+        // --remote-descriptor <path>: write the attach descriptor here instead
+        // of <project>/Saved/Remote/. --remote-idle-exit <seconds>: 0 = never.
+        // remoteIdleExitSupplied is true only when the flag was typed (the
+        // fixedDtSupplied pattern above). DEV ONLY like the rest of this
+        // block: a Dist Parse refuses all three spellings with exit 2, and
+        // SanitizeRelaunchLine strips them (a relaunch is a fresh session,
+        // and the descriptor path is not the reporter's to repeat).
+        bool            remote = false;
+        std::string     remoteDescriptor;
+        std::uint32_t   remoteIdleExitSeconds = 600;
+        bool            remoteIdleExitSupplied = false;
+        // --client <name>: the caller name HostSession records in the descriptor
+        // (servitor launch --client NAME forwards it; "" = unnamed). Like the
+        // other remote flags: DEV only, refused by a Dist Parse, stripped from
+        // a relaunch line.
+        std::string     remoteClient;
+        // --owner-pid <pid>: with --remote, the host exits ("remote-idle") when
+        // that process is gone. Opt-in only: 0 (omitted) watches nothing, and
+        // Servitor never fills it in. Stripped from a relaunch line.
+        std::uint32_t   ownerPid = 0;
 #endif
 
         // Forward-declared here so it names HostConfig::ParseOutcome and can be the
@@ -409,6 +439,17 @@ namespace Arcane
     // reliably provoked.
     ARC_CONSTANT("the --hang-main margin over diagnostics.hangSeconds' default")
     inline constexpr std::uint32_t kHangMainSeconds = DiagnosticsSettings{}.hangSeconds + 3u;
+
+    // DEV ONLY (Servitor P0 Task 29, ruling B): --remote's help line, shared by
+    // the two hosts that parse HostConfig, so it words each one's start: an
+    // open-ended --remote RUNTIME starts held at frame 0 (its AM1 tick gate;
+    // a --frames N run runs; it logs "remote: holding at frame 0" and titles
+    // its window "[held]" while held), and the EDITOR opens in Edit (no tick
+    // gate: servitor play enters Play). There is no opt-out flag.
+    inline constexpr std::string_view kRemoteFlagHelp =
+        "DEV: arm the loopback remote surface a Servitor client attaches to; lifts --headless's "
+        "--frames requirement; an open-ended runtime starts held at frame 0 (use servitor play/resume, "
+        "or pass --frames N); the editor opens in Edit (servitor play enters Play)";
 #endif
 
     // The RELAUNCH line a host hands to Diagnostics::Config::commandLine (crash
