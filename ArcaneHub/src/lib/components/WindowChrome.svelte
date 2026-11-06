@@ -59,7 +59,7 @@
           background: transparent; border: 0; border-radius: 0;
           color: var(--text-dim); cursor: default;
           transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
-  .ctrl:hover { background: rgba(255, 255, 255, .07); color: var(--text); }
+  .ctrl:hover { background: var(--hover-wash-strong); color: var(--text); }
   .close:hover { background: color-mix(in srgb, var(--fail-accent) 85%, transparent); color: #fff; }
   /* Neutral hairline. This was a gold gradient spanning the full titlebar --
      a permanent band of colour across the top of every screen. */

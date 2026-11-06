@@ -32,12 +32,14 @@
 <header class="top">
   <h2 class="display view-title">Engines</h2>
   <div class="acts">
-    <!-- "Locate", not "Register engine": it names what you DO (point the Hub at
-         an engine already on disk), which is the distinction from the Install
-         button beside it. The prop and the Rust command stay `register` -- that
-         is still the effect. -->
+    <!-- "Add engine…", not "Locate": the project menu's "Locate…" repoints a
+         MOVED project, and one word for two different jobs made each read like
+         the other. "Add" matches the Projects page's Add (put something that
+         already exists on disk into the list), which is the distinction from
+         Install beside it. The prop and the Rust command stay `register` --
+         that is still the effect. -->
     <Button disabled={busy} onclick={actions.register}
-            title="Point the Hub at a folder containing ArcaneEditor.exe">Locate</Button>
+            title="Point the Hub at a folder containing ArcaneEditor.exe">Add engine&hellip;</Button>
     <!-- Wrapped in a titled span because a DISABLED button receives no mouse
          events, so its own title never renders a tooltip -- and a greyed
          control with no explanation is just a dead end. -->

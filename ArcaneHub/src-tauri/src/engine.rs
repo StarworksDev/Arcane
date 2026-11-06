@@ -6,7 +6,8 @@
 // the engine bumps, and those crash on open. Probe, then stamp what the engine
 // reported.
 //
-// The parsing half is pure and tested here. The spawning half lives in lib.rs.
+// The parsing half is pure and tested here. The spawning half (the probe
+// itself) lives in spawn.rs.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -49,9 +50,92 @@ pub fn parse_probe_output(s: &str) -> Result<EngineInfo, String> {
         .map_err(|e| format!("could not read the engine's identity: {e}"))
 }
 
+/// The engine path the user typed or pasted, cleaned for registration:
+/// surrounding whitespace and the quotes Explorer's "Copy as path" adds are
+/// stripped (settings::clean_dir's rule), and the result must be ABSOLUTE --
+/// a relative path would resolve against wherever the Hub happened to start.
+/// Pure; canonical_editor_exe does the disk half.
+pub fn clean_engine_input(typed: &str) -> Result<PathBuf, String> {
+    let t = typed.trim().trim_matches('"').trim();
+    if t.is_empty() {
+        return Err("Enter the engine's folder or ArcaneEditor.exe.".to_string());
+    }
+    let p = PathBuf::from(t);
+    if !p.is_absolute() {
+        return Err(format!("{t} is not an absolute path"));
+    }
+    Ok(p)
+}
+
+/// Drop the `\\?\` verbatim prefix fs::canonicalize returns on Windows:
+/// `\\?\C:\x` becomes `C:\x` and `\\?\UNC\srv\share` becomes
+/// `\\srv\share`. The prefix is noise in the UI and, worse, part of the
+/// engine ID -- the same exe registered with and without it would be two
+/// engines. Pure for the test.
+pub fn strip_verbatim(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = p.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        p.to_string()
+    }
+}
+
+/// The exe a registration names, in ONE canonical spelling: cleaned, folder
+/// resolved to the exe, then fs::canonicalize'd (the disk's own casing, `..`
+/// and 8.3 short names expanded, links resolved) and de-verbatimed. The id
+/// is derived from this, so the same engine typed as `c:\eng\..\eng` and
+/// `"C:\Eng"` registers once, not twice. Errors when the exe is not there.
+pub fn canonical_editor_exe(typed: &str) -> Result<PathBuf, String> {
+    let exe = resolve_editor_exe(&clean_engine_input(typed)?);
+    let canon = std::fs::canonicalize(&exe)
+        .map_err(|e| format!("{} could not be found: {e}", exe.display()))?;
+    Ok(PathBuf::from(strip_verbatim(&canon.to_string_lossy())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_engine_input_strips_quotes_and_requires_an_absolute_path() {
+        assert_eq!(
+            clean_engine_input("  \"C:\\Eng\\ArcaneEditor.exe\"  ").unwrap(),
+            PathBuf::from("C:\\Eng\\ArcaneEditor.exe")
+        );
+        assert!(clean_engine_input("eng\\ArcaneEditor.exe").unwrap_err().contains("not an absolute"));
+        assert!(clean_engine_input("   ").is_err());
+        assert!(clean_engine_input("\"\"").is_err());
+    }
+
+    #[test]
+    fn strip_verbatim_removes_only_the_prefix() {
+        assert_eq!(strip_verbatim(r"\\?\C:\Eng\ArcaneEditor.exe"), r"C:\Eng\ArcaneEditor.exe");
+        assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\e.exe"), r"\\srv\share\e.exe");
+        assert_eq!(strip_verbatim(r"C:\Eng\e.exe"), r"C:\Eng\e.exe");
+        assert_eq!(strip_verbatim(r"\\srv\share\e.exe"), r"\\srv\share\e.exe");
+    }
+
+    #[test]
+    fn canonical_editor_exe_gives_one_spelling_for_many_inputs() {
+        let dir = std::env::temp_dir().join("arcane-hub-engine-test-canon");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin").join(EDITOR_EXE), b"").unwrap();
+
+        let by_folder = canonical_editor_exe(&dir.join("bin").to_string_lossy()).unwrap();
+        let quoted = format!("\"{}\"", dir.join("bin").join(EDITOR_EXE).display());
+        let by_exe = canonical_editor_exe(&quoted).unwrap();
+        let dotted = canonical_editor_exe(&dir.join("bin").join("..").join("bin").to_string_lossy()).unwrap();
+        assert_eq!(by_folder, by_exe);
+        assert_eq!(by_folder, dotted, "`..` folds away");
+        let s = by_folder.to_string_lossy().to_string();
+        assert!(!s.starts_with(r"\\?\"), "no verbatim prefix: {s}");
+        assert!(by_folder.is_absolute() && s.ends_with(EDITOR_EXE), "{s}");
+
+        assert!(canonical_editor_exe(&dir.join("nope").to_string_lossy()).is_err());
+    }
 
     // A real payload, copied verbatim from a slice-1 run of
     // `ArcaneEditor.exe --print-engine-info`.

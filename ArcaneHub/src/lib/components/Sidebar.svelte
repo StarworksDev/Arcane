@@ -10,9 +10,11 @@
 <script lang="ts">
   import Icon, { type IconName } from "$lib/components/Icon.svelte";
   import type { EngineEntry } from "$lib/api";
-  let { view, engine, settingsOpen, onNavigate, onSettings }: {
+  let { view, engine, loading = false, settingsOpen, onNavigate, onSettings }: {
     view: View;
     engine: EngineEntry | null;
+    /** Startup has not loaded state yet: say nothing rather than "None registered". */
+    loading?: boolean;
     settingsOpen: boolean;
     onNavigate: (v: View) => void;
     onSettings: () => void;
@@ -25,11 +27,15 @@
   //
   // The gear belongs to Settings, where it is the near-universal convention;
   // Engines takes the box, reading as the thing that gets installed and picked;
-  // Packages takes stacked layers.
+  // Packages, when it returns, takes stacked layers.
+  //
+  // Packages is HIDDEN until it is built (user call 2026-10-13): its page is a
+  // "not built yet" placeholder citing an internal spec, which a public
+  // preview must not ship. PackagesView and the "packages" view id stay, so
+  // bringing it back is this one line.
   const items: NavItem[] = [
     { id: "projects", label: "Projects", icon: "folder" },
     { id: "engines", label: "Engines", icon: "box" },
-    { id: "packages", label: "Packages", icon: "layers" },
   ];
 </script>
 
@@ -63,7 +69,11 @@
       <!-- "Default", not "Active": a project with its own pinned engine ignores
            this, so calling it active would misdescribe what launches. -->
       <div class="label">Default engine</div>
-      {#if engine}
+      {#if loading}
+        <!-- An empty line of the same height: "None registered" for the few
+             milliseconds before state arrives would be a false statement. -->
+        <div class="v none" aria-hidden="true">&nbsp;</div>
+      {:else if engine}
         <!-- title so the full build string is still reachable once the rail is
              narrow enough to clip it. -->
         <div class="v" title={engine.missing
@@ -72,6 +82,7 @@
           <span class="dot" class:bad={engine.missing} aria-hidden="true"></span>
           <span class="build">{engine.build}</span>
         </div>
+        <!-- Lowercase: a code-style token in mono, like the project chips. -->
         <code>abi {engine.engineAbi}</code>
       {:else}
         <div class="v none">None registered</div>
@@ -87,7 +98,10 @@
      At the 800px window minimum this is 176px, narrower than the 198px it
      replaces, which is why the engine name below is truncated rather than left
      to wrap. */
-  .side { width: 22%; flex: none; background: var(--surface-2);
+  /* Capped at 260px: an uncapped 22% made the rail 422px of mostly empty
+     column on a maximised 1920px window (2026-10-13). The floor keeps the
+     176px it always had at the 800px minimum. */
+  .side { width: clamp(176px, 22%, 260px); flex: none; background: var(--surface-2);
           border-right: 1px solid var(--border-soft);
           padding: 10px 11px 14px; display: flex; flex-direction: column;
           min-width: 0; }
@@ -101,7 +115,7 @@
          border-radius: 6px; font: inherit; font-size: 13.5px; text-align: left;
          background: none; border: 0; color: var(--text-muted); cursor: default;
          transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
-  .nav:hover:not(.on) { background: rgba(255, 255, 255, .04); color: var(--text); }
+  .nav:hover:not(.on) { background: var(--hover-wash); color: var(--text); }
   /* Selection by SURFACE, not by accent. This was a gold-tinted fill plus a
      gold inset rail; the active nav item is on screen permanently, so it was
      one of the largest constant sources of colour in the app. A lighter

@@ -2,8 +2,8 @@
   import ProjectMenu, { type ProjectActions } from "$lib/components/ProjectMenu.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import { engineChipText, engineChipTitle, compatibilityNote, missingNote,
-           projectDir } from "$lib/format";
-  import { since, type RecentProject } from "$lib/api";
+           projectDir, since, launchLabel } from "$lib/format";
+  import type { RecentProject } from "$lib/api";
 
   // IDENTICAL prop contract to ProjectCard, so ProjectsView can swap the two
   // without a second set of wiring.
@@ -14,13 +14,17 @@
   // every other column right, and what makes a list scannable is the meta
   // lining up down the page, not each row being individually recognisable.
   let { project, compatible, engineAbi, engineLabel, pinned, dangling,
-        running = false, disabled = false, confirmDelete, actions }:
+        running = false, disabled = false, hasEngine = true, confirmDelete, actions }:
     {
       project: RecentProject; compatible: boolean; engineAbi: number | null;
       engineLabel: string; pinned: boolean; dangling: boolean;
       /** A live editor has this project open; launching focuses it. */
       running?: boolean;
-      disabled?: boolean; confirmDelete: boolean;
+      /** An action is running: every control here waits for it. */
+      disabled?: boolean;
+      /** Some engine will open this. Gates launching and the engine chip only. */
+      hasEngine?: boolean;
+      confirmDelete: boolean;
       /** The whole per-project vocabulary -- see ProjectActions in ProjectMenu. */
       actions: ProjectActions;
     } = $props();
@@ -36,6 +40,10 @@
   const engineTitle = $derived(engineChipTitle(engineLabel, pinned, dangling));
   const why = $derived(
     compatibilityNote(compatible, project.path, project.engineAbi, engineLabel, engineAbi),
+  );
+  // The state lives in the accessible name, as on the tile (see launchLabel).
+  const launchName = $derived(
+    launchLabel(project.name, { missing: gone, running, compatible, hasEngine }),
   );
 
   // Right-click opens the SAME menu the ellipsis does, at the cursor.
@@ -63,13 +71,16 @@
     <Icon name="star" size={13} />
   </button>
 
-  <button class="hit" type="button" disabled={disabled || gone}
+  <button class="hit" type="button" disabled={disabled || gone || !hasEngine}
           onclick={() => actions.launch(project)}
           title={gone ? missingNote(project.path)
+                      : !hasEngine ? "Register an engine on the Engines page to launch this."
                       : running ? `${project.name} is open — this focuses its window.`
-                      : why} aria-label={project.name}>
-    <span class="nm">{project.name}</span>
-    <span class="path">{dir}</span>
+                      : why} aria-label={launchName}>
+    <!-- A title on each line, as on the tile: the button's own title explains
+         launching, so a name or folder cut short needs its own. -->
+    <span class="nm" title={project.name}>{project.name}</span>
+    <span class="path" title={dir}>{dir}</span>
   </button>
 
   <!-- The Opened cell answers "when was this last live". While an editor has
@@ -84,7 +95,7 @@
 
   <!-- Sibling of .hit, not nested: an interactive control inside a button is
        invalid HTML and its clicks are not reliably delivered. -->
-  <button class="eng" type="button" disabled={disabled || gone}
+  <button class="eng" type="button" disabled={disabled || gone || !hasEngine}
           onclick={() => actions.changeEngine(project)}
           class:pin={pinned} class:missing={dangling} title={engineTitle}
           aria-label="Engine for {project.name}: {engineText}">
@@ -97,7 +108,9 @@
 
   {#if gone}
     <!-- The badge slot: being gone supersedes any ABI statement, because the
-         number came from a manifest that is not there to disagree with. -->
+         number came from a manifest that is not there to disagree with.
+         Lowercase "abi 59" is a deliberate code-style token (mono, like the
+         value); prose says "ABI". -->
     <code class="abi badge">missing</code>
   {:else if compatible}
     <code class="abi">abi {project.engineAbi ? project.engineAbi : "?"}</code>
@@ -105,7 +118,7 @@
     <code class="abi badge">abi {project.engineAbi}</code>
   {/if}
 
-  <ProjectMenu bind:this={menu} {project} {disabled} {confirmDelete} {actions} />
+  <ProjectMenu bind:this={menu} {project} {disabled} {running} {confirmDelete} {actions} />
 </div>
 
 <style>
@@ -119,7 +132,7 @@
   .row { display: grid; grid-template-columns: var(--cols-project);
          gap: var(--gap-project); align-items: center; padding: 11px 12px;
          transition: background var(--dur) var(--ease); }
-  .row:hover { background: rgba(255, 255, 255, .04); }
+  .row:hover { background: var(--hover-wash); }
 
   /* The name cell IS the launch target -- the whole two-line stack, so the
      click area matches what reads as "the project". */
@@ -154,7 +167,7 @@
          background: none; border: 0; padding: 6px 8px; border-radius: 5px;
          font: inherit; font-size: 11.5px; color: var(--text-dim); cursor: default;
          transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
-  .eng:hover:not(:disabled) { color: var(--text-muted); background: rgba(255, 255, 255, .04); }
+  .eng:hover:not(:disabled) { color: var(--text-muted); background: var(--hover-wash); }
   .eng:disabled { opacity: .5; }
   .mark { flex: none; width: 7px; height: 7px; border-radius: 50%;
           border: 1.5px solid currentColor; }

@@ -22,10 +22,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 # ONE Hub per user, enforced: a second launch focuses the existing window
-# instead of starting a rival process. Two Hubs share the .archub state files
-# last-writer-wins -- the atomic writes prevent corruption but not lost
-# updates -- and a launcher's second launch means "show me the Hub" anyway
-# (Unity Hub and the Epic launcher both behave this way).
+# instead of starting a rival process. Two Hubs would share the .archub state
+# files last-writer-wins -- the atomic writes prevent corruption, and
+# state::mutate's lock prevents lost updates only WITHIN one process -- and a
+# launcher's second launch means "show me the Hub" anyway (Unity Hub and the
+# Epic launcher both behave this way).
 tauri-plugin-single-instance = "2"
 # Remember window size/position/maximized across sessions (every comparable
 # launcher does). NOT hand-rolled: multi-monitor + DPI + monitor-unplugged
@@ -50,9 +51,9 @@ serde = { version = "1", features = ["derive"] }
 # and the Hub would hand back a manifest reordered top to bottom for a one-field
 # edit -- a diff the user did not ask for in a file they may have in git.
 serde_json = { version = "1", features = ["preserve_order"] }
-# Project cover thumbnails travel to the webview as data: URLs -- the CSP is
-# closed to file protocols, and a couple of hundred KB of PNG per card does
-# not justify opening it.
+# Project cover thumbnails travel to the webview as data: URLs -- the CSP in
+# tauri.conf.json allows `img-src data:` but no file or asset protocol, and a
+# couple of hundred KB of PNG per card does not justify opening one.
 base64 = "0.22"
 # Fresh project identities: Duplicate regenerates the manifest's guid (a copy
 # is a NEW project) and create_project stamps one at birth. v4-only, matching

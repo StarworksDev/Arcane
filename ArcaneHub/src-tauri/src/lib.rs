@@ -11,6 +11,17 @@
 // this file earned that rule by quietly growing to 1,100 untested lines
 // before the 2026-07-29 split restored it.
 //
+// Two rules every command here follows:
+//
+//  * STATE CHANGES GO THROUGH state::mutate -- one process-wide lock around
+//    load-modify-save. Probes, manifest reads and disk work happen BEFORE
+//    (outside) it, so a seconds-long probe never holds the lock.
+//  * ANYTHING THAT PROBES, LOADS STATE (a stat per listed project), READS
+//    COVERS OR TOUCHES A PROJECT ON DISK IS `#[tauri::command(async)]`.
+//    Tauri 2 runs a plain sync command on the MAIN thread, so a probe (up to
+//    its 10s timeout) or a slow network drive froze the whole window. Only
+//    the trivially cheap commands (settings, version, window) stay sync.
+//
 // The Hub is INSTALLED per-user (%LOCALAPPDATA%\Arcane Hub\), so it must
 // never derive a repo root from current_exe() and must never assume an
 // engine sits beside it. That is setup-wizard's repo-root-portable assumption
@@ -38,20 +49,40 @@ use std::process::Command;
 
 use launch::{OpenOutcome, RunningEditors};
 
-#[tauri::command]
+/// "'<path>' is not in the project list" -- the one wording every
+/// membership check uses (the frontend shows it as-is).
+fn not_listed(path: &str) -> String {
+    format!("'{path}' is not in the project list")
+}
+
+/// Is `path` (either recorded shape) in the list right now? The IPC gate for
+/// the commands that act on a project's files: a path the user never listed
+/// must not be deletable or copyable just because a caller named it.
+fn is_listed(path: &str) -> bool {
+    let key = state::project_dir_key(path);
+    state::load().recents.iter().any(|e| state::project_dir_key(&e.path) == key)
+}
+
+#[tauri::command(async)]
 fn load_state() -> state::HubState {
     state::load()
 }
 
-#[tauri::command]
+// Register an engine by the path the user picked or pasted. The path is
+// CANONICALISED before the id is derived from it (engine::canonical_editor_
+// exe): quotes stripped, required absolute, folder resolved to the exe, the
+// disk's own spelling with no \\?\ prefix. It used to be stored as typed, so
+// one engine pasted two ways registered twice, and a quoted paste failed.
+#[tauri::command(async)]
 fn register_engine(path: String) -> Result<state::EngineEntry, String> {
-    let exe = engine::resolve_editor_exe(Path::new(&path));
+    let exe = engine::canonical_editor_exe(&path)?;
     let info = spawn::probe_engine(&exe)?;
 
     let entry = state::EngineEntry::new(&exe.to_string_lossy(), info.engine_abi, info.build);
-    let mut s = state::load();
-    state::upsert_engine(&mut s.engines, entry.clone());
-    state::save(&s)?;
+    state::mutate(|s| {
+        state::upsert_engine(&mut s.engines, entry.clone());
+        Ok(())
+    })?;
     Ok(entry)
 }
 
@@ -66,28 +97,43 @@ fn register_engine(path: String) -> Result<state::EngineEntry, String> {
 // is milliseconds, but it is still a process spawn per engine and does not
 // belong on every refresh().
 //
+// The probes run on a SNAPSHOT, outside the state lock; only the results are
+// applied under state::mutate, and only to engines still registered by then.
+// This command used to load, probe for seconds, then save the stale snapshot
+// -- erasing any star, launch or registration that landed meanwhile.
+//
 // An engine that fails its probe keeps its cached data: failure proves nothing
 // new (the exe may be mid-rebuild), and open_project still reports the truth
 // at launch time.
-#[tauri::command]
+#[tauri::command(async)]
 fn refresh_engines() -> state::HubState {
-    let mut s = state::load();
-    let mut changed = false;
-    for e in s.engines.iter_mut() {
-        if let Ok(info) = spawn::probe_engine(Path::new(&e.path)) {
-            if e.engine_abi != info.engine_abi || e.build != info.build {
-                e.engine_abi = info.engine_abi;
-                e.build = info.build;
-                changed = true;
+    let probed: Vec<(String, u32, String)> = state::load()
+        .engines
+        .iter()
+        .filter_map(|e| {
+            spawn::probe_engine(Path::new(&e.path))
+                .ok()
+                .map(|info| (e.id.clone(), info.engine_abi, info.build))
+        })
+        .collect();
+
+    let applied = state::mutate(|s| {
+        for (id, abi, build) in &probed {
+            if let Some(e) = s.engines.iter_mut().find(|e| &e.id == id) {
+                e.engine_abi = *abi;
+                e.build.clone_from(build);
             }
         }
-    }
-    if changed {
-        if let Err(err) = state::save(&s) {
+        Ok(s.clone())
+    });
+    match applied {
+        Ok(s) => s,
+        Err(err) => {
+            let mut s = state::load();
             s.warnings.push(format!("Could not save refreshed engine info: {err}"));
+            s
         }
     }
-    s
 }
 
 // Resolves a folder to the exe the same way register_engine does, so the two
@@ -95,16 +141,17 @@ fn refresh_engines() -> state::HubState {
 // reported success. Absence stays a silent no-op on purpose -- removing an
 // engine twice is idempotent, and an error banner for "already gone" would be
 // noise. Contrast set_project_engine, where a miss means state would be wrong.
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_engine(path: String) -> Result<(), String> {
-    let mut s = state::load();
     let exe = engine::resolve_editor_exe(Path::new(&path));
     // The pin is an engine id, which IS the normalised exe path.
     let id = state::normalise_path(&exe.to_string_lossy());
-    state::remove_engine(&mut s.engines, &exe.to_string_lossy());
-    // Projects pinned to it fall back to the default rather than dangling.
-    state::unpin_engine(&mut s.recents, &id);
-    state::save(&s)
+    state::mutate(|s| {
+        state::remove_engine(&mut s.engines, &exe.to_string_lossy());
+        // Projects pinned to it fall back to the default rather than dangling.
+        state::unpin_engine(&mut s.recents, &id);
+        Ok(())
+    })
 }
 
 // Pin a project to a specific registered engine, or pass null to send it back
@@ -113,19 +160,19 @@ fn forget_engine(path: String) -> Result<(), String> {
 // Both arguments are VALIDATED. This is an IPC surface, and writing a pin to an
 // unregistered engine would create exactly the dangling state unpin_engine
 // exists to prevent -- silently, and persisted.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_project_engine(path: String, engine_id: Option<String>) -> Result<(), String> {
-    let mut s = state::load();
-
-    if let Some(id) = &engine_id {
-        if !s.engines.iter().any(|e| &e.id == id) {
-            return Err(format!("no engine is registered with id '{id}'"));
+    state::mutate(|s| {
+        if let Some(id) = &engine_id {
+            if !s.engines.iter().any(|e| &e.id == id) {
+                return Err(format!("no engine is registered with id '{id}'"));
+            }
         }
-    }
-    if !state::set_project_engine(&mut s.recents, &path, engine_id) {
-        return Err(format!("'{path}' is not in the project list"));
-    }
-    state::save(&s)
+        if !state::set_project_engine(&mut s.recents, &path, engine_id.clone()) {
+            return Err(not_listed(&path));
+        }
+        Ok(())
+    })
 }
 
 // Delete a project from disk, then drop it from the list.
@@ -137,20 +184,29 @@ fn set_project_engine(path: String, engine_id: Option<String>) -> Result<(), Str
 // takes, so the folder lands somewhere the user already knows how to restore
 // from.
 //
-// Three things have to hold before anything is deleted:
-//   1. the path resolves to a folder holding EXACTLY ONE .arcproj
-//      (resolve_project, the engine's own rule) -- so this can never be aimed
-//      at a folder that is not unambiguously a single project;
-//   2. it is absolute and is not a drive root (project::delete_guard);
-//   3. it still exists -- and if it does not, the entry is simply unlisted.
+// Four things have to hold before anything is deleted:
+//   1. the path is IN THE LIST -- an IPC caller cannot aim this at a folder
+//      the user never listed;
+//   2. the FOLDER is this project's alone (resolve::resolve_owned_project):
+//      a folder-shaped path must hold exactly one .arcproj, and a
+//      manifest-shaped path must be the ONLY .arcproj in its folder. The
+//      lenient resolve_project used to take a manifest at its word, so
+//      deleting D:/Games/A.arcproj sent all of D:/Games -- every other
+//      project in it -- to the bin;
+//   3. it is absolute and is not a drive root (project::delete_guard);
+//   4. it still exists -- and if it does not, the entry is simply unlisted.
 //      A project already gone from disk still has to be removable, or its row
 //      would be stuck in the list with no control that can shift it.
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_project(path: String) -> Result<(), String> {
+    if !is_listed(&path) {
+        return Err(not_listed(&path));
+    }
+    let _busy = launch::busy();
     let recorded = PathBuf::from(&path);
 
     if recorded.exists() {
-        let (root, _) = resolve::resolve_project(&recorded)?;
+        let (root, _) = resolve::resolve_owned_project(&recorded, "delete")?;
         if let Some(why) = project::delete_guard(&root) {
             return Err(format!("refusing to delete {}: {why}", root.display()));
         }
@@ -162,29 +218,32 @@ fn delete_project(path: String) -> Result<(), String> {
         })?;
     }
 
-    let mut s = state::load();
-    state::remove_recent(&mut s.recents, &path);
-    state::save(&s)
+    state::mutate(|s| {
+        state::remove_recent(&mut s.recents, &path);
+        Ok(())
+    })
 }
 
 // Star or unstar a project. The frontend pins favourites above the rest.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_project_favorite(path: String, favorite: bool) -> Result<(), String> {
-    let mut s = state::load();
-    if !state::set_favorite(&mut s.recents, &path, favorite) {
-        return Err(format!("'{path}' is not in the project list"));
-    }
-    state::save(&s)
+    state::mutate(|s| {
+        if !state::set_favorite(&mut s.recents, &path, favorite) {
+            return Err(not_listed(&path));
+        }
+        Ok(())
+    })
 }
 
 // Extra arguments appended after `--project <path>` when this project launches.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_project_args(path: String, args: String) -> Result<(), String> {
-    let mut s = state::load();
-    if !state::set_project_args(&mut s.recents, &path, args.trim()) {
-        return Err(format!("'{path}' is not in the project list"));
-    }
-    state::save(&s)
+    state::mutate(|s| {
+        if !state::set_project_args(&mut s.recents, &path, args.trim()) {
+            return Err(not_listed(&path));
+        }
+        Ok(())
+    })
 }
 
 // Open the project's folder in Explorer.
@@ -214,8 +273,8 @@ fn reveal_project(path: String) -> Result<(), String> {
 }
 
 // Rename a project: its folder, its .arcproj file, the `name` inside that
-// manifest, and the Hub's own entry -- in that order, so the step most likely
-// to fail comes first and every later failure rolls back cleanly.
+// manifest (resolve::rename_project_files, tested there -- including the
+// case-only rename the old inline version skipped), then the Hub's own entry.
 //
 // This is safe to do because NOTHING inside a project stores an absolute path.
 // `Project::Open` derives the root from whatever path it is handed, mounts
@@ -230,78 +289,28 @@ fn reveal_project(path: String) -> Result<(), String> {
 // the project's own build scripts), anything under Source/, and generated
 // solution files. Renaming a project is not renaming its game module, and
 // quietly rewriting build inputs would be worse than leaving them alone.
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_project(path: String, new_name: String) -> Result<String, String> {
     let new_name = new_name.trim().to_string();
     if let Some(why) = project::name_error(&new_name) {
         return Err(why);
     }
 
-    // Membership is checked BEFORE any disk work, so the state update at the
-    // end cannot fail after the folder has already moved.
-    let mut s = state::load();
-    let key = state::normalise_path(&path);
-    if !s.recents.iter().any(|e| state::normalise_path(&e.path) == key) {
-        return Err(format!("'{path}' is not in the project list"));
+    // Membership is checked BEFORE any disk work, so a stranger path is
+    // refused while nothing has moved.
+    if !is_listed(&path) {
+        return Err(not_listed(&path));
     }
-
-    let (root, manifest) = resolve::resolve_project(Path::new(&path))?;
-    let parent = root
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| format!("{} has no parent folder to rename within", root.display()))?;
-    let new_root = parent.join(&new_name);
-
-    // Read and edit the manifest in memory first: a malformed .arcproj is
-    // discovered while nothing has moved.
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("could not read {}: {e}", manifest.display()))?;
-    let edited = project::rename_in_manifest(&text, &new_name)?;
-
-    // A case-only rename ("mygame" -> "MyGame") normalises to the same key, so
-    // the collision check must not fire on the project's own folder.
-    let renaming_folder = state::normalise_path(&new_root.to_string_lossy())
-        != state::normalise_path(&root.to_string_lossy());
-    if renaming_folder && new_root.exists() {
-        return Err(format!("{} already exists", new_root.display()));
-    }
-
-    if renaming_folder {
-        std::fs::rename(&root, &new_root).map_err(|e| {
-            format!(
-                "could not rename {} to {}: {e}. Is the project open in the editor?",
-                root.display(),
-                new_root.display()
-            )
-        })?;
-    }
-    let undo_folder = || {
-        if renaming_folder {
-            let _ = std::fs::rename(&new_root, &root);
-        }
-    };
-
-    // The manifest, now inside the renamed folder.
-    let old_manifest = new_root.join(manifest.file_name().unwrap_or_default());
-    let new_manifest = new_root.join(format!("{new_name}.{}", project::MANIFEST_EXT));
-    if old_manifest != new_manifest {
-        if let Err(e) = std::fs::rename(&old_manifest, &new_manifest) {
-            undo_folder();
-            return Err(format!("could not rename {}: {e}", old_manifest.display()));
-        }
-    }
-
-    if let Err(e) = std::fs::write(&new_manifest, edited) {
-        if old_manifest != new_manifest {
-            let _ = std::fs::rename(&new_manifest, &old_manifest);
-        }
-        undo_folder();
-        return Err(format!("could not write {}: {e}", new_manifest.display()));
-    }
+    let _busy = launch::busy();
+    let new_manifest = resolve::rename_project_files(Path::new(&path), &new_name)?;
 
     let new_path = new_manifest.to_string_lossy().to_string();
-    state::rename_recent(&mut s.recents, &path, &new_path, &new_name);
-    state::save(&s)?;
+    state::mutate(|s| {
+        // A false here means the entry was removed while the disk work ran;
+        // the folder is renamed regardless, and there is nothing to repoint.
+        state::rename_recent(&mut s.recents, &path, &new_path, &new_name);
+        Ok(())
+    })?;
     Ok(new_path)
 }
 
@@ -314,6 +323,10 @@ fn rename_project(path: String, new_name: String) -> Result<String, String> {
 // resolve::duplicate_project_files (tested there); this is the listing.
 #[tauri::command]
 async fn duplicate_project(path: String) -> Result<String, String> {
+    if !is_listed(&path) {
+        return Err(not_listed(&path));
+    }
+    let _busy = launch::busy();
     let dup = resolve::duplicate_project_files(Path::new(&path))?;
 
     // List the copy. The engine pin and arguments carry from the source (the
@@ -322,31 +335,32 @@ async fn duplicate_project(path: String) -> Result<String, String> {
     // NOW even though the copy has never been opened: the Opened column's
     // real job is recency-of-interaction, creating IS the interaction, and a
     // "never"-stamped copy would sort to the bottom and read as a failure.
-    let mut s = state::load();
-    let key = state::normalise_path(&path);
-    let (engine_id, args) = s
-        .recents
-        .iter()
-        .find(|e| state::normalise_path(&e.path) == key)
-        .map(|e| (e.engine_id.clone(), e.args.clone()))
-        .unwrap_or_default();
     let new_path = dup.manifest.to_string_lossy().to_string();
-    state::touch_recent(
-        &mut s.recents,
-        state::RecentProject {
-            path: new_path.clone(),
-            name: dup.name,
-            last_opened_utc: launch::now_utc_iso(),
-            engine_abi: dup.abi,
-            engine_id,
-            args,
-            favorite: false,
-            missing: false,
-            // The freshly minted identity, never the original's.
-            guid: Some(dup.guid),
-        },
-    );
-    state::save(&s)?;
+    let key = state::project_dir_key(&path);
+    state::mutate(|s| {
+        let (engine_id, args) = s
+            .recents
+            .iter()
+            .find(|e| state::project_dir_key(&e.path) == key)
+            .map(|e| (e.engine_id.clone(), e.args.clone()))
+            .unwrap_or_default();
+        state::touch_recent(
+            &mut s.recents,
+            state::RecentProject {
+                path: new_path.clone(),
+                name: dup.name.clone(),
+                last_opened_utc: launch::now_utc_iso(),
+                engine_abi: dup.abi,
+                engine_id,
+                args,
+                favorite: false,
+                missing: false,
+                // The freshly minted identity, never the original's.
+                guid: Some(dup.guid.clone()),
+            },
+        );
+        Ok(())
+    })?;
     Ok(new_path)
 }
 
@@ -355,11 +369,12 @@ async fn duplicate_project(path: String) -> Result<String, String> {
 // Restored 2026-07-28: the project-actions wave dropped it when Delete took its
 // place on the card, which left "stop showing me this" impossible without
 // erasing the folder. Unity Hub and Unreal both keep the two separate.
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_project(path: String) -> Result<(), String> {
-    let mut s = state::load();
-    state::remove_recent(&mut s.recents, &path);
-    state::save(&s)
+    state::mutate(|s| {
+        state::remove_recent(&mut s.recents, &path);
+        Ok(())
+    })
 }
 
 // Repoint a listed project whose folder moved -- the greyed row's Locate...
@@ -370,7 +385,11 @@ fn forget_project(path: String) -> Result<(), String> {
 // moving a folder changes neither -- but takes its name and ABI from the
 // manifest just read, because the project may have changed while it was away.
 // Locating is not opening: the list is not reordered and nothing launches.
-#[tauri::command]
+//
+// REFUSED when the new path is already listed as a LIVE project
+// (state::relocate_conflict): the absorb used to merge the located entry
+// over it silently, replacing that project's star, pin and arguments.
+#[tauri::command(async)]
 fn relocate_project(path: String, new_path: String) -> Result<(), String> {
     let (_root, manifest) = resolve::resolve_project(Path::new(&new_path))?;
     // 0 = unknown, same as open_project: a manifest without a readable abi is
@@ -379,19 +398,24 @@ fn relocate_project(path: String, new_path: String) -> Result<(), String> {
     let guid = resolve::manifest_guid(&manifest);
     let name = project::display_name(&new_path);
 
-    let mut s = state::load();
-    if !state::relocate_recent(&mut s.recents, &path, &new_path, &name, abi, guid) {
-        return Err(format!("'{path}' is not in the project list"));
-    }
-    state::save(&s)
+    state::mutate(|s| {
+        if let Some(why) = state::relocate_conflict(&s.recents, &path, &new_path) {
+            return Err(why);
+        }
+        if !state::relocate_recent(&mut s.recents, &path, &new_path, &name, abi, guid.clone()) {
+            return Err(not_listed(&path));
+        }
+        Ok(())
+    })
 }
 
 // Same contract as forget_project, for the whole list: Hub state only.
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_recents() -> Result<(), String> {
-    let mut s = state::load();
-    s.recents.clear();
-    state::save(&s)
+    state::mutate(|s| {
+        s.recents.clear();
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -406,6 +430,7 @@ fn save_settings(settings: settings::Settings) -> Result<(), String> {
         project_view: settings::clean_view(&settings.project_view),
         launch_behavior: settings::clean_behavior(&settings.launch_behavior),
         project_sort: settings::clean_sort(&settings.project_sort),
+        default_engine_id: settings::clean_engine_id(settings.default_engine_id.as_deref()),
         ..settings
     })
 }
@@ -447,13 +472,22 @@ fn hub_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// Surface the Hub window (and take the tray icon down). For the frontend to
+// call before it shows a message that would otherwise land in a hidden or
+// parked window -- the tray-launch route reports failures this way.
+#[tauri::command]
+fn show_hub(app: tauri::AppHandle) {
+    tray::show_hub(&app);
+}
+
 // Launch the editor on a project, as a TRACKED child: the command returns
 // immediately (launch.rs's wait thread owns the child), several editors may
 // run at once, and closing the Hub still cannot close editors -- Windows
 // children survive their parent absent a job object. The whole story --
-// focus-existing, the probe, the behaviour, the watchdog -- lives in
-// launch::do_open_project, shared with the .arcproj shell route.
-#[tauri::command]
+// the registered-engine gate, focus-existing, the probe, the behaviour, the
+// watchdog -- lives in launch::do_open_project, shared with the .arcproj
+// shell route.
+#[tauri::command(async)]
 fn open_project(
     app: tauri::AppHandle,
     project_path: String,
@@ -463,8 +497,9 @@ fn open_project(
 }
 
 /// The running key set, pulled: the frontend's initial paint cannot wait for
-/// an event that only fires on the next transition.
-#[tauri::command]
+/// an event that only fires on the next transition. Keys are
+/// state::project_dir_key-shaped (see launch::running_keys).
+#[tauri::command(async)]
 fn running_projects(app: tauri::AppHandle) -> Vec<String> {
     launch::running_keys(&app)
 }
@@ -472,7 +507,7 @@ fn running_projects(app: tauri::AppHandle) -> Vec<String> {
 // Cover thumbnails for a batch of recorded project paths, keyed by the exact
 // path handed in. One IPC round-trip for the whole grid; only projects WITH
 // a cover appear in the map, so the frontend's fallback is a simple miss.
-#[tauri::command]
+#[tauri::command(async)]
 fn project_covers(paths: Vec<String>) -> HashMap<String, String> {
     paths
         .into_iter()
@@ -504,6 +539,7 @@ pub struct ScanReport {
 // follows the default until the user says otherwise.
 #[tauri::command]
 async fn scan_for_projects(dir: String) -> Result<ScanReport, String> {
+    let _busy = launch::busy();
     let outcome = resolve::scan_tree(Path::new(&dir))?;
 
     let found: Vec<state::RecentProject> = outcome
@@ -527,11 +563,8 @@ async fn scan_for_projects(dir: String) -> Result<ScanReport, String> {
         })
         .collect();
 
-    let mut s = state::load();
-    let (added, already_listed, relocated) = state::add_scanned(&mut s.recents, found);
-    if added > 0 || relocated > 0 {
-        state::save(&s)?;
-    }
+    let (added, already_listed, relocated) =
+        state::mutate(|s| Ok(state::add_scanned(&mut s.recents, found)))?;
     Ok(ScanReport {
         added,
         already_listed,
@@ -541,13 +574,65 @@ async fn scan_for_projects(dir: String) -> Result<ScanReport, String> {
     })
 }
 
-#[tauri::command]
+// List an existing project WITHOUT launching it -- the "Add" button: pick a
+// .arcproj (or its folder) and it joins the list, never opened. Lenient
+// resolution (the file as given, or a folder's single manifest): nothing on
+// disk is touched. The manifest path is what gets recorded, the same shape a
+// launch records. Already listed: the existing entry comes back unchanged
+// (no reorder). A missing entry with the same guid heals onto it (a moved
+// project re-added by hand keeps its star, pin and history). Returns the
+// entry as stored.
+#[tauri::command(async)]
+fn add_project(path: String) -> Result<state::RecentProject, String> {
+    let (_root, manifest) = resolve::resolve_project(Path::new(path.trim()))?;
+    let recorded = manifest.to_string_lossy().to_string();
+    let entry = state::RecentProject {
+        name: project::display_name(&recorded),
+        engine_abi: resolve::manifest_abi(&manifest).unwrap_or(0),
+        guid: resolve::manifest_guid(&manifest),
+        path: recorded,
+        last_opened_utc: "0".to_string(),
+        engine_id: None,
+        args: String::new(),
+        favorite: false,
+        missing: false,
+    };
+    state::mutate(|s| Ok(state::add_existing(&mut s.recents, entry)))
+}
+
+// Create a project folder + manifest, and LIST it.
+//
+// Both inputs are IPC arguments that become a directory and a file name, so
+// both are gated here: the name by project::name_error (the same rule
+// rename_project applies -- it used to be checked only in the frontend, so a
+// name like "..\x" or "CON" reached create_dir_all), and the folder must be
+// absolute and exist (a relative one resolved against the Hub's working
+// directory).
+//
+// Listed HERE, inside state::mutate, stamped NOW (creating is the
+// interaction, as Duplicate's copy is): the frontend launches the new project
+// next, and when that launch failed -- a probe error, a refused engine -- the
+// project existed on disk but appeared nowhere in the Hub.
+#[tauri::command(async)]
 fn create_project(dir: String, name: String, engine_path: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if let Some(why) = project::name_error(&name) {
+        return Err(why);
+    }
+    let parent = PathBuf::from(settings::clean_dir(&dir));
+    if !parent.is_absolute() {
+        return Err(format!("{} is not an absolute path", parent.display()));
+    }
+    if !parent.is_dir() {
+        return Err(format!("{} does not exist", parent.display()));
+    }
+
     let exe = engine::resolve_editor_exe(Path::new(&engine_path));
     // Probe FIRST and abort on failure -- never fall back to a guessed ABI.
     let info = spawn::probe_engine(&exe)?;
 
-    let root = PathBuf::from(&dir).join(&name);
+    let _busy = launch::busy();
+    let root = parent.join(&name);
     if root.exists() && std::fs::read_dir(&root).map(|mut d| d.next().is_some()).unwrap_or(false) {
         return Err(format!("{} already exists and is not empty", root.display()));
     }
@@ -556,21 +641,43 @@ fn create_project(dir: String, name: String, engine_path: String) -> Result<Stri
 
     // A fresh identity at birth, same as the engine's own Project::Create --
     // so a Hub-created project never needs the engine's open-time self-heal.
-    let manifest = project::manifest_json(&name, info.engine_abi, &project::new_guid())?;
-    let file = root.join(format!("{name}.arcproj"));
-    std::fs::write(&file, manifest).map_err(|e| format!("could not write {}: {e}", file.display()))?;
+    let guid = project::new_guid();
+    let manifest = project::manifest_json(&name, info.engine_abi, &guid)?;
+    let file = root.join(format!("{name}.{}", project::MANIFEST_EXT));
+    store::write_bytes_atomic(&file, manifest.as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", file.display()))?;
 
     // Returns the .arcproj FILE, not the folder: the caller feeds this straight
-    // into open_project, and recents should record a newly created project the
-    // same way it records one the user picked through the Open dialog.
-    Ok(file.to_string_lossy().to_string())
+    // into open_project, and recents records a newly created project the same
+    // way it records one the user picked through the Open dialog.
+    let path = file.to_string_lossy().to_string();
+    state::mutate(|s| {
+        state::touch_recent(
+            &mut s.recents,
+            state::RecentProject {
+                path: path.clone(),
+                name: name.clone(),
+                last_opened_utc: launch::now_utc_iso(),
+                engine_abi: info.engine_abi,
+                // Follows the default until the user pins it, like a launch.
+                engine_id: None,
+                args: String::new(),
+                favorite: false,
+                missing: false,
+                guid: Some(guid.clone()),
+            },
+        );
+        Ok(())
+    })
+    .map_err(|e| format!("created {} but could not list it: {e}", file.display()))?;
+    Ok(path)
 }
 
 // Adjacency is a SUGGESTION for the dev loop, never an assumption. Returns a
 // path only if it actually probes clean. (From the installed location this
 // never fires -- engines are registered by path; this exists for a portable
 // exe dropped beside a build.)
-#[tauri::command]
+#[tauri::command(async)]
 fn suggest_engine() -> Option<state::EngineEntry> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let candidates = [
@@ -579,14 +686,16 @@ fn suggest_engine() -> Option<state::EngineEntry> {
     ];
     for c in candidates {
         if let Ok(info) = spawn::probe_engine(&c) {
-            return Some(state::EngineEntry {
-                id: state::normalise_path(&c.to_string_lossy()),
-                path: c.to_string_lossy().to_string(),
-                engine_abi: info.engine_abi,
-                build: info.build,
-                // It answered the probe one line up; it is on disk.
-                missing: false,
-            });
+            // The same canonical spelling register_engine would store, so
+            // accepting the suggestion does not mint a second id for it.
+            let path = engine::canonical_editor_exe(&c.to_string_lossy()).unwrap_or(c);
+            // EngineEntry::new: the one place an id is derived from a path.
+            // It answered the probe one line up; it is on disk.
+            return Some(state::EngineEntry::new(
+                &path.to_string_lossy(),
+                info.engine_abi,
+                info.build,
+            ));
         }
     }
     None
@@ -598,17 +707,21 @@ pub fn run() {
     spawn::claim_app_user_model_id();
     // And claim (or repair) the .arcproj association for this exe -- the
     // installer's own write shipped unquoted once, and a self-heal at every
-    // start outlives any installer fix. See assoc.rs for the incident.
+    // start outlives any installer fix. See assoc.rs for the incident (and
+    // why a debug build skips it).
     assoc::claim_arcproj_association();
     tauri::Builder::default()
         // FIRST plugin registered, per its own docs: it has to win the race
         // before anything else initialises. A second launch lands in this
         // callback inside the FIRST process; the new process exits on its own.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // A second launch carrying a .arcproj is a FILE OPEN (the shell
             // association route), not "show me the Hub" -- route it and leave
-            // the window wherever the launch lifecycle puts it.
-            if launch::route_shell_args(app, args.iter().map(|s| s.as_str())) {
+            // the window wherever the launch lifecycle puts it. A relative
+            // path resolves against the SECOND instance's cwd, which is where
+            // whoever typed it was standing.
+            let cwd = (!cwd.is_empty()).then(|| PathBuf::from(&cwd));
+            if launch::route_shell_args(app, args.iter().map(|s| s.as_str()), cwd.as_deref()) {
                 return;
             }
             // Otherwise: surface the window the user already has. While
@@ -640,20 +753,30 @@ pub fn run() {
             // and moved-project healing is blind to them until something
             // reads their manifest. This makes healing cover the whole list
             // from this session on. Its own thread: one small file read per
-            // listed project, but disk does not belong in setup.
+            // listed project, but disk does not belong in setup. The reads
+            // happen on a SNAPSHOT, outside the state lock; only the found
+            // guids are applied under state::mutate.
             std::thread::spawn(|| {
-                let mut s = state::load();
-                let n = state::backfill_guids(&mut s.recents, |p| {
-                    resolve::manifest_guid(Path::new(p))
-                });
-                if n > 0 {
-                    let _ = state::save(&s);
+                let snapshot = state::load();
+                let found: HashMap<String, String> = snapshot
+                    .recents
+                    .iter()
+                    .filter(|e| e.guid.is_none() && !e.missing)
+                    .filter_map(|e| {
+                        resolve::manifest_guid(Path::new(&e.path)).map(|g| (e.path.clone(), g))
+                    })
+                    .collect();
+                if !found.is_empty() {
+                    let _ = state::mutate(|s| {
+                        state::backfill_guids(&mut s.recents, |p| found.get(p).cloned());
+                        Ok(())
+                    });
                 }
                 // Close-mode leftover: this Hub process did not spawn the
                 // editor, so there is no wait thread to sweep after wait().
-                // A crash's editor.lock is deleted only when read_live has
-                // proven it dead (tell 3 included).
-                for e in &s.recents {
+                // A crash's editor.lock is deleted only when it parses and
+                // its editor is proven dead (tell 3 included).
+                for e in &snapshot.recents {
                     let _ = editorlock::sweep_stale(&resolve::project_dir(Path::new(&e.path)));
                 }
             });
@@ -665,7 +788,12 @@ pub fn run() {
             // and every failure path show the window -- while a NORMAL start
             // shows right here, the same moment it used to appear.
             let args: Vec<String> = std::env::args().collect();
-            let routed = launch::route_shell_args(app.app_handle(), args.iter().map(|s| s.as_str()));
+            let cwd = std::env::current_dir().ok();
+            let routed = launch::route_shell_args(
+                app.app_handle(),
+                args.iter().map(|s| s.as_str()),
+                cwd.as_deref(),
+            );
             if !routed {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
@@ -692,6 +820,7 @@ pub fn run() {
             project_covers,
             running_projects,
             scan_for_projects,
+            add_project,
             create_project,
             suggest_engine,
             load_settings,
@@ -699,7 +828,8 @@ pub fn run() {
             default_dialog_dir,
             hub_data_dir,
             reveal_hub_data_dir,
-            hub_version
+            hub_version,
+            show_hub
         ])
         .build(tauri::generate_context!())
         .expect("error while running the Arcane Hub")

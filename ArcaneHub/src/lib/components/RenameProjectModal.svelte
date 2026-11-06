@@ -45,7 +45,7 @@
 <Modal title="Rename project" onClose={onCancel}>
   <label class="f">
     <span class="label">Name</span>
-    <input bind:value={name} spellcheck="false"
+    <input class="field" bind:value={name} spellcheck="false"
            oninput={() => (touched = true)}
            onkeydown={(e) => e.key === "Enter" && submit()} />
   </label>
@@ -76,7 +76,7 @@
   </p>
 
   {#if error}
-    <p class="banner" role="alert">{error}</p>
+    <p class="banner error" role="alert">{error}</p>
   {/if}
 
   {#snippet footer()}
@@ -87,12 +87,6 @@
 
 <style>
   .f { display: flex; flex-direction: column; gap: 5px; }
-  input { background: var(--well); border: 1px solid var(--border);
-          border-radius: var(--r-btn); color: var(--text); font: inherit;
-          font-size: 13px; padding: 9px 12px; user-select: text; cursor: text;
-          width: 100%; }
-  input:focus { border-color: var(--accent-ring); outline: none; }
-
   .err { color: var(--fail); font-size: 12.5px; margin: -6px 0 0; }
   .preview { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);
              background: var(--well); border: 1px solid var(--border-soft);
@@ -103,9 +97,4 @@
   .note { font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.55; }
   code { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
 
-  /* Matches the main-area banner in +page.svelte -- same failure, same look. */
-  .banner { background: color-mix(in srgb, var(--fail-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--fail-accent) 40%, transparent);
-            border-radius: var(--r-btn); color: var(--text); font-size: 13px;
-            padding: 10px 13px; margin: 0; user-select: text; }
 </style>

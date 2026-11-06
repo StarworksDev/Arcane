@@ -3,7 +3,9 @@ import {
   isCompatible, filterProjects, coverFor, sortProjects, nextSort, normalisePath,
   projectKey, projectDir, projectNameError, projectPathPreview, resolveEngine,
   engineChipText, engineChipTitle, compatibilityNote, missingNote, menuItemsFor,
-  type SortKey,
+  since, scanReportLines, projectCountLine, launchLabel, sortHeaderLabel, menuPlacement,
+  addNotice, replaceNotices, capNotices, defaultEngineFor, isNewerState,
+  type SortKey, type Notice, type NoticeSource,
 } from "./format";
 
 describe("isCompatible", () => {
@@ -115,16 +117,14 @@ describe("sortProjects", () => {
 });
 
 describe("normalisePath", () => {
-  // MIRROR of Rust state::normalise_path -- these cases pin the parity the
-  // running badge depends on (RunningEditors keys are folded Rust-side).
+  // MIRROR of Rust state::normalise_path, the fold projectKey builds on.
   it("folds backslashes, trailing separators and case", () => {
     expect(normalisePath("D:\\Games\\MyGame\\")).toBe("d:/games/mygame");
     expect(normalisePath("D:/Games/MyGame")).toBe("d:/games/mygame");
     expect(normalisePath("d:/games/MYGAME///")).toBe("d:/games/mygame");
   });
   it("keeps a manifest file distinct from its folder", () => {
-    // Unlike projectKey: the Rust side does NOT strip the manifest name, so
-    // this must not either, or a file-recorded entry would never match.
+    // Unlike projectKey, which folds the manifest away.
     expect(normalisePath("D:/Games/MyGame/MyGame.arcproj"))
       .toBe("d:/games/mygame/mygame.arcproj");
   });
@@ -235,6 +235,12 @@ describe("projectKey", () => {
   });
   it("does not strip a folder that merely ends in .arcproj-like text", () => {
     expect(projectKey("D:/Games/notarcproj")).toBe("d:/games/notarcproj");
+  });
+  it("produces the running-editor key shape Rust's project_dir_key sends", () => {
+    // running_projects / running-changed carry these keys; the badge matches
+    // with projectKey(p.path), whichever shape the entry was recorded in.
+    expect(projectKey("D:\\Games\\MyGame\\MyGame.arcproj")).toBe("d:/games/mygame");
+    expect(projectKey("D:\\Games\\MyGame\\")).toBe("d:/games/mygame");
   });
 });
 
@@ -350,9 +356,10 @@ describe("project labels", () => {
     // Regression: engines are per-project, so "the selected engine" described
     // the sidebar rather than the engine that would actually open this.
     const note = compatibilityNote(false, "D:/g/A.arcproj", 5, "Debug 0.1", 7);
-    expect(note).toContain("abi 5");
+    // "ABI" in prose; the lowercase "abi 59" is reserved for the mono chips.
+    expect(note).toContain("ABI 5");
     expect(note).toContain("Debug 0.1");
-    expect(note).toContain("abi 7");
+    expect(note).toContain("ABI 7");
     expect(note).not.toContain("the selected engine");
   });
 
@@ -412,5 +419,191 @@ describe("projectPathPreview", () => {
     expect(projectPathPreview("", "MyGame")).toBe("");
     expect(projectPathPreview("D:/Games", "")).toBe("");
     expect(projectPathPreview("D:/Games", "   ")).toBe("");
+  });
+});
+
+describe("since", () => {
+  // lastOpenedUtc is SECONDS since the epoch, as a string -- the Rust side's
+  // contract. "0" and anything unparseable mean the project was never opened.
+  const now = 1_700_000_000_000; // ms
+  const ago = (s: number) => String(now / 1000 - s);
+  it("reads never-opened stamps as never", () => {
+    expect(since("0", now)).toBe("never");
+    expect(since("", now)).toBe("never");
+    expect(since("garbage", now)).toBe("never");
+    expect(since("-5", now)).toBe("never");
+  });
+  it("says just now under a minute", () => {
+    expect(since(ago(0), now)).toBe("just now");
+    expect(since(ago(59), now)).toBe("just now");
+  });
+  it("counts minutes, hours and days", () => {
+    expect(since(ago(60), now)).toBe("1m ago");
+    expect(since(ago(3599), now)).toBe("59m ago");
+    expect(since(ago(3600), now)).toBe("1h ago");
+    expect(since(ago(86399), now)).toBe("23h ago");
+    expect(since(ago(86400 * 3), now)).toBe("3d ago");
+  });
+  it("treats a stamp from the future (clock skew) as just now", () => {
+    expect(since(ago(-120), now)).toBe("just now");
+  });
+});
+
+describe("scanReportLines", () => {
+  const r = (o: Partial<{ added: number; alreadyListed: number; relocated: number;
+                          ambiguous: number; truncated: boolean }> = {}) => ({
+    added: 0, alreadyListed: 0, relocated: 0, ambiguous: 0, truncated: false, ...o,
+  });
+  it("always states what was added, even nothing", () => {
+    expect(scanReportLines(r())).toEqual(["Scan added 0 projects."]);
+  });
+  it("uses the singular for one", () => {
+    expect(scanReportLines(r({ added: 1 }))).toEqual(["Scan added 1 project."]);
+  });
+  it("lists every refusal and heal in one sentence", () => {
+    expect(scanReportLines(r({ added: 2, relocated: 1, alreadyListed: 3, ambiguous: 2 })))
+      .toEqual(["Scan added 2 projects, relocated 1 moved project, 3 already listed, " +
+                "skipped 2 folders holding more than one .arcproj."]);
+  });
+  it("adds a second line when the walk was cut short", () => {
+    const lines = scanReportLines(r({ added: 1, truncated: true }));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("stopped early");
+  });
+});
+
+describe("projectCountLine", () => {
+  it("counts projects with the right plural", () => {
+    expect(projectCountLine(0, 0, 0)).toBe("0 projects");
+    expect(projectCountLine(1, 0, 0)).toBe("1 project");
+    expect(projectCountLine(3, 0, 0)).toBe("3 projects");
+  });
+  it("adds the incompatible and missing counts only when non-zero", () => {
+    expect(projectCountLine(3, 1, 0)).toBe("3 projects · 1 needs a different engine");
+    expect(projectCountLine(3, 2, 1)).toBe("3 projects · 2 need a different engine · 1 missing");
+    expect(projectCountLine(3, 0, 2)).toBe("3 projects · 2 missing");
+  });
+});
+
+describe("menuItemsFor while running", () => {
+  // Windows refuses to rename or recycle a folder an editor holds open; the
+  // menu says so up front instead of letting the action fail with an OS error.
+  it("disables rename and delete with the reason", () => {
+    const items = menuItemsFor(false, true, true);
+    for (const kind of ["rename", "delete"]) {
+      expect(items.find((i) => i.kind === kind)?.disabled).toBe("Close the editor first");
+    }
+  });
+  it("leaves the rest enabled", () => {
+    const items = menuItemsFor(false, true, true);
+    expect(items.filter((i) => i.disabled).map((i) => i.kind)).toEqual(["rename", "delete"]);
+  });
+  it("nothing is disabled when the project is not running", () => {
+    expect(menuItemsFor(false, true, false).some((i) => i.disabled)).toBe(false);
+    expect(menuItemsFor(false, true).some((i) => i.disabled)).toBe(false);
+  });
+});
+
+describe("launchLabel", () => {
+  const ok = { missing: false, running: false, compatible: true, hasEngine: true };
+  it("names the action and the project in the ordinary case", () => {
+    expect(launchLabel("Aphelyon", ok)).toBe("Launch Aphelyon");
+  });
+  it("states each blocking or special state", () => {
+    expect(launchLabel("A", { ...ok, missing: true })).toBe("A, missing");
+    expect(launchLabel("A", { ...ok, hasEngine: false })).toBe("A, no engine registered");
+    expect(launchLabel("A", { ...ok, compatible: false })).toBe("A, needs a different engine");
+    expect(launchLabel("A", { ...ok, running: true })).toBe("A, running: focus its window");
+  });
+  it("missing outranks everything else", () => {
+    expect(launchLabel("A", { missing: true, running: true, compatible: false, hasEngine: false }))
+      .toBe("A, missing");
+  });
+});
+
+describe("sortHeaderLabel", () => {
+  it("an inactive column offers to sort by it", () => {
+    expect(sortHeaderLabel("Name", false, false)).toBe("Sort by Name");
+  });
+  it("the active column states its direction", () => {
+    expect(sortHeaderLabel("Name", true, true)).toBe("Name, sorted descending");
+    expect(sortHeaderLabel("Name", true, false)).toBe("Name, sorted ascending");
+  });
+});
+
+describe("menuPlacement", () => {
+  const view = { width: 800, height: 520 };
+  const size = { width: 236, height: 228 };
+  it("opens below the anchor when it fits", () => {
+    expect(menuPlacement({ left: 100, top: 50, bottom: 76 }, size, view))
+      .toEqual({ left: 100, top: 80 });
+  });
+  it("flips above when there is not room below", () => {
+    // 520 - 300 = 220 below: under the 228px menu, so it flips.
+    expect(menuPlacement({ left: 100, top: 274, bottom: 300 }, size, view))
+      .toEqual({ left: 100, top: 274 - 4 - 228 });
+  });
+  it("clamps inside the window when it fits neither way", () => {
+    const p = menuPlacement({ left: 100, top: 200, bottom: 200 }, size, { width: 800, height: 400 });
+    expect(p.top).toBeGreaterThanOrEqual(8);
+    expect(p.top + size.height).toBeLessThanOrEqual(400 - 8);
+  });
+  it("pins to the top edge when the menu is taller than the window", () => {
+    expect(menuPlacement({ left: 0, top: 10, bottom: 10 }, size, { width: 800, height: 200 }).top)
+      .toBe(8);
+  });
+  it("keeps the menu off the left and right edges", () => {
+    expect(menuPlacement({ left: -50, top: 0, bottom: 0 }, size, view).left).toBe(8);
+    expect(menuPlacement({ left: 700, top: 0, bottom: 0 }, size, view).left).toBe(800 - 236 - 8);
+  });
+});
+
+describe("notices", () => {
+  const n = (id: number, source: NoticeSource, text: string): Notice => ({ id, source, text });
+  it("addNotice skips text that is already showing", () => {
+    const list = [n(1, "launch", "x")];
+    expect(addNotice(list, n(2, "launch", "x"))).toEqual(list);
+    expect(addNotice(list, n(2, "launch", "y")).map((i) => i.text)).toEqual(["x", "y"]);
+  });
+  it("a new scan report replaces the previous one, even with the same text", () => {
+    // Deduping by text would make a repeated scan look like nothing happened.
+    const list = [n(1, "scan", "Scan added 0 projects."), n(2, "load", "reset"),
+                  n(3, "scan", "The scan stopped early")];
+    const next = replaceNotices(list, "scan", [n(4, "scan", "Scan added 0 projects.")]);
+    expect(next.map((i) => i.id)).toEqual([2, 4]);
+  });
+  it("capNotices shows the newest few and counts the rest", () => {
+    const list = [1, 2, 3, 4, 5].map((i) => n(i, "launch", String(i)));
+    expect(capNotices(list, 3, false)).toEqual({ shown: list.slice(2), hidden: 2 });
+    expect(capNotices(list, 3, true)).toEqual({ shown: list, hidden: 0 });
+    expect(capNotices(list.slice(0, 2), 3, false)).toEqual({ shown: list.slice(0, 2), hidden: 0 });
+  });
+});
+
+describe("defaultEngineFor", () => {
+  const a = { id: "a" }, b = { id: "b" };
+  it("uses the saved default when it is still registered", () => {
+    expect(defaultEngineFor([a, b], "b")).toBe(b);
+  });
+  it("falls back to the first engine when unset or unregistered", () => {
+    expect(defaultEngineFor([a, b], null)).toBe(a);
+    expect(defaultEngineFor([a, b], "gone")).toBe(a);
+  });
+  it("is null with no engines", () => {
+    expect(defaultEngineFor([], "a")).toBeNull();
+  });
+});
+
+describe("isNewerState", () => {
+  it("adopts a snapshot at or above the last revision", () => {
+    expect(isNewerState(5, 4)).toBe(true);
+    expect(isNewerState(5, 5)).toBe(true);
+  });
+  it("ignores an older snapshot", () => {
+    expect(isNewerState(3, 4)).toBe(false);
+  });
+  it("revision 0 (unknown) is always adopted", () => {
+    expect(isNewerState(0, 9)).toBe(true);
+    expect(isNewerState(undefined, 9)).toBe(true);
   });
 });

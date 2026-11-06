@@ -1,5 +1,8 @@
-// The Hub's only branching logic, kept out of markup so it can be unit-tested.
-// Everything else in src/lib is presentational.
+// The Hub's pure display logic -- every rule, copy string and calculation a
+// component would otherwise compute inline -- kept out of markup so it can be
+// unit-tested. Dependency-free on purpose (no Tauri, no Svelte), so the tests
+// run in plain node. The only other pure module is menuKeys.ts; the stateful
+// orchestration lives in routes/+page.svelte.
 
 /**
  * Whether `projectAbi` will open under `engineAbi`.
@@ -85,6 +88,15 @@ export function sortProjects<
 }
 
 /**
+ * Mirror of Rust's `state::normalise_path`: backslashes to '/', trailing
+ * separators trimmed, lower-cased. The building block of `projectKey`; on its
+ * own it keeps a manifest path distinct from its folder.
+ */
+export function normalisePath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
  * The identity a project is keyed on, independent of how it was recorded.
  *
  * Recents holds two shapes for the same project: a FOLDER (how opens were
@@ -93,17 +105,11 @@ export function sortProjects<
  * cover art would change the first time it is re-opened -- exactly the
  * "reads as a bug" failure the cover is supposed to avoid.
  *
- * Case and separator folding mirrors `state::normalise_path` in Rust, which
- * dedupes the recents list on the same basis.
+ * Mirrors Rust's `project_dir_key`, which is also what the running-editor
+ * set (`running_projects` / `running-changed`) is keyed by -- so the running
+ * badge matches with projectKey(p.path). Change BOTH or the badge stops
+ * matching its project.
  */
-/**
- * Mirror of Rust's `state::normalise_path` -- the fold RunningEditors keys
- * live under. Change BOTH or the running badge stops matching its project.
- */
-export function normalisePath(p: string): string {
-  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
 export function projectKey(path: string): string {
   const norm = normalisePath(path);
   const folder = norm.replace(/\/[^/]+\.arcproj$/, "");
@@ -275,8 +281,158 @@ export function compatibilityNote(
   engineAbi: number | null,
 ): string {
   if (compatible) return path;
-  return `Built against abi ${projectAbi}; ${engineLabel} is abi ${engineAbi}. ` +
+  return `Built against ABI ${projectAbi}; ${engineLabel} is ABI ${engineAbi}. ` +
     "It will refuse to open.";
+}
+
+/**
+ * The launch target's accessible name. The tooltip carries the long story,
+ * but a screen reader never reads a title on a button that also has a label,
+ * so the state that changes what a click does -- or whether it can do
+ * anything -- has to be in the name itself. Ordered by what blocks first:
+ * a missing project cannot even be probed, so it outranks everything.
+ */
+export function launchLabel(
+  name: string,
+  s: { missing: boolean; running: boolean; compatible: boolean; hasEngine: boolean },
+): string {
+  if (s.missing) return `${name}, missing`;
+  if (!s.hasEngine) return `${name}, no engine registered`;
+  if (!s.compatible) return `${name}, needs a different engine`;
+  if (s.running) return `${name}, running: focus its window`;
+  return `Launch ${name}`;
+}
+
+/**
+ * A list column header's accessible name. The active column says which way it
+ * is sorted (paired with aria-pressed); the others say what clicking does.
+ */
+export function sortHeaderLabel(label: string, active: boolean, desc: boolean): string {
+  return active ? `${label}, sorted ${desc ? "descending" : "ascending"}` : `Sort by ${label}`;
+}
+
+/**
+ * "2m ago" style, from `lastOpenedUtc`: SECONDS since the epoch as a string
+ * (what the Rust side stores). "0" or anything unparseable means never
+ * opened. `nowMs` is injectable so the tests do not depend on the clock; a
+ * stamp in the future (clock skew between machines sharing a list) reads as
+ * "just now" rather than a negative age.
+ */
+export function since(utcSeconds: string, nowMs: number = Date.now()): string {
+  const then = Number(utcSeconds);
+  if (!utcSeconds || !Number.isFinite(then) || then <= 0) return "never";
+  const d = Math.max(0, Math.floor(nowMs / 1000) - then);
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * What a Scan did, as the notice lines that report it. The counts of what was
+ * refused (ambiguous folders, a truncated walk) are the part worth reading, so
+ * every non-zero one is stated; the truncation is its own line because it asks
+ * the user to do something (scan narrower), where the rest only informs.
+ */
+export function scanReportLines(r: {
+  added: number; alreadyListed: number; relocated: number; ambiguous: number; truncated: boolean;
+}): string[] {
+  const bits = [`added ${plural(r.added, "project", "projects")}`];
+  if (r.relocated > 0) bits.push(`relocated ${plural(r.relocated, "moved project", "moved projects")}`);
+  if (r.alreadyListed > 0) bits.push(`${r.alreadyListed} already listed`);
+  if (r.ambiguous > 0) {
+    bits.push(`skipped ${plural(r.ambiguous, "folder", "folders")} holding more than one .arcproj`);
+  }
+  const lines = [`Scan ${bits.join(", ")}.`];
+  if (r.truncated) {
+    lines.push("The scan stopped early — that folder holds too many directories. Scan somewhere narrower.");
+  }
+  return lines;
+}
+
+/** The Projects meta line: "3 projects · 1 needs a different engine · 1 missing". */
+export function projectCountLine(total: number, incompatible: number, missing: number): string {
+  const parts = [plural(total, "project", "projects")];
+  if (incompatible > 0) {
+    parts.push(`${incompatible} ${incompatible === 1 ? "needs" : "need"} a different engine`);
+  }
+  if (missing > 0) parts.push(`${missing} missing`);
+  return parts.join(" · ");
+}
+
+/**
+ * The saved default engine if it is still registered, else the first one.
+ * The fallback keeps a fresh install (nothing saved yet) and a forgotten
+ * default (its engine was removed) both launching with SOMETHING rather than
+ * nothing -- the same rule the sidebar always showed.
+ */
+export function defaultEngineFor<E extends { id: string }>(engines: E[], id: string | null): E | null {
+  return engines.find((e) => e.id === id) ?? engines[0] ?? null;
+}
+
+/**
+ * Whether a HubState snapshot should replace the one on screen. Snapshots
+ * arrive from several places (action refreshes, the disk watcher, the engine
+ * re-probe) and IPC replies can land out of order, so an older one must not
+ * overwrite a newer one. Revision 0 means the sender did not know (an older
+ * backend), and is always adopted -- no ordering beats a stuck list.
+ */
+export function isNewerState(revision: number | undefined, lastAdopted: number): boolean {
+  if (!revision) return true;
+  return revision >= lastAdopted;
+}
+
+/**
+ * Where a popover menu goes: below its anchor if it fits, else above it, else
+ * clamped inside the window -- always FULLY visible. Measured, not estimated:
+ * the old rule opened downward whenever 200px were free, and the menu is
+ * about 228px tall, so the last rows of a short window cut it off. `anchor`
+ * is a box (the ellipsis button) or a zero-height point (a right-click).
+ */
+export function menuPlacement(
+  anchor: { left: number; top: number; bottom: number },
+  menu: { width: number; height: number },
+  view: { width: number; height: number },
+  edge = 8,
+  gap = 4,
+): { left: number; top: number } {
+  const left = Math.max(edge, Math.min(anchor.left, view.width - menu.width - edge));
+  let top: number;
+  if (anchor.bottom + gap + menu.height <= view.height - edge) top = anchor.bottom + gap;
+  else if (anchor.top - gap - menu.height >= edge) top = anchor.top - gap - menu.height;
+  else top = Math.max(edge, view.height - edge - menu.height);
+  return { left, top };
+}
+
+/**
+ * Where a notice came from. `scan` is replaced wholesale by the next scan (a
+ * repeated scan must visibly report again, not be deduped away); the others
+ * accumulate until dismissed.
+ */
+export type NoticeSource = "load" | "scan" | "launch";
+export type Notice = { id: number; source: NoticeSource; text: string };
+
+/** Append one notice unless the same text is already showing. */
+export function addNotice(list: Notice[], n: Notice): Notice[] {
+  return list.some((x) => x.text === n.text) ? list : [...list, n];
+}
+
+/** Drop every notice from `source` and append `fresh` -- the newest report wins. */
+export function replaceNotices(list: Notice[], source: NoticeSource, fresh: Notice[]): Notice[] {
+  return [...list.filter((x) => x.source !== source), ...fresh];
+}
+
+/**
+ * The newest `cap` notices, plus how many older ones are folded away. The
+ * banners sit above the project list, and every one of them used to shrink
+ * the scrolling region for good -- at the 520px window minimum a handful left
+ * almost no list.
+ */
+export function capNotices<T>(list: T[], cap: number, expanded: boolean): { shown: T[]; hidden: number } {
+  if (expanded || list.length <= cap) return { shown: list, hidden: 0 };
+  return { shown: list.slice(list.length - cap), hidden: list.length - cap };
 }
 
 /**
@@ -284,10 +440,18 @@ export function compatibilityNote(
  * ProjectActions (ProjectMenu.svelte), so the menu dispatches by lookup with
  * no hand-written mapping to drift. `sep` opens the below-the-line group;
  * `danger` is the red hover reserved for the one action that touches disk.
+ * `disabled` is the REASON an item cannot run right now, shown beside it --
+ * a greyed item with no explanation is a dead end.
  */
 export type MenuItemKind =
   "reveal" | "rename" | "duplicate" | "args" | "forget" | "locate" | "delete";
-export type MenuItem = { kind: MenuItemKind; label: string; danger?: boolean; sep?: boolean };
+export type MenuItem = {
+  kind: MenuItemKind; label: string; danger?: boolean; sep?: boolean; disabled?: string;
+};
+
+// Windows will not rename or recycle a folder an editor holds open, so these
+// fail with an OS error if offered while the project runs.
+const NEEDS_CLOSED: MenuItemKind[] = ["rename", "delete"];
 
 /**
  * The action-menu vocabulary as data, so it is tested like the chip copy.
@@ -299,15 +463,22 @@ export type MenuItem = { kind: MenuItemKind; label: string; danger?: boolean; se
  * hides it: repointing a project that resolves is a mistake waiting to be
  * offered. Delete's ellipsis follows the confirmation setting -- a label
  * promising a dialog that will not appear is the worst place to be inaccurate.
+ *
+ * No item here needs an ENGINE: none of them launches. That is why the menu
+ * is no longer disabled for a project that resolves to no engine -- it used
+ * to be, which took Rename, Remove and Delete away from a user who had not
+ * registered an engine yet. Launching is gated on the launch target itself.
+ * A RUNNING project keeps Rename and Delete visible but disabled, with the
+ * reason, rather than letting them fail on a locked folder.
  */
-export function menuItemsFor(missing: boolean, confirmDelete: boolean): MenuItem[] {
+export function menuItemsFor(missing: boolean, confirmDelete: boolean, running = false): MenuItem[] {
   if (missing) {
     return [
       { kind: "locate", label: "Locate…" },
       { kind: "forget", label: "Remove from list", sep: true },
     ];
   }
-  return [
+  const items: MenuItem[] = [
     { kind: "reveal", label: "Show in Explorer" },
     { kind: "rename", label: "Rename project…" },
     // No ellipsis: it copies immediately, there is no dialog to promise.
@@ -320,6 +491,8 @@ export function menuItemsFor(missing: boolean, confirmDelete: boolean): MenuItem
       danger: true,
     },
   ];
+  if (!running) return items;
+  return items.map((i) => (NEEDS_CLOSED.includes(i.kind) ? { ...i, disabled: "Close the editor first" } : i));
 }
 
 export type Cover = { monogram: string; angle: number };

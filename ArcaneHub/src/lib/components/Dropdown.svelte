@@ -19,6 +19,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import { firstEnabled, menuKey } from "$lib/menuKeys";
 
   // The trigger is a snippet, not a baked-in button: Add wants a full ghost
   // Button, the sorter wants a bare pill-resident control, and both must
@@ -39,45 +40,50 @@
 
   const buttons = () =>
     wrap ? [...wrap.querySelectorAll<HTMLButtonElement>(".menu button")] : [];
+  // aria-disabled, not the `disabled` attribute: a disabled button receives
+  // no mouse events, so its title -- the item's explanation of WHY it is
+  // unavailable -- never showed. The keyboard helper skips these instead.
+  const disabledFlags = (f: HTMLButtonElement[]) =>
+    f.map((b) => b.getAttribute("aria-disabled") === "true");
 
-  // First ENABLED item, not first item: focusing a disabled button no-ops.
+  // First ENABLED item, not first item: a disabled one cannot be chosen.
   $effect(() => {
-    if (open) buttons().find((b) => !b.disabled)?.focus();
+    if (!open) return;
+    const f = buttons();
+    f[firstEnabled(disabledFlags(f))]?.focus();
   });
+
+  const triggerEl = () => wrap?.querySelector<HTMLElement>("button") ?? null;
 
   function close(restoreFocus = true) {
     if (!open) return;
     open = false;
-    if (restoreFocus) wrap?.querySelector("button")?.focus();
+    if (restoreFocus) triggerEl()?.focus();
   }
 
   function choose(it: DropdownItem) {
+    if (it.disabled) return;
     // Close FIRST, same rule as ProjectMenu: an action may open a dialog, and
     // a popover left behind the scrim catches clicks the user cannot see.
     open = false;
+    // Focus the trigger BEFORE dispatching: the item is about to unmount, and
+    // a dialog the action opens records whatever had focus as the place to
+    // return to -- without this that was <body>, and closing the dialog
+    // dropped a keyboard user at the top of the window.
+    triggerEl()?.focus();
     it.onselect();
   }
 
+  // The shared menu keys (lib/menuKeys.ts) -- the same rules as ProjectMenu.
   function onMenuKeys(e: KeyboardEvent) {
     const f = buttons();
     if (f.length === 0) return;
-    const i = f.indexOf(document.activeElement as HTMLButtonElement);
-    switch (e.key) {
-      case "ArrowDown":
-        e.preventDefault();
-        f[(i + 1) % f.length].focus();
-        break;
-      case "ArrowUp":
-        e.preventDefault();
-        f[(i - 1 + f.length) % f.length].focus();
-        break;
-      // Menu, not dialog: Tab dismisses. Focus returns to the trigger because
-      // the items unmount on this keystroke (ProjectMenu's rule).
-      case "Tab":
-        e.preventDefault();
-        close();
-        break;
-    }
+    const act = menuKey(e.key, f.indexOf(document.activeElement as HTMLButtonElement),
+                        disabledFlags(f));
+    if (!act) return;
+    e.preventDefault();
+    if ("close" in act) close();
+    else f[act.focus].focus();
   }
 
   function onWindowKey(e: KeyboardEvent) {
@@ -107,7 +113,7 @@
         <button class="item" type="button" tabindex="-1"
                 role={radio ? "menuitemradio" : "menuitem"}
                 aria-checked={radio ? !!it.active : undefined}
-                disabled={it.disabled} title={it.title}
+                aria-disabled={it.disabled ? "true" : undefined} title={it.title}
                 onclick={() => choose(it)}>
           {#if radio}<span class="slot">{#if it.active}<Icon name="check" size={13} />{/if}</span>{/if}
           {it.label}
@@ -131,16 +137,17 @@
           padding: 5px;
           background: var(--surface); border: 1px solid var(--border);
           border-radius: var(--r-panel);
-          box-shadow: 0 16px 40px rgba(0, 0, 0, .55);
+          box-shadow: var(--shadow-pop);
           animation: rise var(--dur) var(--ease); }
 
   .item { display: flex; align-items: center; gap: 7px; width: 100%;
           text-align: left; font: inherit; font-size: 13px; padding: 8px 10px;
           border: 0; border-radius: 5px; background: none; color: var(--text);
           cursor: default; transition: background var(--dur) var(--ease); }
-  .item:hover:not(:disabled) { background: rgba(255, 255, 255, .06); }
-  /* Present but honest -- the title says what to do about it. */
-  .item:disabled { color: var(--text-dim); opacity: .6; }
+  .item:hover:not([aria-disabled="true"]) { background: var(--hover-wash); }
+  /* Present but honest -- the title says what to do about it. Dim by colour
+     alone, not opacity, so the label still clears AA (--text-dim). */
+  .item[aria-disabled="true"] { color: var(--text-dim); }
 
   /* Reserved on every item of a pick-one menu, so the labels align whether
      or not the check is there. */

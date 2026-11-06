@@ -6,8 +6,9 @@
 // something when they did not.
 //
 // Same durability contract as state.rs: any read failure falls back to
-// Default. A hand-edited or truncated settings file must never brick the Hub,
-// and settings are by definition the least important thing to preserve.
+// Default. A hand-edited or truncated settings file must never brick the Hub.
+// And the same refusal (store.rs): a settings file this session could not
+// read, or one a newer Hub wrote, is never overwritten with those defaults.
 
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +134,20 @@ pub struct Settings {
     /// one-click delete for exactly the users who never asked for it.
     #[serde(default = "yes")]
     pub confirm_delete: bool,
+
+    /// The engine (an `EngineEntry::id`) the Hub launches with when a
+    /// project has no pin of its own. None, or an id no longer registered,
+    /// means the first registered engine. Persisted so the sidebar's choice
+    /// survives a restart AND so the shell route (a double-clicked .arcproj,
+    /// launch::shell_engine) uses the same default as a card click -- before
+    /// it, the default was session state and the shell route could only
+    /// guess "the first engine". Read by the frontend's engine resolution
+    /// and by shell_engine. Normalised by `clean_engine_id` (trimmed, empty
+    /// = None); NOT validated against the registry here, since forgetting
+    /// an engine must not need to rewrite settings -- a dangling id falls
+    /// back at the point of use.
+    #[serde(default)]
+    pub default_engine_id: Option<String>,
 }
 
 fn default_view() -> String {
@@ -160,8 +175,14 @@ impl Default for Settings {
             project_sort: default_sort(),
             project_sort_desc: yes(),
             confirm_delete: yes(),
+            default_engine_id: None,
         }
     }
+}
+
+/// Trim a default-engine id; an empty one means "no default" (None).
+pub fn clean_engine_id(id: Option<&str>) -> Option<String> {
+    id.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
 }
 
 /// Trim a user-typed directory into the form the dialog layer wants.
@@ -295,6 +316,7 @@ mod tests {
             project_sort: SORT_NAME.to_string(),
             project_sort_desc: false,
             confirm_delete: false,
+            default_engine_id: Some("c:/eng/arcaneeditor.exe".to_string()),
         };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
@@ -308,6 +330,21 @@ mod tests {
         assert!(text.contains("projectSort"), "got {text}");
         assert!(text.contains("projectSortDesc"), "got {text}");
         assert!(text.contains("confirmDelete"), "got {text}");
+        assert!(text.contains("defaultEngineId"), "got {text}");
+    }
+
+    #[test]
+    fn a_file_written_before_default_engine_id_existed_has_no_default() {
+        let back: Settings = serde_json::from_str(r#"{"launchBehavior":"stay"}"#).unwrap();
+        assert_eq!(back.default_engine_id, None, "None = the first registered engine");
+    }
+
+    #[test]
+    fn clean_engine_id_trims_and_maps_empty_to_none() {
+        assert_eq!(clean_engine_id(Some("  c:/e.exe ")), Some("c:/e.exe".to_string()));
+        assert_eq!(clean_engine_id(Some("   ")), None);
+        assert_eq!(clean_engine_id(Some("")), None);
+        assert_eq!(clean_engine_id(None), None);
     }
 
     #[test]

@@ -50,6 +50,13 @@ export type HubState = {
    * to be silent, so the user just found an empty project list.
    */
   warnings: string[];
+  /**
+   * Monotonic per Hub process, bumped on every change; 0 = unknown (an older
+   * backend). Snapshots arrive from several places and IPC replies can land
+   * out of order, so the page ignores one older than what it already shows
+   * (format.isNewerState).
+   */
+  revision: number;
 };
 
 /** Mirrors `settings::Settings`. Every field is read somewhere. */
@@ -81,6 +88,13 @@ export type Settings = {
   projectSortDesc: boolean;
   /** Show the confirmation dialog before deleting. Read in the delete handler. */
   confirmDelete: boolean;
+  /**
+   * The Hub default engine (EngineEntry.id), picked in Engines. null, or an id
+   * that is no longer registered, falls back to the first engine
+   * (format.defaultEngineFor). Persisted so the choice survives a restart --
+   * it used to live only in page state and reset to engines[0] every launch.
+   */
+  defaultEngineId: string | null;
 };
 
 export const loadState = () => invoke<HubState>("load_state");
@@ -150,13 +164,18 @@ export type OpenOutcome = {
   kind: "launched" | "focused" | "projectMissing" | "engineMissing";
 };
 
-/** `projectPath` is a `.arcproj` file or a project folder; the engine takes both. */
+/**
+ * `projectPath` is a `.arcproj` file or a project folder; the engine takes both.
+ * Rejects when `enginePath` is not a registered engine -- the UI only passes
+ * registered ones, so that surfaces as an ordinary error.
+ */
 export const openProject = (projectPath: string, enginePath: string) =>
   invoke<OpenOutcome>("open_project", { projectPath, enginePath });
 
 /**
- * Normalised keys (see format.normalisePath) of projects with a live editor.
- * For the initial paint; transitions arrive as `running-changed` events.
+ * Keys of projects with a live editor, shaped like Rust's project_dir_key --
+ * match them with format.projectKey(p.path). For the initial paint;
+ * transitions arrive as `running-changed` events.
  */
 export const runningProjects = () => invoke<string[]>("running_projects");
 
@@ -189,17 +208,23 @@ export const scanForProjects = (dir: string) =>
 export const projectCovers = (paths: string[]) =>
   invoke<Record<string, string>>("project_covers", { paths });
 
-/** Returns the path of the `.arcproj` it wrote, ready to hand to openProject. */
+/**
+ * Writes the project and LISTS it, so a launch that fails afterwards cannot
+ * leave a created-but-unlisted project. Returns the `.arcproj` it wrote,
+ * ready to hand to openProject.
+ */
 export const createProject = (dir: string, name: string, enginePath: string) =>
   invoke<string>("create_project", { dir, name, enginePath });
 
-// "2m ago" style. Seconds-since-epoch is what the Rust side stores.
-export function since(utcSeconds: string): string {
-  const then = Number(utcSeconds);
-  if (!Number.isFinite(then) || then <= 0) return "never";
-  const d = Math.max(0, Math.floor(Date.now() / 1000) - then);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-}
+/**
+ * List an existing project WITHOUT launching it -- "Add project…". Returns
+ * the stored entry. Needs no engine: adding is about the list, not the editor.
+ */
+export const addProject = (path: string) => invoke<RecentProject>("add_project", { path });
+
+/**
+ * Restore and focus the Hub window. A tray quick-launch runs while the window
+ * is parked in the tray, so a failure has to bring it back before it says
+ * anything -- a message in a hidden window is a message nobody reads.
+ */
+export const showHub = () => invoke<void>("show_hub");

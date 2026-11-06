@@ -28,7 +28,7 @@
 
   <label class="f">
     <span class="label">Arguments</span>
-    <input bind:value={args} spellcheck="false"
+    <input class="field mono" bind:value={args} spellcheck="false"
            placeholder="--backend vulkan"
            onkeydown={(e) => e.key === "Enter" && submit()} />
   </label>
@@ -43,7 +43,7 @@
   </p>
 
   {#if error}
-    <p class="banner" role="alert">{error}</p>
+    <p class="banner error" role="alert">{error}</p>
   {/if}
 
   {#snippet footer()}
@@ -53,23 +53,15 @@
 </Modal>
 
 <style>
-  .lead { font-size: 13px; color: var(--text-dim); margin: 0; line-height: 1.55; }
+  /* overflow-wrap: the lead names the project, and an unbroken name must wrap
+     rather than scroll the dialog sideways. */
+  .lead { font-size: 13px; color: var(--text-dim); margin: 0; line-height: 1.55;
+          overflow-wrap: anywhere; }
   strong { color: var(--text-muted); font-weight: 600; }
 
   .f { display: flex; flex-direction: column; gap: 5px; }
-  input { background: var(--well); border: 1px solid var(--border);
-          border-radius: var(--r-btn); color: var(--text);
-          font-family: var(--font-mono); font-size: 12.5px; padding: 9px 12px;
-          user-select: text; cursor: text; width: 100%; }
-  input::placeholder { color: var(--text-dim); }
-  input:focus { border-color: var(--accent-ring); outline: none; }
 
   .note { font-size: 12px; color: var(--text-dim); margin: 0; line-height: 1.55; }
   code { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
 
-  /* Matches the main-area banner in +page.svelte -- same failure, same look. */
-  .banner { background: color-mix(in srgb, var(--fail-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--fail-accent) 40%, transparent);
-            border-radius: var(--r-btn); color: var(--text); font-size: 13px;
-            padding: 10px 13px; margin: 0; user-select: text; }
 </style>

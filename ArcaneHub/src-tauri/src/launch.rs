@@ -18,18 +18,78 @@ use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use tauri::Manager;
 
 use crate::{editorlock, engine, project, resolve, settings, spawn, state, tray};
 
-/// Live editors, keyed by normalised PROJECT path -> pid. One editor per
-/// project: the dangerous case is the same project open twice (two editors
-/// saving one project's files clobber each other); two different projects on
-/// one engine build stay legal. The pid, not the Child, lives here -- the
-/// wait thread owns the Child for its whole lifetime.
+/// Live editors, keyed by `state::project_dir_key` of the PROJECT -> pid.
+/// One editor per project: the dangerous case is the same project open twice
+/// (two editors saving one project's files clobber each other); two different
+/// projects on one engine build stay legal. The pid, not the Child, lives
+/// here -- the wait thread owns the Child for its whole lifetime.
+///
+/// project_dir_key, not normalise_path: the editor lock that guards the same
+/// rule lives per FOLDER (Saved/editor.lock), and a folder-shaped legacy row
+/// and a manifest-shaped launch of one project must be one key, or the badge
+/// and the double-open guard each miss half the cases.
 pub struct RunningEditors(pub Mutex<HashMap<String, u32>>);
+
+/// The running map, recovering from poison. A panic on a thread that held it
+/// (the wait thread, a command) must not turn every later launch, exit and
+/// badge refresh into a second panic; the map is only pids, and a stale one
+/// is re-checked against the process table before it is believed.
+fn running_map(app: &tauri::AppHandle) -> MutexGuard<'_, HashMap<String, u32>> {
+    app.state::<RunningEditors>()
+        .inner()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Disk-touching operations in flight: Duplicate, Scan, Rename, Delete,
+/// Create. Close-mode's delayed exit used to `app.exit(0)` on a timer, which
+/// could kill a Duplicate mid-copy (a half-copied "X Copy" left behind with
+/// no listing) because the user had launched something else meanwhile.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII token for one in-flight operation; dropping it (including on an
+/// early `?` return or a panic) releases it.
+pub struct Busy(());
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Mark a disk operation as in flight until the returned guard drops.
+pub fn busy() -> Busy {
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    Busy(())
+}
+
+/// Wait until no operation is in flight, polling, for at most `max`.
+/// Returns whether the Hub went idle. Bounded so a wedged copy cannot keep a
+/// closed Hub alive forever.
+pub fn wait_idle(max: Duration) -> bool {
+    let deadline = std::time::Instant::now() + max;
+    loop {
+        if IN_FLIGHT.load(Ordering::SeqCst) == 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How long close-mode's exit waits for in-flight operations to finish.
+const EXIT_DRAIN_MAX: Duration = Duration::from_secs(600);
 
 impl RunningEditors {
     pub fn new() -> Self {
@@ -150,20 +210,14 @@ pub fn now_utc_iso() -> String {
 /// spawned, including mid-boot ones with no lock yet) merged with each
 /// listed project's editor lock (editors that outlived a Hub restart, or
 /// were launched by hand). Sorted so set-comparison and the emitted payload
-/// are deterministic. Keys are `state::normalise_path` of the recorded
-/// project path -- format.ts `normalisePath` mirrors that fold exactly.
+/// are deterministic. Keys are `state::project_dir_key` of the recorded
+/// project path: lower-cased, '/' separators, and the FOLDER of a manifest
+/// (format.ts `projectKey` is the mirror the running badge must match with).
 pub fn running_keys(app: &tauri::AppHandle) -> Vec<String> {
-    let mut keys: std::collections::HashSet<String> = app
-        .state::<RunningEditors>()
-        .0
-        .lock()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+    let mut keys: std::collections::HashSet<String> = running_map(app).keys().cloned().collect();
     for e in state::load().recents {
         if editorlock::read_live(&resolve::project_dir(Path::new(&e.path))).is_some() {
-            keys.insert(state::normalise_path(&e.path));
+            keys.insert(state::project_dir_key(&e.path));
         }
     }
     let mut keys: Vec<String> = keys.into_iter().collect();
@@ -192,6 +246,20 @@ pub fn do_open_project(
 ) -> Result<OpenOutcome, String> {
     let proj = PathBuf::from(&project_path);
     let exe = engine::resolve_editor_exe(Path::new(&engine_path));
+
+    // Loaded before anything else: the engine gate below and the project's
+    // saved arguments both read it. A SNAPSHOT -- the write at the end goes
+    // through state::mutate, never through this copy.
+    let snapshot = state::load();
+
+    // IPC TRUST: the engine must be one the user REGISTERED. `engine_path` is
+    // an IPC argument, and without this gate any caller holding the IPC
+    // could have the Hub execute an arbitrary exe with a project argument.
+    // Registered-but-missing still gets the EngineMissing outcome below.
+    if registered_engine(&snapshot.engines, &engine_path).is_none() {
+        return Err(format!("{engine_path} is not a registered engine"));
+    }
+
     if !proj.exists() {
         return Ok(OpenOutcome::ProjectMissing);
     }
@@ -204,23 +272,29 @@ pub fn do_open_project(
     // itself (it may be mid-rebuild while its editor runs on). Two sources
     // of truth, in order:
     //  1. The in-memory map -- editors THIS Hub spawned, including one still
-    //     mid-boot whose lock is not on disk yet. A pid whose window cannot
-    //     be found is a stale entry (the wait thread races this) and falls
-    //     through.
+    //     mid-boot whose lock is not on disk yet. The entry is believed while
+    //     its PROCESS is alive (editorlock::pid_alive), whether or not it has
+    //     a window yet; only a dead pid is dropped as stale. This used to
+    //     drop any pid whose window could not be found -- which is every
+    //     editor in its first seconds -- and then spawn a rival against it,
+    //     the very case rule 2 below exists to prevent.
     //  2. The editor's own lock in the project (pid + start-time validated,
     //     editorlock.rs) -- which survives Hub restarts, so close-mode still
     //     guards. A live lock refuses the rival spawn even when its window
     //     cannot be focused yet: an editor mid-boot has no window, and
     //     spawning a second editor against it is exactly the
     //     two-editors-one-project case this exists to prevent.
-    let project_key = state::normalise_path(&project_path);
-    {
-        let editors = app.state::<RunningEditors>();
-        let mut live = editors.0.lock().unwrap();
-        if let Some(&pid) = live.get(&project_key) {
-            if spawn::focus_process_window(pid) {
-                return Ok(OpenOutcome::Focused);
-            }
+    let project_key = state::project_dir_key(&project_path);
+    let mapped = running_map(app).get(&project_key).copied();
+    if let Some(pid) = mapped {
+        if editorlock::pid_alive(pid) {
+            let _ = spawn::focus_process_window(pid);
+            return Ok(OpenOutcome::Focused);
+        }
+        // Dead: drop it -- but only if it is still THAT pid; a concurrent
+        // launch may have replaced it while the lock was released.
+        let mut live = running_map(app);
+        if live.get(&project_key) == Some(&pid) {
             live.remove(&project_key);
         }
     }
@@ -240,12 +314,10 @@ pub fn do_open_project(
     // Loaded before the spawn so this project's saved extra arguments can go on
     // the command line. Passed as an argv ARRAY, never a joined string: each
     // token reaches the child exactly as typed, with no shell in between.
-    let mut s = state::load();
-    let key = state::normalise_path(&project_path);
-    let extra: Vec<String> = s
+    let extra: Vec<String> = snapshot
         .recents
         .iter()
-        .find(|e| state::normalise_path(&e.path) == key)
+        .find(|e| state::project_dir_key(&e.path) == project_key)
         .map(|e| project::split_args(&e.args))
         .unwrap_or_default();
 
@@ -254,14 +326,6 @@ pub fn do_open_project(
     // predicate.) The args appended above are the user's own saved tokens,
     // verbatim, so this is the one place that can ask.
     let golden = golden_run(&extra);
-
-    // Adopt what the probe just said: the entry's cached abi/build refresh so
-    // the UI's next load speaks about the binary that actually launched.
-    let exe_key = state::normalise_path(&exe.to_string_lossy());
-    if let Some(e) = s.engines.iter_mut().find(|e| e.id == exe_key) {
-        e.engine_abi = info.engine_abi;
-        e.build = info.build.clone();
-    }
 
     let mut child = Command::new(&exe)
         .arg("--project")
@@ -278,7 +342,8 @@ pub fn do_open_project(
         .spawn()
         .map_err(|e| format!("could not launch the editor: {e}"))?;
 
-    app.state::<RunningEditors>().0.lock().unwrap().insert(project_key.clone(), child.id());
+    let pid = child.id();
+    running_map(app).insert(project_key.clone(), pid);
     emit_running(app);
 
     // Hand the screen to the editor, per the configured behaviour. Checked
@@ -297,20 +362,30 @@ pub fn do_open_project(
             // spares the process. Editors always outlive the Hub; the launch
             // guard still holds afterwards through the editor's own lock
             // (editorlock.rs), which is how close-mode stays safe at all.
+            //
+            // Exit waits for in-flight disk work (Duplicate, Scan, Rename,
+            // Delete, Create -- the `busy()` guards) to drain, bounded by
+            // EXIT_DRAIN_MAX: a timer-driven exit used to kill a Duplicate
+            // mid-copy. And it never closes a window the user has brought
+            // BACK meanwhile (a relaunch, the drain's long wait): exiting
+            // under someone who is using the Hub is not "close after launch".
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.hide();
             }
             let app = app.clone();
             let key = project_key.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(BOOT_WATCHDOG + std::time::Duration::from_millis(500));
-                let alive = app
-                    .state::<RunningEditors>()
-                    .0
-                    .lock()
-                    .unwrap()
-                    .contains_key(&key);
-                if alive {
+                std::thread::sleep(BOOT_WATCHDOG + Duration::from_millis(500));
+                let alive = running_map(&app).get(&key) == Some(&pid);
+                if !alive {
+                    return;
+                }
+                wait_idle(EXIT_DRAIN_MAX);
+                let visible = app
+                    .get_webview_window("main")
+                    .and_then(|w| w.is_visible().ok())
+                    .unwrap_or(false);
+                if !visible {
                     app.exit(0);
                 }
             });
@@ -341,9 +416,13 @@ pub fn do_open_project(
 
             use tauri::Emitter;
             let none_left = {
-                let editors = app.state::<RunningEditors>();
-                let mut live = editors.0.lock().unwrap();
-                live.remove(&key);
+                let mut live = running_map(&app);
+                // Only OUR entry: if this pid was dropped as dead and the
+                // project relaunched meanwhile, the key now names the NEW
+                // editor, and removing it would unguard a live editor.
+                if live.get(&key) == Some(&pid) {
+                    live.remove(&key);
+                }
                 live.is_empty()
             };
             emit_running(&app);
@@ -426,56 +505,102 @@ pub fn do_open_project(
     // case) repoints the old missing entry -- star, pin, arguments intact --
     // and the touch below then carries all of that forward, instead of a
     // stranger row appearing while the old one sits greyed forever.
+    // heal_by_guid itself refuses when this path is ALREADY listed (a clone
+    // or worktree sharing the guid with a missing sibling).
     let guid = resolve::manifest_guid(&proj);
-    if let Some(g) = &guid {
-        state::heal_by_guid(&mut s.recents, g, &proj.to_string_lossy(), &name, abi);
-    }
+    let proj_path = proj.to_string_lossy().to_string();
 
-    state::touch_recent(
-        &mut s.recents,
-        state::RecentProject {
-            path: proj.to_string_lossy().to_string(),
-            name,
-            last_opened_utc: now_utc_iso(),
-            engine_abi: abi,
-            // None, NOT the engine just used: launching is not the same as
-            // choosing. touch_recent carries an existing pin across, so a
-            // pinned project stays pinned and an unpinned one keeps following
-            // the default instead of silently pinning itself on first launch.
-            engine_id: None,
-            // Empty for the same reason: touch_recent carries the saved
-            // arguments across, so launching never wipes them.
-            args: String::new(),
-            // False for the same reason: touch_recent ORs the previous star
-            // in, so launching never unstars.
-            favorite: false,
-            // The project was just found on disk to launch; load() re-stamps
-            // this on every read regardless.
-            missing: false,
-            // The identity read above; None (pre-guid manifest) lets
-            // touch_recent keep whatever was already known.
-            guid,
-        },
-    );
-    state::save(&s)?;
+    // Every disk read above happened OUTSIDE the state lock; only the edit
+    // is inside it (state::mutate).
+    state::mutate(|s| {
+        // Adopt what the probe just said: the entry's cached abi/build
+        // refresh so the UI's next load speaks about the binary that
+        // actually launched.
+        let exe_key = state::normalise_path(&exe.to_string_lossy());
+        if let Some(e) = s.engines.iter_mut().find(|e| e.id == exe_key) {
+            e.engine_abi = info.engine_abi;
+            e.build.clone_from(&info.build);
+        }
+        if let Some(g) = &guid {
+            state::heal_by_guid(&mut s.recents, g, &proj_path, &name, abi);
+        }
+        state::touch_recent(
+            &mut s.recents,
+            state::RecentProject {
+                path: proj_path.clone(),
+                name: name.clone(),
+                last_opened_utc: now_utc_iso(),
+                engine_abi: abi,
+                // None, NOT the engine just used: launching is not the same
+                // as choosing. touch_recent carries an existing pin across,
+                // so a pinned project stays pinned and an unpinned one keeps
+                // following the default instead of silently pinning itself.
+                engine_id: None,
+                // Empty for the same reason: touch_recent carries the saved
+                // arguments across, so launching never wipes them.
+                args: String::new(),
+                // False for the same reason: touch_recent ORs the previous
+                // star in, so launching never unstars.
+                favorite: false,
+                // The project was just found on disk to launch; load()
+                // re-stamps this on every read regardless.
+                missing: false,
+                // The identity read above; None (pre-guid manifest) lets
+                // touch_recent keep whatever was already known.
+                guid: guid.clone(),
+            },
+        );
+        Ok(())
+    })?;
     Ok(OpenOutcome::Launched)
+}
+
+/// The registered engine `engine_path` names (an exe or its folder, matched
+/// by id -- the normalised exe path), or None. The IPC gate open_project
+/// applies before it will execute anything. Pure for the test.
+pub fn registered_engine<'a>(
+    engines: &'a [state::EngineEntry],
+    engine_path: &str,
+) -> Option<&'a state::EngineEntry> {
+    let exe = engine::resolve_editor_exe(Path::new(engine_path.trim()));
+    let id = state::normalise_path(&exe.to_string_lossy());
+    engines.iter().find(|e| e.id == id)
 }
 
 /// The shell route's engine choice, mirroring what a fresh Hub session's
 /// card click would use: the project's pin when it is listed and the pin
-/// resolves, else the first registered engine (the sidebar's default
-/// selection is SESSION state, not persisted, so the first engine is exactly
-/// what a new session's launch would pick). None = nothing registered.
-/// Pure, and extracted precisely so this policy is TESTED -- it used to live
-/// inline in untestable skin.
-pub fn shell_engine<'a>(s: &'a state::HubState, path: &str) -> Option<&'a state::EngineEntry> {
+/// resolves; else the persisted default engine (Settings::default_engine_id)
+/// when it resolves; else the first registered engine. A dangling pin or a
+/// dangling default falls through rather than refusing the launch. None =
+/// nothing registered. Pure, and extracted precisely so this policy is
+/// TESTED -- it used to live inline in untestable skin.
+pub fn shell_engine<'a>(
+    s: &'a state::HubState,
+    path: &str,
+    default_engine_id: Option<&str>,
+) -> Option<&'a state::EngineEntry> {
     let key = state::project_dir_key(path);
+    let by_id = |id: &str| s.engines.iter().find(|en| en.id == id);
     s.recents
         .iter()
         .find(|e| state::project_dir_key(&e.path) == key)
-        .and_then(|e| e.engine_id.as_ref())
-        .and_then(|id| s.engines.iter().find(|en| &en.id == id))
+        .and_then(|e| e.engine_id.as_deref())
+        .and_then(by_id)
+        .or_else(|| default_engine_id.and_then(by_id))
         .or_else(|| s.engines.first())
+}
+
+/// The project a shell invocation names, made absolute against the INVOKING
+/// process's working directory. A second instance started as
+/// `arcane_hub.exe MyGame.arcproj` from a console forwards a RELATIVE path,
+/// and resolving it against the first instance's cwd (wherever the Hub was
+/// started) opened the wrong file or none. Pure for the test.
+pub fn shell_target(arg: &str, cwd: Option<&Path>) -> String {
+    let p = Path::new(arg);
+    match cwd {
+        Some(dir) if !p.is_absolute() => dir.join(p).to_string_lossy().to_string(),
+        _ => arg.to_string(),
+    }
 }
 
 // Route a shell-opened .arcproj (double-click, Open With, drag onto the exe)
@@ -486,7 +611,8 @@ pub fn shell_engine<'a>(s: &'a state::HubState, path: &str) -> Option<&'a state:
 fn shell_open(app: &tauri::AppHandle, path: &str) {
     use tauri::Emitter;
     let s = state::load();
-    let Some(engine) = shell_engine(&s, path) else {
+    let default_id = settings::load().default_engine_id;
+    let Some(engine) = shell_engine(&s, path, default_id.as_deref()) else {
         tray::show_hub(app);
         let _ = app.emit(
             "launch-failed",
@@ -542,16 +668,18 @@ fn shell_open(app: &tauri::AppHandle, path: &str) {
 /// (the probe may block up to its 10s timeout, and neither setup() nor the
 /// single-instance callback may stall that long). Returns whether it did, so
 /// the single-instance callback can tell a plain "show me the Hub" relaunch
-/// from one that was really a file open.
+/// from one that was really a file open. `cwd` is the INVOKING process's
+/// working directory (see shell_target).
 pub fn route_shell_args<'a>(
     app: &tauri::AppHandle,
     args: impl IntoIterator<Item = &'a str>,
+    cwd: Option<&Path>,
 ) -> bool {
     let Some(p) = project::arcproj_in_args(args) else {
         return false;
     };
     let app = app.clone();
-    let path = p.to_string();
+    let path = shell_target(p, cwd);
     std::thread::spawn(move || shell_open(&app, &path));
     true
 }
@@ -561,7 +689,7 @@ mod tests {
     use super::*;
 
     fn hub(recents: Vec<state::RecentProject>, engines: Vec<state::EngineEntry>) -> state::HubState {
-        state::HubState { recents, engines, warnings: Vec::new() }
+        state::HubState { recents, engines, ..Default::default() }
     }
 
     fn rp(path: &str, pin: Option<&str>) -> state::RecentProject {
@@ -588,10 +716,10 @@ mod tests {
         let b = ee("C:/eng-b/ArcaneEditor.exe");
         let pin = b.id.clone();
         let s = hub(vec![rp("D:/G/My/My.arcproj", Some(&pin))], vec![a, b]);
-        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj").unwrap().id, pin);
+        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj", None).unwrap().id, pin);
         // The folder-vs-manifest fold: a double-clicked FILE must find the
         // entry however it was recorded.
-        assert_eq!(shell_engine(&s, "D:/G/My").unwrap().id, pin);
+        assert_eq!(shell_engine(&s, "D:/G/My", None).unwrap().id, pin);
     }
 
     #[test]
@@ -600,18 +728,79 @@ mod tests {
         let first = a.id.clone();
         // Unlisted project -> first engine (a fresh session's default).
         let s = hub(vec![], vec![a, ee("C:/eng-b/ArcaneEditor.exe")]);
-        assert_eq!(shell_engine(&s, "D:/G/New/New.arcproj").unwrap().id, first);
+        assert_eq!(shell_engine(&s, "D:/G/New/New.arcproj", None).unwrap().id, first);
         // A DANGLING pin (engine no longer registered) falls back the same
         // way rather than refusing the launch.
         let s = hub(vec![rp("D:/G/My/My.arcproj", Some("gone"))],
                     vec![ee("C:/eng-a/ArcaneEditor.exe")]);
-        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj").unwrap().id, first);
+        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj", None).unwrap().id, first);
     }
 
     #[test]
     fn shell_engine_with_nothing_registered_is_none() {
         let s = hub(vec![rp("D:/G/My/My.arcproj", None)], vec![]);
-        assert!(shell_engine(&s, "D:/G/My/My.arcproj").is_none());
+        assert!(shell_engine(&s, "D:/G/My/My.arcproj", None).is_none());
+        assert!(shell_engine(&s, "D:/G/My/My.arcproj", Some("c:/eng/arcaneeditor.exe")).is_none());
+    }
+
+    #[test]
+    fn shell_engine_uses_the_persisted_default_before_the_first_engine() {
+        // The Settings default (Engines' "make default") is what a fresh
+        // session's card click would pick; the shell route must agree.
+        let a = ee("C:/eng-a/ArcaneEditor.exe");
+        let b = ee("C:/eng-b/ArcaneEditor.exe");
+        let (first, default) = (a.id.clone(), b.id.clone());
+        let s = hub(vec![rp("D:/G/My/My.arcproj", None)], vec![a, b]);
+        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj", Some(&default)).unwrap().id, default);
+        assert_eq!(shell_engine(&s, "D:/G/Unlisted.arcproj", Some(&default)).unwrap().id, default);
+        // A DANGLING default (that engine was forgotten) falls back to first.
+        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj", Some("gone")).unwrap().id, first);
+    }
+
+    #[test]
+    fn shell_engine_lets_a_live_pin_beat_the_default() {
+        let a = ee("C:/eng-a/ArcaneEditor.exe");
+        let b = ee("C:/eng-b/ArcaneEditor.exe");
+        let (pin, default) = (a.id.clone(), b.id.clone());
+        let s = hub(vec![rp("D:/G/My/My.arcproj", Some(&pin))], vec![a, b]);
+        assert_eq!(shell_engine(&s, "D:/G/My/My.arcproj", Some(&default)).unwrap().id, pin);
+    }
+
+    #[test]
+    fn registered_engine_matches_by_id_and_refuses_strangers() {
+        // The IPC gate on open_project: an unregistered exe is never run.
+        let engines = vec![ee("C:/Eng/ArcaneEditor.exe")];
+        assert!(registered_engine(&engines, r"c:\eng\arcaneeditor.exe").is_some());
+        assert!(registered_engine(&engines, "C:/Eng").is_some(), "the folder form resolves");
+        assert!(registered_engine(&engines, "C:/Evil/ArcaneEditor.exe").is_none());
+        assert!(registered_engine(&engines, "C:/Windows/System32/cmd.exe").is_none());
+        assert!(registered_engine(&[], "C:/Eng/ArcaneEditor.exe").is_none());
+    }
+
+    #[test]
+    fn shell_target_resolves_a_relative_arg_against_the_invoking_cwd() {
+        let cwd = Path::new("D:/Games/My");
+        assert_eq!(
+            PathBuf::from(shell_target("My.arcproj", Some(cwd))),
+            PathBuf::from("D:/Games/My/My.arcproj")
+        );
+        // Absolute stays as given, cwd or not.
+        assert_eq!(shell_target("C:/X/X.arcproj", Some(cwd)), "C:/X/X.arcproj");
+        assert_eq!(shell_target("My.arcproj", None), "My.arcproj");
+    }
+
+    #[test]
+    fn busy_guards_hold_the_exit_until_they_drop() {
+        // Close-mode's exit waits on these. A dropped guard (an early `?`
+        // return included) must release, or the Hub would never close.
+        let g = busy();
+        assert!(!wait_idle(Duration::from_millis(150)), "in flight: not idle");
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(g);
+        });
+        assert!(wait_idle(Duration::from_secs(10)), "idle once the guard drops");
+        t.join().unwrap();
     }
 
     fn args(v: &[&str]) -> Vec<String> {

@@ -16,7 +16,8 @@
     version: string;
     /** The last guard() failure. Shown here because the banner is under the scrim. */
     error: string;
-    onSave: (s: Settings) => void;
+    /** Resolves true only if the save actually ran (not failed, not dropped). */
+    onSave: (s: Settings) => Promise<boolean>;
     onBrowseDir: () => Promise<string | null>;
     onReveal: () => void;
     onClearRecents: () => void;
@@ -82,6 +83,21 @@
     onClearRecents();
   }
 
+  // The checkbox and the radios bind ONE-WAY (`checked={settings...}`): the
+  // click toggles the DOM at once and the save follows. If the save fails or
+  // is dropped, `settings` does not change, so Svelte has nothing to re-render
+  // -- and the control kept showing a value that was never stored. Re-assert
+  // every control in the group from `settings` whenever a save did not land.
+  async function saveFrom(el: HTMLInputElement, next: Settings) {
+    const group = el.type === "radio"
+      ? [...(el.closest("[role=radiogroup]")?.querySelectorAll<HTMLInputElement>("input") ?? [])]
+      : [el];
+    if (await onSave(next)) return;
+    for (const c of group) {
+      c.checked = c.type === "radio" ? c.value === settings.launchBehavior : settings.confirmDelete;
+    }
+  }
+
   // One entry per launch behaviour, in the order they appear. The label names
   // the effect; the detail names what it costs or buys, so choosing does not
   // require trying all three.
@@ -113,7 +129,7 @@
 
     <div class="pane">
       {#if error}
-        <p class="banner" role="alert">{error}</p>
+        <p class="banner error" role="alert">{error}</p>
       {/if}
 
       {#if cat === "projects"}
@@ -123,7 +139,8 @@
             to let Windows pick the folder you used last. Nothing is moved or
             imported — this only changes where the dialogs open.</p>
           <div class="ctl">
-            <input bind:value={dirDraft} spellcheck="false" placeholder="Not set"
+            <input class="field" bind:value={dirDraft} spellcheck="false" placeholder="Not set"
+                   aria-label="Default location for projects"
                    onchange={commitDir}
                    onkeydown={(e) => e.key === "Enter" && commitDir()} />
             <Button onclick={browse} disabled={busy}>Browse&hellip;</Button>
@@ -138,7 +155,8 @@
             about to go is named.</p>
           <label class="check">
             <input type="checkbox" checked={settings.confirmDelete} disabled={busy}
-                   onchange={(e) => onSave({ ...settings, confirmDelete: e.currentTarget.checked })} />
+                   onchange={(e) => saveFrom(e.currentTarget,
+                                             { ...settings, confirmDelete: e.currentTarget.checked })} />
             <span>Ask for confirmation before deleting</span>
           </label>
         </section>
@@ -153,7 +171,8 @@
               <label class="check radio">
                 <input type="radio" name="launch-behavior" value={b.id}
                        checked={settings.launchBehavior === b.id} disabled={busy}
-                       onchange={() => onSave({ ...settings, launchBehavior: b.id })} />
+                       onchange={(e) => saveFrom(e.currentTarget,
+                                                 { ...settings, launchBehavior: b.id })} />
                 <span class="rtext"><strong>{b.label}</strong>
                   <span class="rd">{b.d}</span></span>
               </label>
@@ -163,16 +182,21 @@
       {:else if cat === "data"}
         <section class="grp">
           <h3>Hub data folder</h3>
+          <!-- The project list is SHARED: the editor reads and writes the same
+               recents.archub for File > Open Recent and its start page
+               (ArcaneEditor/src/Project/RecentProjects.hpp). Engines and
+               settings are the Hub's alone. -->
           <p class="d">Where the project list, the registered engines and these
-            settings are stored. The engine never reads it.</p>
+            settings are stored. The editor shares the project list for its
+            Open Recent menu; the rest is the Hub's alone.</p>
           <p class="path"><code>{hubDir}</code></p>
           <Button onclick={onReveal} disabled={busy}>Open folder</Button>
         </section>
         <section class="grp">
           <h3>Recent projects</h3>
           <!-- States plainly what the Remove control on a card also promises. -->
-          <p class="d">{recentCount} in the list. Clearing removes them from the Hub
-            only; nothing is deleted from disk.</p>
+          <p class="d">{recentCount} in the list. Clearing also empties the editor's
+            Open Recent menu; nothing is deleted from disk.</p>
           {#if confirmClear}
             <div class="ctl">
               <Button onclick={() => (confirmClear = false)} disabled={busy}>Cancel</Button>
@@ -186,8 +210,12 @@
       {:else}
         <section class="grp">
           <h3>Arcane Hub {version}</h3>
-          <p class="d">Registers engines and launches projects. Engine installs,
-            updates, and accounts are deliberately out of scope.</p>
+          <!-- Says installs are COMING, not out of scope: the Engines page
+               already shows a disabled Install button for exactly that, and
+               the two must not contradict each other. No dates promised. -->
+          <p class="d">Registers engines and launches projects. Installing and
+            updating engines from the Hub arrives with the engine manager; until
+            then, add an engine you already have from the Engines page.</p>
         </section>
       {/if}
     </div>
@@ -215,7 +243,7 @@
          font-size: 13.5px; padding: 9px 12px; border-radius: 6px;
          background: none; border: 0; color: var(--text-muted); cursor: default;
          transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
-  .cat:hover:not(.on) { background: rgba(255, 255, 255, .04); color: var(--text); }
+  .cat:hover:not(.on) { background: var(--hover-wash); color: var(--text); }
   .cat.on { background: var(--surface-sel); color: var(--text); }
 
   .chip { font-size: 11.5px; color: var(--text-muted); background: var(--surface-2);
@@ -235,13 +263,10 @@
        line-height: 1.55; max-width: 68ch; }
 
   .ctl { display: flex; gap: 8px; }
-  .ctl input { flex: 1; min-width: 0; }
-  .ctl input {
-    background: var(--well); border: 1px solid var(--border);
-    border-radius: var(--r-btn); color: var(--text); font: inherit; font-size: 13px;
-    padding: 9px 12px; user-select: text; cursor: text; }
-  .ctl input::placeholder { color: var(--text-dim); }
-  .ctl input:focus { border-color: var(--accent-ring); outline: none; }
+  /* The field's look is the shared .field (theme.css); only its share of the
+     row is local. */
+  .ctl input { flex: 1; }
+  .pane > .banner { margin: 0 0 18px; }
 
   .path { margin: 0 0 12px; }
   code { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
@@ -265,10 +290,4 @@
   .rtext { display: flex; flex-direction: column; gap: 2px; }
   .rtext strong { font-weight: 600; color: var(--text-bright); }
   .rd { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
-
-  /* Matches the main-area banner in +page.svelte -- same failure, same look. */
-  .banner { background: color-mix(in srgb, var(--fail-accent) 12%, transparent);
-            border: 1px solid color-mix(in srgb, var(--fail-accent) 40%, transparent);
-            border-radius: var(--r-btn); color: var(--text); font-size: 13px;
-            padding: 10px 13px; margin: 0 0 18px; user-select: text; }
 </style>
