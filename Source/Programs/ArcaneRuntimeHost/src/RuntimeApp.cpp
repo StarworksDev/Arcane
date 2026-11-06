@@ -1953,7 +1953,7 @@ int RuntimeApp::Run()
         return boot.quitRequested ? 0 : 1;
 
     // --print-registry (engine modularization s6, registrar survival): the
-    // booted roster as one JSON line on stdout (logs are on stderr), then the
+    // booted roster as one JSON line on stdout (logs may share it), then the
     // same teardown as a finished run. scripts/ci/package.sh compares the
     // modular runtime's line with the packaged game's.
     if (m_config.printRegistry)

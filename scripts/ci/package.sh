@@ -45,12 +45,13 @@ if [ "$plat" = Linux ]; then
         xvfb-run -a -s "-screen 0 1280x720x24" "$pkg/ReferenceProject.sh" --frames 60 2>&1 | tee logs/package-boot.log
     # Registrar survival (modularization s6): the package boots with the same
     # component and system roster as the modular runtime (--print-registry: one
-    # sorted JSON line on stdout).
+    # sorted JSON line on stdout). Logs share stdout here and carry timestamps and
+    # paths, so only the JSON line is compared.
     registry() {
         env -i HOME="$HOME" PATH=/usr/bin:/bin SDL_VIDEODRIVER=x11 \
             XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
             VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
-            xvfb-run -a -s "-screen 0 1280x720x24" "$@" --print-registry 2>>logs/registry.err
+            xvfb-run -a -s "-screen 0 1280x720x24" "$@" --print-registry 2>>logs/registry.err | { grep '^{' || true; }
     }
     registry "$bindir/ArcaneRuntime/ArcaneRuntime" --project "$root/ReferenceProject" > logs/registry-modular.json
     registry "$pkg/ReferenceProject.sh" > logs/registry-package.json
