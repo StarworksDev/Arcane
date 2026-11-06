@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace Arcane
 {
@@ -68,6 +69,20 @@ namespace Arcane
         // the game's function-local static). The cvar module is registered by
         // NAME only: there is no image range, and nothing in a package unloads.
         [[nodiscard]] static Plugin FromStatic(const PluginVTable& table, std::string cvarModule);
+
+        // ELF and Mach-O (Module::PinsForProcessLife; issue #21 M-P1/M-P2):
+        // the cvar modules of the DEPENDENCY images Load re-attributed. A
+        // dependency a game load maps runs its statics inside that load's
+        // CVarModuleScope; Load re-names those registrations to the image's own
+        // module (its file name: libArcaneClient.so -> ArcaneClient, the name
+        // it registers under in a host that links it), so the game's name drop
+        // never strips a library pinned for the life of the process. PluginHost
+        // layers each of these with every module it loads (LayerModuleCVars).
+        // Re-layering applies the new project's keys only: a key that only the
+        // previous project set keeps its value on a pinned dependency, the same
+        // as host-linked engine cvars on a project switch.
+        // Process-wide, first-seen order, never shrinks. Empty on Windows.
+        [[nodiscard]] static std::vector<std::string> DependencyCVarModules();
 
         [[nodiscard]] bool IsLoaded() const noexcept { return m_module.IsLoaded() || m_staticTable != nullptr; }
         // True for FromStatic: LoadedModule() is then an empty Module (no image).

@@ -1060,6 +1060,54 @@ namespace Arcane
         std::erase_if(m->images, [base](const Impl::ModuleImage& img) { return img.base == base; });
     }
 
+    std::size_t CVarRegistry::ReattributeModuleRange(const void* base, std::size_t size, std::string_view from,
+                                                     std::string_view to)
+    {
+        if (!base || size == 0 || from.empty() || to.empty() || from == to) return 0;
+        const auto inRange = [base, size](const void* p) { return AddressInRange(p, base, size); };
+        std::size_t changed = 0;
+        // A settings struct's field cvars are Register'ed from RegisterSettings,
+        // here in ArcaneCore, so their own source address is not the image's:
+        // they follow the struct, whose factory is the declaring module's code.
+        std::unordered_set<std::uint64_t> movedTypes;
+        for (SettingsBinding& b : m->settings)
+        {
+            if (b.module != from || !inRange(reinterpret_cast<const void*>(b.make))) continue;
+            b.module = std::string(to);
+            movedTypes.insert(b.typeHash);
+            ++changed;
+        }
+        for (Slot& slot : m->slots)
+        {
+            if (!slot.alive) continue;
+            if (slot.declaredBy == from &&
+                (inRange(slot.source) || (slot.settingsType != 0 && movedTypes.contains(slot.settingsType))))
+            {
+                slot.declaredBy = std::string(to);
+                ++changed;
+            }
+            for (Slot::Callback& c : slot.callbacks)
+                if (c.module == from && inRange(reinterpret_cast<const void*>(c.fn)))
+                {
+                    c.module = std::string(to);
+                    ++changed;
+                }
+        }
+        for (Command& command : m->commands)
+        {
+            if (!command.alive || command.builtin || command.module != from) continue;
+            const void* fn = command.fn ? reinterpret_cast<const void*>(command.fn)
+                                        : reinterpret_cast<const void*>(command.legacy);
+            if (!inRange(fn)) continue;
+            command.module = std::string(to);
+            ++changed;
+        }
+        // The editor Settings window files cvars by module and rebuilds on a
+        // revision change.
+        if (changed != 0) ++m->revision;
+        return changed;
+    }
+
     void CVarRegistry::RevertCheats()
     {
         (void)m->DropCheatHistory();

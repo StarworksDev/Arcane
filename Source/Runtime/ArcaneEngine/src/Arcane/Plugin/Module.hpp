@@ -102,30 +102,38 @@ namespace Arcane
             ImageSpan             image;
         };
         // Snapshot every image currently mapped in this process. PluginHost
-        // diffs this around each load so dependency DLLs that ran registration
-        // statics can be disowned before the load session releases them.
-        // Windows and Linux; empty on macOS (no dependency is then tracked:
-        // neither Plugin::Load's refusal net nor PluginHost's pins run there;
-        // follow-up: Mach-O, excluding dyld shared-cache images).
+        // diffs this around each load so dependency images that ran
+        // registration statics are pinned: on Windows for the load session,
+        // then disowned before the session releases them; on ELF and Mach-O
+        // for the life of the process (PinsForProcessLife), never disowned.
+        // Windows, Linux and macOS. Each base equals the same image's
+        // Module::Image().base. macOS leaves out dyld shared-cache images
+        // (MH_DYLIB_IN_CACHE): their segment union spans the cache's shared
+        // __LINKEDIT, and dyld never unloads them.
         [[nodiscard]] static std::vector<MappedModule> MappedModules() noexcept;
         // Take a loader reference on the ALREADY-mapped image `mapped` names.
         // Windows locates it by its base address (so a renamed or
         // differently-pathed DLL is still the one image); destroying the
-        // returned Module drops exactly that reference. Linux reopens its path
-        // with RTLD_NOLOAD | RTLD_NODELETE and requires the same base: the
-        // image is then mapped for the life of the process (see
-        // PinsForProcessLife). Nothing is loaded and no initializer runs.
-        // nullopt when no image is mapped at that base any more, and always
-        // on macOS.
+        // returned Module drops exactly that reference. Linux and macOS reopen
+        // its path with RTLD_NOLOAD, require the same base, and only then pin
+        // it -- Linux promotes it with RTLD_NOLOAD | RTLD_NODELETE, macOS keeps
+        // that look-up reference forever (dyld's RTLD_NODELETE does not keep
+        // an image loaded) -- so the image stays loaded for the life of the
+        // process (see PinsForProcessLife), and an image at a different base
+        // is never pinned. Mach-O: each call adds a permanent dyld reference
+        // (dyld's RTLD_NODELETE does not pin, see Module.cpp), so callers pin
+        // each image once. Nothing is loaded and no initializer runs. nullopt
+        // when no image is mapped at that base any more.
         [[nodiscard]] static std::optional<Module> PinMapped(const MappedModule& mapped) noexcept;
-        // True where a PinMapped pin keeps the image mapped for the life of
-        // the process (ELF): the image never unmaps, so its registrations stay
-        // valid and callers must NOT disown them. Engine libraries are never
-        // hot-reloaded, only the game module is. False on Windows, where the
-        // pin is one reference and the caller disowns before releasing it.
+        // True where a PinMapped pin keeps the image loaded for the life of
+        // the process (ELF and Mach-O): the image never unloads, so its
+        // registrations stay valid and callers must NOT disown them. Engine
+        // libraries are never hot-reloaded, only the game module is. False on
+        // Windows, where the pin is one reference and the caller disowns
+        // before releasing it.
         [[nodiscard]] static constexpr bool PinsForProcessLife() noexcept
         {
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32)
             return false;
 #else
             return true;

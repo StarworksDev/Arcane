@@ -20,9 +20,27 @@
 // a NaN (bit pattern 0x7fc00000) for Sin/Cos; Atan2 follows std::atan2's
 // IEEE-754 rules for zeros and infinities and returns 0x7fc00000 for a NaN.
 //
-// These are NOT fast-path replacements for std:: in rendering or the editor:
-// use them wherever a value feeds the simulation, a replicated state or a
-// recorded trace -- anything that must match across machines.
+// Contract boundary:
+//  - Use these wherever a value feeds the simulation, a replicated state or a
+//    recorded trace -- anything that must match across machines. They are NOT
+//    fast-path replacements for std:: in rendering or the editor.
+//  - Rendering, editor, debug and pick trig stays on std:: on purpose
+//    (RenderSystems' interpolation, PickEmit, PhysicsDebugGeometry,
+//    PhysicsQuery's collider silhouettes, Gizmo): those values are only drawn
+//    or picked and never feed the simulation, replication or a recorded trace.
+//  - The bits assume the default floating-point environment: round-to-nearest,
+//    and no flush-to-zero / denormals-are-zero (MXCSR FTZ/DAZ on x64, FPCR.FZ
+//    on arm64). miniaudio sets those modes only on its own audio thread and
+//    restores them; a host that sets them on a thread calling these changes
+//    the results.
+//  - Physics determinism beyond this bridge still rests on Manifold2D's own
+//    std::sin/cos/atan2 calls inside the vendored solver, which are not
+//    routed through here (tracked in issue #23).
+//  - The bits differ from the old glm/std bridge: RotationAboutZ of a negative
+//    angle gives x = y = +0 where glm gave -0, and RotationZ of the
+//    (0, 0, 0, -1) half turn reads +pi where it read -pi. Data recorded through
+//    the old bridge needs a re-record (PR #20 already re-recorded the v1
+//    physics step trace).
 #include <Arcane/Core/Api.hpp>
 
 #include <glm/gtc/quaternion.hpp>
@@ -48,7 +66,7 @@ namespace Arcane::DeterministicTrig
     // atan2(2(xy + wz), 1 - 2(y^2 + z^2)) -- the same formula as glm's
     // q * vec3(1, 0, 0) -- evaluated in double (each float product is exact
     // there) and rounded once. Round trip: AngleAboutZ(QuatAboutZ(a)) is a
-    // (wrapped into [-pi, pi]) within 1 ULP of |a|; an input zero of either
+    // (wrapped into [-pi, pi]) within 1 ULP of a; an input zero of either
     // sign comes back as +0.
     [[nodiscard]] ARC_CORE_API glm::quat QuatAboutZ(float radians) noexcept;
     [[nodiscard]] ARC_CORE_API float     AngleAboutZ(const glm::quat& q) noexcept;

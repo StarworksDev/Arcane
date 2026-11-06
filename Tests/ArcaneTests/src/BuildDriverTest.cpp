@@ -1582,6 +1582,52 @@ TEST_CASE("arcbuild::ProcessRunner: lpApplicationName pins the exact binary desp
     CHECK(sawFixtureProtocol);
 }
 
+namespace
+{
+    // The handle-inheritance probe's sentinel: an inheritable handle to a file
+    // of its own. The child is asked whether the sentinel's NUMBER names THAT
+    // file in its own handle table, never merely whether the number is a valid
+    // handle there: handle numbers are per process, and a child that inherited
+    // nothing still holds small file-type handles of its own (cwd, console,
+    // its stdio) whose numbers the sentinel's can coincide with, depending on
+    // what this process opened and closed before. That coincidence made the
+    // old "is it valid" probe flaky, and an inherited EVENT still read
+    // "invalid" (GetFileType fails on anything that is not a file), so the old
+    // probe could not see the inheritance it was there to catch.
+    struct InheritableSentinel
+    {
+        TempDir  dir{ "process_runner_handle_sentinel" };
+        fs::path path = dir.path / "sentinel.bin";
+        HANDLE   handle = INVALID_HANDLE_VALUE;
+
+        InheritableSentinel()
+        {
+            SECURITY_ATTRIBUTES attributes{};
+            attributes.nLength        = sizeof(attributes);
+            attributes.bInheritHandle = TRUE;
+
+            handle = ::CreateFileW(
+                path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &attributes, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
+
+        ~InheritableSentinel()
+        {
+            if (handle != INVALID_HANDLE_VALUE)
+                ::CloseHandle(handle);
+        }
+
+        std::string Number() const
+        {
+            return std::to_string(reinterpret_cast<std::uintptr_t>(handle));
+        }
+
+        InheritableSentinel(const InheritableSentinel&)            = delete;
+        InheritableSentinel& operator=(const InheritableSentinel&) = delete;
+    };
+}
+
 TEST_CASE("arcbuild::ProcessRunner: PROC_THREAD_ATTRIBUTE_HANDLE_LIST inherits only the pipe write handle, never broad inheritance",
           "[build]")
 {
@@ -1591,12 +1637,8 @@ TEST_CASE("arcbuild::ProcessRunner: PROC_THREAD_ATTRIBUTE_HANDLE_LIST inherits o
     // never puts in ANY handle list -- if ProcessRunner::Run relied on plain
     // bInheritHandles=TRUE without PROC_THREAD_ATTRIBUTE_HANDLE_LIST, this
     // would inherit into the child right alongside the pipe write handle.
-    SECURITY_ATTRIBUTES sentinelAttributes{};
-    sentinelAttributes.nLength       = sizeof(sentinelAttributes);
-    sentinelAttributes.bInheritHandle = TRUE;
-
-    HANDLE sentinel = ::CreateEventW(&sentinelAttributes, TRUE, FALSE, nullptr);
-    REQUIRE(sentinel != nullptr);
+    InheritableSentinel sentinel;
+    REQUIRE(sentinel.handle != INVALID_HANDLE_VALUE);
 
     RecordingOutput output;
     ProcessRunner runner(output);
@@ -1605,24 +1647,82 @@ TEST_CASE("arcbuild::ProcessRunner: PROC_THREAD_ATTRIBUTE_HANDLE_LIST inherits o
     spec.executable = ProcessFixtureExe();
     spec.arguments  =
     {
-        // The sentinel's numeric value, as ORDINARY text -- never inherited,
-        // so it names nothing valid in the child's own handle table.
-        "--probe-handle", std::to_string(reinterpret_cast<std::uintptr_t>(sentinel)),
+        // The sentinel's numeric value, as ORDINARY text, plus the file it
+        // names here -- the child answers whether that number names that
+        // file in ITS table.
+        "--probe-handle", sentinel.Number(), sentinel.path.string(),
         "--exit", "0",
     };
 
     const ProcessResult result = runner.Run(spec, "[fixture]");
-    ::CloseHandle(sentinel);
 
     REQUIRE(result.has_value());
     CHECK(*result == 0);   // the merged stdout/stderr pipe -- the ONE handle
                             // that IS in the list -- kept working throughout
 
-    bool sawInvalid = false;
+    bool sawAbsent = false;
     for (const std::string& m : output.messages)
-        if (m == "[fixture]:HANDLE:invalid")
-            sawInvalid = true;
-    CHECK(sawInvalid);
+        if (m == "[fixture]:HANDLE:absent")
+            sawAbsent = true;
+    CHECK(sawAbsent);
+}
+
+TEST_CASE("arcbuild-process-fixture: --probe-handle reports the sentinel when it WAS inherited (the probe's positive control)",
+          "[build]")
+{
+    REQUIRE(fs::is_regular_file(ProcessFixtureExe()));
+
+    // The case above passes only if the probe can tell an inherited sentinel
+    // from an absent one. Launch the fixture the broad way ProcessRunner must
+    // NOT -- bInheritHandles=TRUE, no handle list -- so the sentinel really
+    // does inherit, and require the probe to say so.
+    InheritableSentinel sentinel;
+    REQUIRE(sentinel.handle != INVALID_HANDLE_VALUE);
+
+    // The child's stdout+stderr: an inheritable file of its own, read back
+    // after the child exits.
+    const fs::path outputPath = sentinel.dir.path / "probe-output.txt";
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength        = sizeof(attributes);
+    attributes.bInheritHandle = TRUE;
+    HANDLE childOutput = ::CreateFileW(
+        outputPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &attributes,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(childOutput != INVALID_HANDLE_VALUE);
+
+    std::wstring commandLine =
+        L"\"" + ProcessFixtureExe().wstring() + L"\" --probe-handle " +
+        std::to_wstring(reinterpret_cast<std::uintptr_t>(sentinel.handle)) +
+        L" \"" + sentinel.path.wstring() + L"\"";
+
+    STARTUPINFOW startup{};
+    startup.cb         = sizeof(startup);
+    startup.dwFlags    = STARTF_USESTDHANDLES;
+    startup.hStdInput  = nullptr;
+    startup.hStdOutput = childOutput;
+    startup.hStdError  = childOutput;
+
+    PROCESS_INFORMATION process{};
+    const BOOL launched = ::CreateProcessW(
+        ProcessFixtureExe().c_str(), commandLine.data(), nullptr, nullptr,
+        TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    ::CloseHandle(childOutput);
+    REQUIRE(launched);
+
+    ::WaitForSingleObject(process.hProcess, INFINITE);
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+
+    std::ifstream in(outputPath, std::ios::binary);
+    bool sawSentinel = false;
+    for (std::string line; std::getline(in, line);)
+    {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line == "HANDLE:sentinel")
+            sawSentinel = true;
+    }
+    CHECK(sawSentinel);
 }
 #endif
 

@@ -9,10 +9,13 @@
 // DiagnosticSeamTest.cpp's Capture/CaptureSink.
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include "Helpers/ModuleNames.hpp"   // fixture module file names per platform
+#include <Arcane/Base/Engine.hpp>         // ExecutablePathUtf8: the built fixture beside this exe's bin dir
 #include <Arcane/Platform/Platform.hpp>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -157,7 +160,6 @@ TEST_CASE("Module::IsMapped tells an already-mapped image from one this process 
     CHECK_FALSE(Arcane::Module::IsMapped(bad));
 }
 
-#if !defined(__APPLE__)   // MappedModules lists nothing on macOS
 TEST_CASE("Module::MappedModules lists mapped images and PinMapped takes a reference by base without loading", "[plugin][diagnostics]")
 {
     // The two primitives PluginHost's dependency rule stands on (S2 gate): a
@@ -170,7 +172,8 @@ TEST_CASE("Module::MappedModules lists mapped images and PinMapped takes a refer
     // in-process host here can make Client a NEWLY mapped dependency. Linux
     // too since PR #20 review I1 (PinMapped reopens the path RTLD_NOLOAD and
     // checks the base); the sim-hook child in PhysicsHookBootTest is the
-    // end-to-end witness there.
+    // end-to-end witness there. macOS too since issue #21 (dyld's image list,
+    // shared-cache images left out).
     const std::filesystem::path clientFile = Arcane::Platform::SharedLibraryFileName("ArcaneClient");
     const Arcane::Module::ImageSpan client = Arcane::Module::MappedImage(clientFile);
     REQUIRE(client.base != nullptr);
@@ -199,7 +202,101 @@ TEST_CASE("Module::MappedModules lists mapped images and PinMapped takes a refer
     CHECK_FALSE(Arcane::Module::PinMapped(inside).has_value());
     CHECK_FALSE(Arcane::Module::PinMapped(Arcane::Module::MappedModule{}).has_value());
 }
+
+TEST_CASE("Module::MappedModules spans are disjoint, match Module::Image and leave out dyld shared-cache images", "[plugin][diagnostics]")
+{
+    // The property both dependency nets stand on (Plugin::Load's refusal net,
+    // PluginHost's pins): each listed span is ONE image's, with the base
+    // Module::Image reports for it. Issue #21: on macOS a dyld shared-cache
+    // image's segment union reaches the cache's shared __LINKEDIT, far past
+    // its __TEXT, so listing one would yield a span over every cache image in
+    // between -- overlapping its neighbours' -- and a range net would disown
+    // registrations of images that never unmap. MappedModules leaves those
+    // images out (MH_DYLIB_IN_CACHE); a regression of that filter fails the
+    // disjointness check and the libSystem check below. Before it (MappedModules
+    // empty on macOS) the first REQUIRE failed there.
+    const std::vector<Arcane::Module::MappedModule> mapped = Arcane::Module::MappedModules();
+    REQUIRE_FALSE(mapped.empty());
+
+    // A non-cache ENGINE library this exe links is listed, at the span its own
+    // handle reports (MappedImage opens the listed path, then ImageFromHandle).
+    const std::filesystem::path coreFile = Arcane::Platform::SharedLibraryFileName("ArcaneCore");
+    const auto core = std::find_if(mapped.begin(), mapped.end(), [&](const Arcane::Module::MappedModule& m) {
+        return m.path.filename() == coreFile;
+    });
+    REQUIRE(core != mapped.end());
+    const Arcane::Module::ImageSpan coreImage = Arcane::Module::MappedImage(core->path);
+    CHECK(coreImage.base == core->image.base);
+    CHECK(coreImage.size == core->image.size);
+
+    // No two listed spans overlap: each is one image's own mapping.
+    std::vector<const Arcane::Module::MappedModule*> sorted;
+    for (const Arcane::Module::MappedModule& m : mapped)
+    {
+        CHECK(m.image.base != nullptr);
+        CHECK(m.image.size != 0);
+        sorted.push_back(&m);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const Arcane::Module::MappedModule* a, const Arcane::Module::MappedModule* b) {
+        return std::less<const void*>{}(a->image.base, b->image.base);
+    });
+    for (std::size_t i = 1; i < sorted.size(); ++i)
+    {
+        const auto lo = reinterpret_cast<std::uintptr_t>(sorted[i - 1]->image.base);
+        const auto next = reinterpret_cast<std::uintptr_t>(sorted[i]->image.base);
+        INFO(sorted[i - 1]->path.generic_string() << " overlaps " << sorted[i]->path.generic_string());
+        CHECK(lo + sorted[i - 1]->image.size <= next);
+    }
+
+#if defined(__APPLE__)
+    // libSystem is a shared-cache image on every supported macOS (11+: the
+    // file is not even on disk): mapped in this process, never listed.
+    CHECK(Arcane::Module::IsMapped("/usr/lib/libSystem.B.dylib"));
+    CHECK(std::none_of(mapped.begin(), mapped.end(), [](const Arcane::Module::MappedModule& m) {
+        return m.path.filename() == "libSystem.B.dylib";
+    }));
 #endif
+}
+
+TEST_CASE("PinMapped of a mismatched base marks nothing: the image still unmaps with its last reference", "[plugin][diagnostics]")
+{
+    // PR #20 re-review M-P4. PinMapped once opened the path with
+    // RTLD_NOLOAD | RTLD_NODELETE BEFORE its base check, so on ELF the "not
+    // ours to pin" branch had already made that other object permanent. It now
+    // looks up with RTLD_NOLOAD alone, checks the base, and only then pins (ELF:
+    // promotes with RTLD_NODELETE; Mach-O: keeps the look-up reference);
+    // Windows' GetModuleHandleEx path never marked anything. Witness: a module
+    // this test alone loads, listed by MappedModules at its Module::Image base,
+    // refused for a shifted base, then released -- it must unmap. On ELF before
+    // the fix it stayed mapped; on macOS a pin taken before the check would.
+    // The staged copy beside the exe, the one RuntimeModulePluginTest loads:
+    // there its engine imports resolve to the very images this exe links (an
+    // in-place load from its own bin dir could resolve a second copy through
+    // its rpath on macOS). Addressed from the exe, not the cwd.
+    const std::filesystem::path path = std::filesystem::path(Arcane::ExecutablePathUtf8()).parent_path()
+                                     / Arcane::Test::ModuleFile("HotReloadPluginV1");
+    REQUIRE(std::filesystem::exists(path));
+    REQUIRE_FALSE(Arcane::Module::IsMapped(path));   // else the unmap check below is vacuous
+    {
+        auto plugin = Arcane::Plugin::Load(path);
+        REQUIRE(plugin.has_value());
+        const Arcane::Module::ImageSpan image = plugin->LoadedModule().Image();
+        REQUIRE(image.base != nullptr);
+
+        const std::vector<Arcane::Module::MappedModule> mapped = Arcane::Module::MappedModules();
+        const auto it = std::find_if(mapped.begin(), mapped.end(), [&](const Arcane::Module::MappedModule& m) {
+            return m.image.base == image.base;
+        });
+        REQUIRE(it != mapped.end());          // a module loaded by path is listed at its Image() base
+        CHECK(it->image.size == image.size);
+
+        Arcane::Module::MappedModule shifted = *it;
+        shifted.image.base = static_cast<const unsigned char*>(image.base) + 0x1000;
+        CHECK_FALSE(Arcane::Module::PinMapped(shifted).has_value());
+        CHECK(Arcane::Module::IsMapped(path));   // the plugin still holds it
+    }   // the plugin's FreeLibrary / dlclose drops the last reference
+    CHECK_FALSE(Arcane::Module::IsMapped(path));   // nothing pinned it
+}
 
 TEST_CASE("CRT-flavor scan classifies in-tree binaries without loading them", "[plugin][diagnostics]")
 {
