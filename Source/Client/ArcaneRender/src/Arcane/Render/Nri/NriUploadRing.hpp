@@ -191,6 +191,9 @@ namespace Arcane
         // before Init().
         [[nodiscard]] std::uint64_t SlotCapacity() const noexcept;
 
+        // Allocate calls that overflowed, summed over every slot (read-only, lifetime).
+        [[nodiscard]] std::uint64_t OverflowCount() const noexcept;
+
         // Peak bytes ever claimed from `slot` across every BeginFrame()
         // reset since Init() -- meant to be read once, at shutdown, and
         // logged (not reset by BeginFrame()). 0 for an out-of-range slot.

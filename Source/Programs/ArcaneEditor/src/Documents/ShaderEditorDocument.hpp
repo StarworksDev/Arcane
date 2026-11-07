@@ -192,6 +192,7 @@ namespace Arcane::Editor
         // instance's EffectiveSerial vs the saved baseline, so undo/redo of a
         // param edit flips the verdict correctly (review m1).
         bool Dirty() const override { return m_dirty || ParamsDirty(); }
+        bool PreviewUploadsPending() const noexcept override;
         bool Save() override;
         bool WindowFocused() const override { return m_windowFocused; }
         void Tick(double dt) override;

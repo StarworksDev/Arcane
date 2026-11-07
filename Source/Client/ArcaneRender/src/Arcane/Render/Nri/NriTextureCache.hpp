@@ -199,10 +199,25 @@ namespace Arcane
         [[nodiscard]] bool UploadQueued(const Guid& id, ColorSpace space = ColorSpace::Srgb) const noexcept;
         // The upload node's setup: moves the queue into the frame's snapshot. Keys
         // queued AFTER this call wait for the next frame.
-        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame();
+        // `budget`: the context's per-frame ring budget, shared with the mesh cache -- FIFO admission
+        // while the keys' staging bytes fit; the first that does not fit stops the snapshot and stays
+        // queued with its texture (nothing destroyed or recreated); a payload over the cap is admitted
+        // at no ring cost (dedicated staging).
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame(UploadBudget& budget);
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame()
+        {
+            UploadBudget unlimited;
+            return BeginUploadFrame(unlimited);
+        }
         // The upload node's exec fn, after ring.BeginFrame: classifies the payload
         // (ring / retry / dedicated) and records one upload per mip. No CmdBarrier.
-        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring);
+        // `budgetCap`: the budget's cap -- a payload over it takes dedicated staging, never the ring.
+        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                          std::uint64_t budgetCap = ~0ull);
+        // TEST INSTRUMENTS: force the next `count` ring-class payloads down the retry branch, and read how
+        // many device textures were ever created for uploads.
+        void DebugForceRetry(std::uint32_t count) noexcept { m_debugForceRetry = count; }
+        [[nodiscard]] std::uint64_t ObjectCreateCount() const noexcept { return m_objectCreates; }
         // After the frame: `submitted` gives every snapshot key that is still queued
         // its view and makes it ready; false (Execute failed or the frame never ran)
         // puts them back in the queue. Buffers/textures the exec fn buried go to
@@ -474,6 +489,8 @@ namespace Arcane
         bool UploadPendingNow(Resident& resident);
         bool CreateViewFor(Resident& resident, const nri::TextureDesc& desc);
         void CancelUpload(const Key& key);
+        // Aligned staging bytes of every mip of `pending` on this device (the ring cost of its upload).
+        [[nodiscard]] std::uint64_t StagingBytes(const PendingUpload& pending) const;
         void ParkTexture(nri::Texture* texture);
 
         // The shared 8x8 checkerboard for `space` -- created on the FIRST
@@ -515,5 +532,7 @@ namespace Arcane
         // buffers): they wait for CommitUploads, which knows this lane's fence.
         std::vector<std::function<void()>> m_parked;
         bool              m_settling = false;   // a key became ready last frame
+        std::uint32_t     m_debugForceRetry = 0;
+        std::uint64_t     m_objectCreates = 0;
     };
 }

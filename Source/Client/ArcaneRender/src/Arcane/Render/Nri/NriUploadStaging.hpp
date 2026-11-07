@@ -21,6 +21,7 @@
 //                touches the ring's overflow count either.
 
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/Render/Nri/NriUploadMode.hpp>   // UploadBudget
 #include <Arcane/Render/Nri/NriUploadRing.hpp>
 
 #include <algorithm>
@@ -40,7 +41,7 @@ namespace Arcane
     // bitmask, correct for the power-of-two alignments every device reports.
     [[nodiscard]] constexpr std::uint64_t NriAlign(std::uint64_t x, std::uint64_t alignment) noexcept
     {
-        return (x + alignment - 1) & ~(alignment - 1);
+        return alignment <= 1 ? x : (x + alignment - 1) & ~(alignment - 1);   // 0/1 (a NONE device reports 0): no alignment
     }
 
     // One mip's footprint in the staging buffer, exactly as
@@ -131,6 +132,18 @@ namespace Arcane
     [[nodiscard]] constexpr std::uint64_t MeshStagingBytes(std::uint64_t vertexBytes, std::uint64_t indexBytes) noexcept
     {
         return RingAlignUp(vertexBytes, kMeshStagingAlign) + RingAlignUp(indexBytes, kMeshStagingAlign);
+    }
+
+    // The exec-time class with the budget cap applied: above the cap -> Dedicated even when it
+    // would fit the slot (never the ring, not a retry); otherwise the Fits-based class.
+    [[nodiscard]] constexpr Staging ClassifyBudgeted(bool fits, std::uint64_t capacity, std::uint64_t budgetCap,
+                                                     std::uint64_t alignedBytes) noexcept
+    {
+        if (alignedBytes > budgetCap)
+            return Staging::Dedicated;
+        return alignedBytes <= capacity && fits ? Staging::Ring
+             : alignedBytes <= capacity         ? Staging::Retry
+                                                : Staging::Dedicated;
     }
 
     // The class given the ring's answer to Fits: what the exec fns call, with

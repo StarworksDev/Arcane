@@ -563,6 +563,7 @@ render.shader.optimization
 render.sprite.filter
 render.texture.residencyBudgetBytes
 render.textureAnisotropy
+render.upload.frameBudgetPercent
 render.uploadRingBytesPerFrame
 render.vsync
 render.vulkan.foreignModuleFallback

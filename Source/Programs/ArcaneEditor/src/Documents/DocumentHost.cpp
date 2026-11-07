@@ -103,6 +103,14 @@ namespace Arcane::Editor
         return false;
     }
 
+    bool DocumentHost::AnyPreviewUploadsPending() const noexcept
+    {
+        for (const auto& d : m_docs)
+            if (d->PreviewUploadsPending())
+                return true;
+        return false;
+    }
+
     std::size_t DocumentHost::SaveAllDirty()
     {
         std::size_t failed = 0;

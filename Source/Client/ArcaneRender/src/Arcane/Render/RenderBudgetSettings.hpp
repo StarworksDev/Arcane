@@ -125,6 +125,23 @@ namespace Arcane
             ARC_REFLECT_ATTR(Tooltip, "Percent of each slice's own cap that the other slice may not borrow.")
     ARC_END_REFLECT_TYPE()
 
+    // Plan C Task 5: the share of one upload-ring slot the `upload` node may spend per frame.
+    struct RenderUploadSettings
+    {
+        std::uint32_t frameBudgetPercent = 50;
+    };
+
+    ARC_REFLECT_TYPE(RenderUploadSettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.upload", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_TYPE_ATTR(Flags, CVarFlags::Dev)
+        ARC_REFLECT_FIELD(RenderUploadSettings, frameBudgetPercent)
+            ARC_REFLECT_ATTR(Range, 10.0, 100.0)
+            ARC_REFLECT_ATTR(Tooltip, "Percent of each frame's upload ring (render.uploadRingBytesPerFrame) that first-use mesh "
+                                      "and texture uploads may take, so a burst of new assets cannot starve the frame's own "
+                                      "sprite, overlay and scene data. Payloads over the cap upload through a one-off staging "
+                                      "buffer; the rest of a burst waits a frame. Latched with the ring size.")
+    ARC_END_REFLECT_TYPE()
+
     struct RenderPostSettings
     {
         std::uint32_t maxPasses       = 8;

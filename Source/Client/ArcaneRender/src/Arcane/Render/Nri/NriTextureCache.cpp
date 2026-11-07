@@ -352,7 +352,10 @@ namespace Arcane
             // what the hit is gated on. The texture object itself stays owned
             // and is destroyed by Release()/ClearImmediate like any other, so
             // this leaks nothing; it just stops lying about what is resident.
-            if (cached->second.view)
+            // A QUEUED key is asked for every frame it waits: stamp it like a hit (touch the account) so
+            // it is not another Charge's victim before it ever draws (Plan C Task 5 review I4), then
+            // answer null below (no view yet).
+            if (cached->second.view || cached->second.pending)
                 NoteDraw(key, cached->second);
             return cached->second.view ? cached->second.texture : nullptr;
         }
@@ -726,7 +729,19 @@ namespace Arcane
             return false;
         }
         core.SetDebugName(resident.texture, pending.debugName.c_str());
+        ++m_objectCreates;
         return true;
+    }
+
+    std::uint64_t NriTextureCache::StagingBytes(const PendingUpload& pending) const
+    {
+        const nri::DeviceDesc& deviceDesc = m_device->Core().GetDeviceDesc(m_device->Device());
+        std::uint64_t total = 0;
+        for (const PendingUpload::Mip& mip : pending.mips)
+            total += UploadMipFootprint(mip.rowPitch, mip.slicePitch, 1u,
+                                        deviceDesc.memoryAlignment.uploadBufferTextureRow,
+                                        deviceDesc.memoryAlignment.uploadBufferTextureSlice).bytes;
+        return total;
     }
 
     bool NriTextureCache::CreateViewFor(Resident& resident, const nri::TextureDesc& desc)
@@ -814,12 +829,13 @@ namespace Arcane
             && m_placeholders[static_cast<std::size_t>(space)].pending != nullptr;
     }
 
-    std::vector<NriTextureCache::UploadJob> NriTextureCache::BeginUploadFrame()
+    std::vector<NriTextureCache::UploadJob> NriTextureCache::BeginUploadFrame(UploadBudget& budget)
     {
         std::vector<UploadJob> jobs;
-        jobs.reserve(m_queue.size());
-        for (const Key& key : m_queue)
+        std::size_t consumed = 0;   // queue prefix leaving the queue: admitted or dead
+        for (; consumed < m_queue.size(); ++consumed)
         {
+            const Key key = m_queue[consumed];
             // The placeholder (nil Guid) lives outside m_textures.
             const Resident* r = nullptr;
             if (key.id.IsNil())
@@ -827,15 +843,18 @@ namespace Arcane
             else if (const auto it = m_textures.find(key); it != m_textures.end())
                 r = &it->second;
             if (!r || !r->pending || !r->texture)
-                continue;
+                continue;   // cancelled or refused since: dropped from the queue
+            if (!budget.Admit(StagingBytes(*r->pending)))
+                break;   // FIFO: it waits, and nothing behind it overtakes it
             jobs.push_back(UploadJob{ key.id, key.space, r->texture });
             m_inflight.push_back(key);
         }
-        m_queue.clear();
+        m_queue.erase(m_queue.begin(), m_queue.begin() + static_cast<std::ptrdiff_t>(consumed));
         return jobs;
     }
 
-    void NriTextureCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring)
+    void NriTextureCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                                       std::uint64_t budgetCap)
     {
         const Key key{ job.id, job.space };
         Resident* r = nullptr;
@@ -868,7 +887,12 @@ namespace Arcane
         }
 
         // CLASSIFIED HERE, after ring.BeginFrame (the setup fn only declared).
-        const Staging cls = ClassifyFits(ring.Fits(total, sliceAlign), ring.SlotCapacity(), total);
+        Staging cls = ClassifyBudgeted(ring.Fits(total, sliceAlign), ring.SlotCapacity(), budgetCap, total);
+        if (cls == Staging::Ring && m_debugForceRetry > 0)
+        {
+            --m_debugForceRetry;
+            cls = Staging::Retry;   // test injection: the guard branch below
+        }
 
         // CPU write: for slice k=0 and row l, rowPitch bytes from the source row to the
         // aligned destination row; one CmdUploadBufferToTexture per mip. The buffer

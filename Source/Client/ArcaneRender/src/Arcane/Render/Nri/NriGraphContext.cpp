@@ -174,6 +174,10 @@ namespace Arcane
     // each).
     NriGraphContext::NriGraphContext()
         : m_uploadRingBytes(Settings<RenderSettings>().uploadRingBytesPerFrame)
+        // render.upload.frameBudgetPercent of the ring slot, latched with it (Restart); never zero.
+        , m_uploadBudgetBytes(std::max<std::uint64_t>(
+              1u, Settings<RenderSettings>().uploadRingBytesPerFrame
+                      * Settings<RenderUploadSettings>().frameBudgetPercent / 100u))
     {
         LatchFramesInFlight();
     }
@@ -1302,7 +1306,7 @@ namespace Arcane
 
     bool NriGraphContext::DeclareUploadNodes(RenderGraph& graph)
     {
-        return AddUploadNodes(graph, m_textures.get(), m_meshBuffers.get());
+        return AddUploadNodes(graph, m_textures.get(), m_meshBuffers.get(), UploadBudget::WithCap(m_uploadBudgetBytes));
     }
 
     bool NriGraphContext::EnsureCaptureBuffer()

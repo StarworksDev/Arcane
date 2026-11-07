@@ -182,6 +182,14 @@ namespace Arcane
         return m_slots[m_currentSlot].layout.Fits(size, align);
     }
 
+    std::uint64_t NriUploadRing::OverflowCount() const noexcept
+    {
+        std::uint64_t total = 0;
+        for (const Slot& slot : m_slots)
+            total += slot.layout.OverflowCount();
+        return total;
+    }
+
     std::uint64_t NriUploadRing::SlotCapacity() const noexcept
     {
         return m_slots.empty() ? 0u : m_slots.front().layout.Capacity();

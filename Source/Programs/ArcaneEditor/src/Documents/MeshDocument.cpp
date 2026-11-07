@@ -467,6 +467,11 @@ namespace Arcane::Editor
         }
     }
 
+    bool MeshDocument::PreviewUploadsPending() const noexcept
+    {
+        return m_preview && m_preview->HasPendingUploads();
+    }
+
     std::uint64_t MeshDocument::PreviewTextureId() const noexcept
     {
         return m_preview ? m_preview->OffscreenTextureId() : 0;

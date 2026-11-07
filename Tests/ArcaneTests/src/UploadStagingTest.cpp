@@ -23,11 +23,13 @@
 #include <Arcane/Render/Nri/NriTextureCache.hpp>
 #include <Arcane/Render/Nri/NriUploadRing.hpp>
 #include <Arcane/Render/Nri/NriUploadStaging.hpp>
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #undef ERROR
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace
 {
@@ -132,12 +134,6 @@ TEST_CASE("capacity plus 16 and capacity plus 512 are dedicated", "[nri][upload]
     // The pinned oversized payloads, built from the real byte functions.
     CHECK(Arcane::MeshStagingBytes(capacity, 16) == capacity + 16);
     CHECK(Arcane::Classify(capacity, Arcane::MeshStagingBytes(capacity, 16), 16) == Staging::Dedicated);
-
-    // Neither dedicated class touches the overflow count: the planner never calls Allocate.
-    RingLayout ring;
-    ring.Init(capacity);
-    CHECK(Arcane::Classify(ring.Capacity(), capacity + 512, 512) == Staging::Dedicated);
-    CHECK(ring.OverflowCount() == 0u);
 }
 
 TEST_CASE("mesh cache: Resolve of a fresh mesh queues the upload and answers not-ready", "[nri][upload]")
@@ -274,4 +270,186 @@ TEST_CASE("texture cache: one-shot query settles one frame after the entry becam
     CHECK(f.cache->HasPendingUploads());
     f.cache->CommitUploads(true, f.device->Graves(), 2);
     CHECK_FALSE(f.cache->HasPendingUploads());
+}
+
+// ===========================================================================
+// FIX ROUND 1 -- the per-frame ring BUDGET, queue stamping.
+// ===========================================================================
+
+TEST_CASE("upload budget: FIFO admission against a per-frame cap", "[nri][upload]")
+{
+    Arcane::UploadBudget b = Arcane::UploadBudget::WithCap(100);
+    CHECK(b.Admit(60));          // fits the empty budget
+    CHECK_FALSE(b.Admit(50));    // 50 > the 40 left: it waits (and nothing behind it may overtake)
+    CHECK(b.Admit(40));          // exactly what is left
+    CHECK_FALSE(b.Admit(1));     // empty
+    CHECK(b.Admit(101));         // over the cap: dedicated staging, costs no ring bytes
+    CHECK(Arcane::UploadBudget::WithCap(100).Admit(100));   // a fresh budget always admits the first entry <= cap
+
+    // The exec-time class with the cap: over the cap -> dedicated even when it would fit the slot.
+    const std::uint64_t slot = 4ull << 20;
+    const std::uint64_t cap  = slot / 2;
+    CHECK(Arcane::ClassifyBudgeted(true, slot, cap, cap) == Staging::Ring);
+    CHECK(Arcane::ClassifyBudgeted(true, slot, cap, cap + 1) == Staging::Dedicated);      // never the ring
+    CHECK(Arcane::ClassifyBudgeted(false, slot, cap, cap) == Staging::Retry);             // the guard branch
+    CHECK(Arcane::ClassifyBudgeted(false, slot, slot, slot + 16) == Staging::Dedicated);  // bigger than the slot
+    // The pins of Classify itself are unchanged by the cap.
+    CHECK(Arcane::Classify(slot, slot + 16, 16) == Staging::Dedicated);
+    CHECK(Arcane::ClassifyAtCursor(slot, slot - 16, 4096, 16) == Staging::Retry);
+}
+
+TEST_CASE("the planner never moves a real ring's overflow count", "[nri][upload]")
+{
+    // The planner asks first and only Allocates what it classified as Ring; payloads routed to retry or
+    // dedicated staging never call Allocate. Walked against a real RingLayout instance whose state the
+    // classifier reads, so the count staying 0 is a property of the loop, not of an unused object.
+    const std::uint64_t slot = 4ull << 20;
+    RingLayout ring;
+    ring.Init(slot);
+    const std::uint64_t payloads[] = { 1ull << 20, 3ull << 20, 512, slot + 16, 2ull << 20, slot / 2 + 512 };
+    std::size_t ringHits = 0, retries = 0, dedicated = 0;
+    for (const std::uint64_t bytes : payloads)
+    {
+        const Staging cls = Arcane::ClassifyAtCursor(ring.Capacity(), ring.Cursor(), bytes, 16);
+        if (cls == Staging::Ring)
+        {
+            REQUIRE(ring.Allocate(bytes, 16).ok);
+            ++ringHits;
+        }
+        else if (cls == Staging::Retry)
+            ++retries;
+        else
+            ++dedicated;
+    }
+    CHECK(ringHits >= 2u);
+    CHECK(retries >= 1u);
+    CHECK(dedicated >= 1u);
+    CHECK(ring.OverflowCount() == 0u);
+}
+
+TEST_CASE("mesh cache: a burst drains FIFO under the budget with one object pair per payload", "[nri][upload]")
+{
+    MeshFixture f;
+    const std::uint64_t cost = Arcane::MeshStagingBytes(f.cube.vertices.size() * sizeof(Arcane::MeshVertex),
+                                                        f.cube.indices.size() * sizeof(std::uint32_t));
+    constexpr int kPayloads = 40;
+    std::vector<Guid> ids;
+    for (int i = 0; i < kPayloads; ++i)
+    {
+        const Guid id{ 900u + static_cast<std::uint64_t>(i), 0 };
+        ids.push_back(id);
+        CHECK(f.cache->Resolve(id, 1) == nullptr);
+    }
+    CHECK(f.cache->ObjectCreateCount() == static_cast<std::uint64_t>(kPayloads));
+
+    int frames = 0;
+    std::size_t admitted = 0;
+    while (f.cache->QueuedUploadCount() > 0u && frames < 64)
+    {
+        Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(4 * cost + 1);   // four payloads per frame
+        const auto jobs = f.cache->BeginUploadFrame(budget);
+        CHECK(jobs.size() == 4u);
+        if (!jobs.empty())
+            CHECK(jobs.front().id == ids[admitted]);                    // FIFO
+        admitted += jobs.size();
+        f.cache->CommitUploads(true, f.device->Graves(), 1);
+        ++frames;
+    }
+    CHECK(admitted == static_cast<std::size_t>(kPayloads));
+    CHECK(frames == kPayloads / 4);
+    CHECK(f.cache->ResidentCount() == static_cast<std::size_t>(kPayloads));
+    // No churn: nothing was destroyed or recreated while it waited.
+    CHECK(f.cache->ObjectCreateCount() == static_cast<std::uint64_t>(kPayloads));
+}
+
+TEST_CASE("mesh cache: a payload over the cap is admitted at no ring cost and does not stall the queue", "[nri][upload]")
+{
+    MeshFixture f;
+    const std::uint64_t cost = Arcane::MeshStagingBytes(f.cube.vertices.size() * sizeof(Arcane::MeshVertex),
+                                                        f.cube.indices.size() * sizeof(std::uint32_t));
+    CHECK(f.cache->Resolve(kMeshA, 1) == nullptr);
+    CHECK(f.cache->Resolve(kMeshB, 1) == nullptr);
+    Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(cost - 1);   // every cube is "over the cap": dedicated
+    CHECK(f.cache->BeginUploadFrame(budget).size() == 2u);
+}
+
+TEST_CASE("texture cache: a later small entry never overtakes a waiting one", "[nri][upload]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    auto cache = NriTextureCache::Create(*device);
+    REQUIRE(cache != nullptr);
+    Arcane::PixelData small = MakePixels(4, 4), big = MakePixels(16, 16);
+    const Guid idA = kTexA, idB = kTexB, idC = *Guid::FromString("b2b2b2b2-0000-0000-0000-000000000003");
+    cache->SetPixelSupply([&](const Guid& id) -> const Arcane::PixelData* { return id == idB ? &big : &small; });
+
+    const nri::DeviceDesc& dd = device->Core().GetDeviceDesc(device->Device());
+    const auto cost = [&](std::uint32_t side) {
+        return Arcane::UploadMipFootprint(side * 4u, side * side * 4u, 1u, dd.memoryAlignment.uploadBufferTextureRow,
+                                          dd.memoryAlignment.uploadBufferTextureSlice).bytes;
+    };
+    REQUIRE(cost(16) >= 2u * cost(4));
+
+    CHECK(cache->Resolve(idA) == nullptr);
+    CHECK(cache->Resolve(idB) == nullptr);
+    CHECK(cache->Resolve(idC) == nullptr);
+
+    // cap == B's cost: A fits, then B (<= cap) does not fit what is left, so it WAITS and C (which would
+    // fit) must not overtake it.
+    Arcane::UploadBudget b1 = Arcane::UploadBudget::WithCap(cost(16));
+    auto jobs = cache->BeginUploadFrame(b1);
+    REQUIRE(jobs.size() == 1u);
+    CHECK(jobs[0].id == idA);
+    cache->CommitUploads(true, device->Graves(), 1);
+
+    Arcane::UploadBudget b2 = Arcane::UploadBudget::WithCap(cost(16));   // a fresh budget always admits the first entry
+    jobs = cache->BeginUploadFrame(b2);
+    REQUIRE(jobs.size() == 1u);
+    CHECK(jobs[0].id == idB);
+    cache->CommitUploads(true, device->Graves(), 2);
+
+    Arcane::UploadBudget b3 = Arcane::UploadBudget::WithCap(cost(16));
+    jobs = cache->BeginUploadFrame(b3);
+    REQUIRE(jobs.size() == 1u);
+    CHECK(jobs[0].id == idC);
+    cache->CommitUploads(true, device->Graves(), 3);
+    CHECK(cache->ResidentCount() == 3u);
+    CHECK(cache->ObjectCreateCount() == 3u);   // no churn while they waited
+
+    cache->Release(device->Graves(), 4);
+    device->Graves().Reap(4);
+}
+
+TEST_CASE("texture cache: a queued entry that is asked for is stamped, so it survives another key's Charge",
+          "[nri][upload]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    Arcane::ResidencyCaps caps;
+    caps.meshCap = 0;
+    caps.textureCap = 2ull << 10;   // two 1 KiB images
+    caps.reservationPercent = 0;
+    Arcane::ResidencyAccount& account = device->ResidencyForTests(caps);
+    auto cache = NriTextureCache::Create(*device);
+    REQUIRE(cache != nullptr);
+    Arcane::PixelData px = MakePixels(16, 16);   // 1 KiB
+    cache->SetPixelSupply([&](const Guid&) -> const Arcane::PixelData* { return &px; });
+    const Guid idC = *Guid::FromString("b2b2b2b2-0000-0000-0000-000000000003");
+
+    // Frame 1: A and B are queued (and charged). The frame ends.
+    CHECK(cache->Resolve(kTexA) == nullptr);
+    CHECK(cache->Resolve(kTexB) == nullptr);
+    cache->CloseFrame();
+
+    // Frame 2: the scene still draws A and B (they are asked for again, still not ready), and a third key is
+    // admitted over the cap. A and B were touched this frame, so neither is its victim.
+    CHECK(cache->Resolve(kTexA) == nullptr);
+    CHECK(cache->Resolve(kTexB) == nullptr);
+    CHECK(cache->Resolve(idC) == nullptr);
+    CHECK(account.TakePending(cache.get()).empty());
+    CHECK(cache->UploadQueued(kTexA));
+    CHECK(cache->UploadQueued(kTexB));
+
+    cache->Release(device->Graves(), 1);
+    device->Graves().Reap(1);
 }

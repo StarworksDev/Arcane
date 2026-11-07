@@ -167,6 +167,7 @@ namespace Arcane::Editor
             Arcane::MeshData               meshGeometry;    // local space, unit-rule scaled
             Arcane::MeshBounds             meshBounds;      // ResolveMeshData's answer -- FrameMeshBounds' input
             std::vector<Arcane::MeshInstance> meshInstances;   // one per section, materials pre-resolved
+            std::vector<Arcane::Guid>         meshInstanceMaterials;   // the material each section's slot came from (nil = none), so a re-render can re-Request it
         };
 
         // ---- one material's finished thumbnail --------------------------
@@ -998,6 +999,7 @@ namespace Arcane::Editor
             inst.indexOffset  = section.indexOffset;
             inst.indexCount   = section.indexCount;
             r.meshInstances.push_back(inst);
+            r.meshInstanceMaterials.push_back(slotMat);
         }
         ready.push_back(std::move(r));
     }
@@ -1326,6 +1328,57 @@ namespace Arcane::Editor
             vp.mesh = &meshScene;
         }
 
+        // ===== ALBEDO SLOTS FOLLOW THE UPLOADS (Plan C Task 5, review I2) =====
+        // StartOne/StartOneMesh asked the material cache ONCE. On a first use an albedo
+        // texture is only QUEUED by that ask (ResolveMeshAlbedoSlot answers the invalid
+        // slot), so the slot baked into `instances` would stay invalid and the flat-colour
+        // picture would be published as a success. Before every re-render the materials
+        // are Requested again (a re-ask re-resolves an invalid slot) and the slots
+        // rewritten into `instances`. Returns whether an albedo is still on its way.
+        const auto refreshAlbedoSlots = [&]() -> bool
+        {
+            bool outstanding = false;
+            const auto onItsWay = [&](const Arcane::ResolvedMeshMaterial& m)
+            {
+                if (m.albedo.IsValid() && m.materialSlot == 0xFFFFFFFFu
+                    && (ctx->HasPendingUploads()
+                        || (ctx->Textures() && ctx->Textures()->UploadQueued(m.albedo))))
+                    outstanding = true;
+            };
+            if (!meshMats)
+                return false;
+            if (r.subject == Subject::Material && r.surface == Arcane::MaterialSurface::Mesh && !instances.empty())
+            {
+                meshMats->Request(r.id);
+                const auto& table = meshMats->Table();
+                if (const auto it = table.find(r.id); it != table.end())
+                {
+                    r.meshColor = it->second.baseColor;
+                    r.meshSlot  = it->second.materialSlot;
+                    instances[0] = MaterialPreviewSphereInstance(r.meshColor, r.meshSlot);
+                    onItsWay(it->second);
+                }
+            }
+            else if (r.subject == Subject::Mesh && r.meshInstanceMaterials.size() == instances.size())
+            {
+                for (std::size_t i = 0; i < instances.size(); ++i)
+                {
+                    const Arcane::Guid& mat = r.meshInstanceMaterials[i];
+                    if (!mat.IsValid())
+                        continue;
+                    meshMats->Request(mat);
+                    const auto& table = meshMats->Table();
+                    if (const auto it = table.find(mat); it != table.end())
+                    {
+                        instances[i].baseColor    = it->second.baseColor;
+                        instances[i].materialSlot = it->second.materialSlot;
+                        onItsWay(it->second);
+                    }
+                }
+            }
+            return outstanding;
+        };
+
         Arcane::NriGraphContext::FrameOutcome outcome = ctx->RenderFrameOffscreen(vp);
 
         // ===== DEFERRED UPLOADS (Plan C Task 5): ONE FRAME IS NOT THE PICTURE ========
@@ -1337,15 +1390,18 @@ namespace Arcane::Editor
         // drawing frame, and one spare). The stash SetMeshSupply serves from stays
         // alive across the loop; it is released only after the last frame.
         for (int again = 0;
-             outcome == Arcane::NriGraphContext::FrameOutcome::Presented && ctx->HasPendingUploads()
+             outcome == Arcane::NriGraphContext::FrameOutcome::Presented
+             && (ctx->HasPendingUploads() || refreshAlbedoSlots())
              && again < thumb.maxRetries;
              ++again)
         {
+            (void)refreshAlbedoSlots();
             fillBatch();
             outcome = ctx->RenderFrameOffscreen(vp);
         }
 
-        if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented && ctx->HasPendingUploads())
+        if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented
+            && (ctx->HasPendingUploads() || refreshAlbedoSlots()))
         {
             // Gave up: the uploads never settled inside the budget. Behave as today's
             // failure path does for a picture that cannot be made -- the item is

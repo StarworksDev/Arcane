@@ -1189,6 +1189,26 @@ namespace Arcane
             return refuse("its registration carries no stitched shader bytecode "
                           "(Material2DDesc::vsBytes)");
 
+        // HOLD THE FIRST BUILD while a declared image is still queued (Plan C Task 5 review I5). Asking
+        // the cache here creates + queues it; the descriptor sets bake the views once, so building now
+        // would bake the white texel and force a rebuild (behind a device idle) the moment the image
+        // lands. Holding means first use needs no idle: the material draws through the plain sprite
+        // pipeline until every declared image is bindable or refused (a refused one uses the white
+        // texel, as before). Only the FIRST build holds -- a rebuild is a content change like a re-save.
+        if (m_textureCache && m_materialSlotOf.find(material) == m_materialSlotOf.end())
+        {
+            bool held = false;
+            for (const Guid& id : desc->instance->ResolveTextures())
+            {
+                if (!id.IsValid())
+                    continue;
+                (void)m_textureCache->Resolve(id);
+                held = held || m_textureCache->UploadQueued(id);
+            }
+            if (held)
+                return nullptr;
+        }
+
         // The identity of THIS registration. A material re-save replaces the
         // whole Material2DDesc (SpriteMaterialCache -> Batcher2D::
         // UpdateMaterial), so every pointer below moves with it; the sizes and
@@ -1206,10 +1226,11 @@ namespace Arcane
         {
             stamp = HashValue(id.hi, stamp);
             stamp = HashValue(id.lo, stamp);
-            // Whether the declared image is BINDABLE yet (Plan C Task 5). A param whose
-            // upload was still queued when the sets were written is baked in as the white
-            // texel; the flip to ready changes the stamp, so the material rebuilds ONCE
-            // through the re-registration path below (the same idle a re-save costs).
+            // Whether the declared image is BINDABLE now (Plan C Task 5). A FIRST build never sees
+            // a queued image (it is held above), so first use costs no idle. The flag still flips
+            // for CONTENT changes -- an eviction's re-upload, a PendingCook key promoted to its real
+            // artifact -- and those rebuild once through the re-registration path below (the same
+            // idle a re-save costs): they are content changes like a re-save, not first use.
             stamp = HashValue(m_textureCache && id.IsValid() && m_textureCache->View(id) ? 1u : 0u, stamp);
         }
 

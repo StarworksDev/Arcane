@@ -238,6 +238,7 @@ namespace Arcane
         }
         core.SetDebugName(ib, ("mesh ib " + id.ToString()).c_str());
 
+        ++m_objectCreates;
         r.vertexBuffer = vb;
         r.indexBuffer  = ib;
         r.indexCount   = static_cast<std::uint32_t>(r.cpu.indices.size());
@@ -290,6 +291,15 @@ namespace Arcane
                 r.lastDrawnFrame = frameCounter;
                 NoteDraw(id, r);
                 return &r;
+            }
+            // A QUEUED entry is asked for every frame it waits: stamp it like a hit (touch the account
+            // and the LRU clock) so it is not the victim of another Charge before it ever draws, then
+            // answer null. Otherwise two visible assets under budget pressure could evict each other
+            // forever (Plan C Task 5 review I4).
+            if (r.queued)
+            {
+                r.lastDrawnFrame = frameCounter;
+                NoteDraw(id, r);
             }
             // NOT READY AND PRESENT == MEMOIZED, with no third case: a supply that
             // answered Failed, or an upload the device refused (Resident::
@@ -395,22 +405,25 @@ namespace Arcane
         m_parked.push_back([core, buffer] { core->DestroyBuffer(buffer); });
     }
 
-    std::vector<NriMeshBufferCache::UploadJob> NriMeshBufferCache::BeginUploadFrame()
+    std::vector<NriMeshBufferCache::UploadJob> NriMeshBufferCache::BeginUploadFrame(UploadBudget& budget)
     {
         std::vector<UploadJob> jobs;
-        jobs.reserve(m_queue.size());
-        for (const Guid& id : m_queue)
+        std::size_t consumed = 0;   // queue prefix leaving the queue: admitted or dead
+        for (; consumed < m_queue.size(); ++consumed)
         {
+            const Guid id = m_queue[consumed];
             const auto it = m_entries.find(id);
             if (it == m_entries.end() || !it->second.queued || !it->second.vertexBuffer || !it->second.indexBuffer)
-                continue;
+                continue;   // cancelled or refused since: dropped from the queue
             const Resident& r = it->second;
-            jobs.push_back(UploadJob{ id, r.vertexBuffer, r.indexBuffer,
-                                      r.cpu.vertices.size() * sizeof(MeshVertex),
-                                      r.cpu.indices.size() * sizeof(std::uint32_t) });
+            const std::uint64_t vertexBytes = r.cpu.vertices.size() * sizeof(MeshVertex);
+            const std::uint64_t indexBytes  = r.cpu.indices.size() * sizeof(std::uint32_t);
+            if (!budget.Admit(MeshStagingBytes(vertexBytes, indexBytes)))
+                break;   // FIFO: it waits, and nothing behind it overtakes it
+            jobs.push_back(UploadJob{ id, r.vertexBuffer, r.indexBuffer, vertexBytes, indexBytes });
             m_inflight.push_back(id);
         }
-        m_queue.clear();
+        m_queue.erase(m_queue.begin(), m_queue.begin() + static_cast<std::ptrdiff_t>(consumed));
         return jobs;
     }
 
@@ -430,7 +443,8 @@ namespace Arcane
         CancelUpload(id);
     }
 
-    void NriMeshBufferCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring)
+    void NriMeshBufferCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                                          std::uint64_t budgetCap)
     {
         const auto it = m_entries.find(job.id);
         if (it == m_entries.end())
@@ -448,7 +462,12 @@ namespace Arcane
         const std::uint64_t total       = MeshStagingBytes(vertexBytes, indexBytes);
 
         // CLASSIFIED HERE, after ring.BeginFrame (the setup fn only declared).
-        const Staging cls = ClassifyFits(ring.Fits(total, kMeshStagingAlign), ring.SlotCapacity(), total);
+        Staging cls = ClassifyBudgeted(ring.Fits(total, kMeshStagingAlign), ring.SlotCapacity(), budgetCap, total);
+        if (cls == Staging::Ring && m_debugForceRetry > 0)
+        {
+            --m_debugForceRetry;
+            cls = Staging::Retry;   // test injection: the guard branch below
+        }
 
         const auto write = [&](std::uint8_t* base)
         {

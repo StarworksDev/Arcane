@@ -32,6 +32,8 @@
 // CLASSIFICATION happens in the exec fn, after ring.BeginFrame: ring / retry /
 // dedicated staging (NriUploadStaging.hpp). The setup fn only declares.
 
+#include <Arcane/Render/Nri/NriUploadMode.hpp>   // UploadBudget
+
 namespace Arcane
 {
     class NriMeshBufferCache;
@@ -42,6 +44,10 @@ namespace Arcane
     // when a mesh is in the snapshot). Declares nothing, and costs nothing, when
     // neither cache has a queued upload. Either cache may be null. Returns
     // whether a node was declared.
+    //
+    // `budget` is this frame's ring budget (render.upload.frameBudgetPercent of a slot): the snapshot
+    // takes queued entries FIFO while their staging bytes fit it, and a payload over its cap uploads
+    // through dedicated staging. The rest stay queued for the next frame.
     ARC_RENDER_API bool AddUploadNodes(RenderGraph& graph, NriTextureCache* textures,
-                                       NriMeshBufferCache* meshes);
+                                       NriMeshBufferCache* meshes, UploadBudget budget);
 }

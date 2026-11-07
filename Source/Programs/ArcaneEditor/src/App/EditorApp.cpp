@@ -2418,7 +2418,8 @@ namespace Arcane::Editor
     {
         const Arcane::NriGraphContext* chrome = ChromeGraph();
         const Arcane::NriGraphContext* viewport = m_viewportTargets.graph.get();
-        return (chrome && chrome->HasPendingUploads()) || (viewport && viewport->HasPendingUploads());
+        return (chrome && chrome->HasPendingUploads()) || (viewport && viewport->HasPendingUploads())
+            || m_documents.AnyPreviewUploadsPending();   // MeshDocument / ShaderEditorDocument preview contexts
     }
 
     Arcane::NriGraphContext* EditorApp::ChromeGraph() const noexcept

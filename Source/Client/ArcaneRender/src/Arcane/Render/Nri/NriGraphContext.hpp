@@ -1545,6 +1545,10 @@ namespace Arcane
         // The frame's end for both caches' upload queues: `submitted` makes the
         // snapshot ready, false puts it back. Hands the buffers the exec fns buried to
         // this context's lane at the value this frame's submit signalled.
+        // Read-only: Allocate calls that overflowed the upload ring (lifetime, all slots). The `upload`
+        // node's retry, dedicated and budget-deferred payloads must never move it.
+        [[nodiscard]] std::uint64_t UploadRingOverflowCount() const noexcept { return m_ring.OverflowCount(); }
+
         void CommitUploads(bool submitted)
         {
             const std::uint64_t fence = m_graph ? m_graph->DebugSubmitCount() : 0;
@@ -1753,6 +1757,7 @@ namespace Arcane
         // render.uploadRingBytesPerFrame, latched by the constructor (Restart):
         // the size m_ring is Init()'d with and every log line reports.
         std::uint64_t                      m_uploadRingBytes = 0;
+        std::uint64_t                      m_uploadBudgetBytes = 0;   // the `upload` node's per-frame ring cap
         NriPipelineCache                   m_pipelines;
         // BEFORE the graph and the nodes in declaration order, so it is
         // destroyed AFTER them: a node holds descriptor SETS naming this

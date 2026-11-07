@@ -856,10 +856,26 @@ namespace Arcane
             for (std::uint32_t input : pass.inputs)
                 stamp = HashValue(input, stamp);
         }
-        // Whether each declared image is BINDABLE yet (Plan C Task 5): a param whose
-        // upload was still queued when the sets were written is baked in as the white
-        // texel, and the flip to ready changes the stamp so the chain rebuilds ONCE
-        // (the same idle a re-bind costs).
+        // HOLD THE FIRST BUILD while a declared image is still queued (Plan C Task 5 review I5): the
+        // sets bake the views once, so building now would bake the white texel and rebuild (behind
+        // an idle) when the image lands. Returning 0 draws the frame without the chain; first use
+        // costs no idle. A refused image uses the white texel as before.
+        if (!m_ready && m_textures && desc.instance)
+        {
+            bool held = false;
+            for (const Guid& id : desc.instance->ResolveTextures())
+            {
+                if (!id.IsValid())
+                    continue;
+                (void)m_textures->Resolve(id);
+                held = held || m_textures->UploadQueued(id);
+            }
+            if (held)
+                return 0;
+        }
+        // Whether each declared image is BINDABLE now. Flips only for CONTENT changes after the
+        // first build (an eviction's re-upload, a PendingCook promotion): they rebuild once, like
+        // a re-bind, and are not first use.
         if (m_textures && desc.instance)
             for (const Guid& id : desc.instance->ResolveTextures())
                 stamp = HashValue(id.IsValid() && m_textures->View(id) ? 1u : 0u, stamp);

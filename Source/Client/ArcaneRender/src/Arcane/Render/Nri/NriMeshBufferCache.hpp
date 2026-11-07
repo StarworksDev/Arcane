@@ -159,10 +159,25 @@ namespace Arcane
         [[nodiscard]] std::size_t QueuedUploadCount() const noexcept { return m_queue.size(); }
         // The upload node's setup: moves the queue into the frame's snapshot and
         // returns it. Entries queued AFTER this call wait for the next frame.
-        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame();
+        // `budget` is the context's per-frame ring budget, shared with the texture cache: entries are
+        // admitted FIFO while their staging bytes fit; the first that does not fit stops the snapshot
+        // and stays queued with its objects (nothing is destroyed or recreated). A payload over the
+        // budget cap is admitted at no ring cost (it uploads through dedicated staging).
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame(UploadBudget& budget);
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame()
+        {
+            UploadBudget unlimited;
+            return BeginUploadFrame(unlimited);
+        }
         // The upload node's exec fn, after ring.BeginFrame: classifies the payload
         // (ring / retry / dedicated) and records the copies. Never calls CmdBarrier.
-        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring);
+        // `budgetCap` is the budget's cap: a payload over it takes dedicated staging, never the ring.
+        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                          std::uint64_t budgetCap = ~0ull);
+        // TEST INSTRUMENTS: force the next `count` ring-class payloads down the retry branch (the guard
+        // the budget makes unreachable in practice), and read how many device buffer PAIRS were ever created.
+        void DebugForceRetry(std::uint32_t count) noexcept { m_debugForceRetry = count; }
+        [[nodiscard]] std::uint64_t ObjectCreateCount() const noexcept { return m_objectCreates; }
         // After the frame: `submitted` makes every snapshot entry that is still
         // queued ready; false (Execute failed or the frame never ran) puts them back
         // in the queue. Either way, buffers the exec fn buried are handed to
@@ -288,6 +303,8 @@ namespace Arcane
         // buffers): they wait for CommitUploads, which knows this lane's fence.
         std::vector<std::function<void()>> m_parked;
         bool                 m_settling = false;   // an entry became ready last frame
+        std::uint32_t        m_debugForceRetry = 0;
+        std::uint64_t        m_objectCreates = 0;
         bool m_warnedOverBudget = false;
         bool m_warnedMiss       = false;
         // DebugFailNextUpload's own latch -- see that method's comment. Never read

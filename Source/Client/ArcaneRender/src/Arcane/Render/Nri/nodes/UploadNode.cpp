@@ -40,14 +40,15 @@ namespace Arcane
         };
     }
 
-    bool AddUploadNodes(RenderGraph& graph, NriTextureCache* textures, NriMeshBufferCache* meshes)
+    bool AddUploadNodes(RenderGraph& graph, NriTextureCache* textures, NriMeshBufferCache* meshes,
+                        UploadBudget budget)
     {
         auto frame = std::make_shared<UploadFrame>();
         if (textures)
-            for (const NriTextureCache::UploadJob& job : textures->BeginUploadFrame())
+            for (const NriTextureCache::UploadJob& job : textures->BeginUploadFrame(budget))
                 frame->textures.push_back({ job, {} });
         if (meshes)
-            for (const NriMeshBufferCache::UploadJob& job : meshes->BeginUploadFrame())
+            for (const NriMeshBufferCache::UploadJob& job : meshes->BeginUploadFrame(budget))
                 frame->meshes.push_back({ job, {}, {} });
         if (frame->textures.empty() && frame->meshes.empty())
             return false;
@@ -78,14 +79,14 @@ namespace Arcane
                     builder.Write(slot.index, RgUsage::CopyDst);
                 }
             },
-            [frame, textures, meshes](RenderGraphNodeContext& context)
+            [frame, textures, meshes, cap = budget.cap](RenderGraphNodeContext& context)
             {
                 // Classification (ring / retry / dedicated) is each cache's job, here,
                 // after ring.BeginFrame -- never in the setup fn above.
                 for (const UploadTextureSlot& slot : frame->textures)
-                    textures->RecordUpload(slot.job, context.cmd, context.ring);
+                    textures->RecordUpload(slot.job, context.cmd, context.ring, cap);
                 for (const UploadMeshSlot& slot : frame->meshes)
-                    meshes->RecordUpload(slot.job, context.cmd, context.ring);
+                    meshes->RecordUpload(slot.job, context.cmd, context.ring, cap);
             });
 
         if (!frame->meshes.empty())
