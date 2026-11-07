@@ -16,6 +16,8 @@
 
 #include "NriDevice.hpp"
 
+#include <atomic>
+
 #include "NriCommon.hpp"
 #include "BindlessTable.hpp"
 #include "ResidencyAccount.hpp"
@@ -45,8 +47,36 @@ namespace Arcane { struct D3D12DeviceCreation {}; }
 #include <cstdint>
 #include <string_view>
 
+namespace
+{
+    // EnableDeviceWaitIdleCounting's forwarder -- a plain function pointer table entry
+    // carries no user data, so the real entry and the count are process-wide.
+    std::atomic<std::uint64_t> g_deviceWaitIdleCount{ 0 };
+    nri::Result (NRI_CALL* g_realDeviceWaitIdle)(nri::Device*) = nullptr;
+
+    nri::Result NRI_CALL CountingDeviceWaitIdle(nri::Device* device)
+    {
+        g_deviceWaitIdleCount.fetch_add(1, std::memory_order_relaxed);
+        return g_realDeviceWaitIdle(device);
+    }
+}
+
 namespace Arcane
 {
+    void NriDevice::EnableDeviceWaitIdleCounting()
+    {
+        if (m_core.DeviceWaitIdle && m_core.DeviceWaitIdle != &CountingDeviceWaitIdle)
+        {
+            g_realDeviceWaitIdle = m_core.DeviceWaitIdle;
+            m_core.DeviceWaitIdle = &CountingDeviceWaitIdle;
+        }
+    }
+
+    std::uint64_t NriDevice::DeviceWaitIdleCount() noexcept
+    {
+        return g_deviceWaitIdleCount.load(std::memory_order_relaxed);
+    }
+
     namespace
     {
         // ---------------------------------------------------------------

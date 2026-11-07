@@ -38,6 +38,8 @@ namespace
     //  Present        NONE              (0)             PRESENT                     NONE               (0x7FFFFFFF)
     //  ReadbackHost   COPY_DESTINATION  (bit 19)        COPY_DESTINATION            COPY               (bit 20)
     //  IndirectArgs   ARGUMENT_BUFFER   (bit 3)         --  (buffers only)          INDIRECT           (bit 23)
+    //  VertexBuffer   VERTEX_BUFFER     (bit 0)         --  (buffers only)          VERTEX_SHADER      (bit 3)
+    //  IndexBuffer    INDEX_BUFFER      (bit 1)         --  (buffers only)          INDEX_INPUT        (bit 2)
     //
     // Notes a reviewer should check the table against:
     //
@@ -119,6 +121,14 @@ namespace
             // (NRIDescs.h's AccessBits table). The layout is forced UNDEFINED
             // below like every other buffer state.
             state = { nri::AccessBits::ARGUMENT_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::INDIRECT };
+            break;
+        case Arcane::RgUsage::VertexBuffer:
+            // Buffers only. VERTEX_BUFFER's compatible stage is VERTEX_SHADER, the
+            // same pair the UploadData `after` state used for a mesh's vertex buffer.
+            state = { nri::AccessBits::VERTEX_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::VERTEX_SHADER };
+            break;
+        case Arcane::RgUsage::IndexBuffer:
+            state = { nri::AccessBits::INDEX_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::INDEX_INPUT };
             break;
         }
 

@@ -147,7 +147,9 @@ TEST_CASE("a second vehicle charges the same account", "[residency][account]")
     auto device = Arcane::NriDevice::CreateNoneForTests();
     REQUIRE(device != nullptr);
     auto cacheA = Arcane::NriMeshBufferCache::Create(*device);
+    cacheA->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
     auto cacheB = Arcane::NriMeshBufferCache::Create(*device);
+    cacheB->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
     REQUIRE(cacheA != nullptr);
     REQUIRE(cacheB != nullptr);
     CHECK(&device->Residency() == &device->Residency());
@@ -307,6 +309,7 @@ TEST_CASE("an evicted object waits on the sampling context", "[residency][accoun
     {
         c->cache = Arcane::NriTextureCache::Create(*device);
         REQUIRE(c->cache != nullptr);
+        c->cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
         c->cache->SetPixelSupply(supply);
     }
     Arcane::BindlessTable* table = device->Bindless();
@@ -463,6 +466,7 @@ namespace
     {
         c.cache = Arcane::NriTextureCache::Create(device);
         REQUIRE(c.cache != nullptr);
+        c.cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
         c.cache->SetPixelSupply([&px](const Guid&) -> const Arcane::PixelData* { return &px.pixels; });
     }
 }
@@ -589,12 +593,13 @@ TEST_CASE("an idle holder's queued eviction is drained at another context's boun
     CHECK(a.graves.Pending() == 0u);
     CHECK(account.TakePending(a.cache.get()).empty());
 
-    // The admitting context is skipped by its own call: queue an eviction for B (A admits
-    // past the cap and takes one of B's cold entries), then DrainOtherContexts(&b) must
-    // leave B's queue alone while it drains A's.
+    // The context whose boundary runs is skipped by its own call: A admits guid 400 past
+    // the cap and the account queues an eviction for one of B's cold entries; then
+    // DrainOtherContexts(&b) -- B is the context whose boundary is running -- must leave
+    // B's own queue alone (B carries it out itself) while it drains everyone else's.
     REQUIRE(a.cache->Resolve(Guid{ 400, 0 }) != nullptr);
     device->DrainOtherContexts(&b);
-    CHECK_FALSE(account.TakePending(b.cache.get()).empty());   // B (the admitter) was not drained
+    CHECK_FALSE(account.TakePending(b.cache.get()).empty());   // B (the boundary's own context) was skipped, not drained
 
     device->UnregisterContext(&a);
     device->UnregisterContext(&b);

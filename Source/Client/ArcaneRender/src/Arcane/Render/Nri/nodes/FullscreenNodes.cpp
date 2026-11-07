@@ -856,6 +856,13 @@ namespace Arcane
             for (std::uint32_t input : pass.inputs)
                 stamp = HashValue(input, stamp);
         }
+        // Whether each declared image is BINDABLE yet (Plan C Task 5): a param whose
+        // upload was still queued when the sets were written is baked in as the white
+        // texel, and the flip to ready changes the stamp so the chain rebuilds ONCE
+        // (the same idle a re-bind costs).
+        if (m_textures && desc.instance)
+            for (const Guid& id : desc.instance->ResolveTextures())
+                stamp = HashValue(id.IsValid() && m_textures->View(id) ? 1u : 0u, stamp);
 
         if (stamp != m_stamp)
         {

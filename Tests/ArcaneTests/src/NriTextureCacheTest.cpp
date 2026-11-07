@@ -69,6 +69,7 @@ TEST_CASE("nri texture cache: a nil Guid resolves to nothing and never asks the 
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::PixelData pixels = MakePixels(2, 2);
     CountingSupply supply;
@@ -93,6 +94,7 @@ TEST_CASE("nri texture cache: an unsupplied Guid misses once and memoizes the mi
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     CountingSupply supply;
     supply.answer = nullptr;   // no pixels for anything -- THE TEXTURE GAP
@@ -122,6 +124,7 @@ TEST_CASE("nri texture cache: with no supply installed at all, Resolve misses qu
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     // The frame driver installs the supply right after Create; a vehicle that
     // has not yet (or a device-less drive) must degrade, not crash.
@@ -143,6 +146,7 @@ TEST_CASE("nri texture cache: a supplied Guid uploads ONCE and serves one textur
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::PixelData pixels = MakePixels(4, 2);
     REQUIRE(pixels.Valid());
@@ -180,6 +184,7 @@ TEST_CASE("nri texture cache: an image nri::Dim_t cannot express is refused, not
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     // nri::Dim_t is 16-bit. A silent cast would wrap 70000 to 4464 and upload
     // a texture whose row pitch describes a different image -- the same
@@ -209,6 +214,7 @@ TEST_CASE("nri texture cache: Release BURIES its objects rather than destroying 
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::PixelData pixels = MakePixels(2, 2);
     CountingSupply supply;
@@ -263,6 +269,7 @@ TEST_CASE("nri texture cache: the colour space is part of an image's identity", 
 
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::PixelData pixels = MakePixels(4, 4);
     CountingSupply supply;

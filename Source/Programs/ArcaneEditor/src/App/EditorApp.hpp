@@ -241,6 +241,9 @@ namespace Arcane::Editor
         // ShutdownGraphPath -- every guard that used to read `if
         // (m_graphChrome)` reads `if (ChromeGraph())` instead.
         [[nodiscard]] Arcane::NriGraphContext* ChromeGraph() const noexcept;
+        // Whether either graph context still has a mesh/texture upload in flight (Plan C
+        // Task 5) -- the settle loops' extra quiescence conjunct.
+        [[nodiscard]] bool GraphUploadsPending() const noexcept;
         // The VIEWPORT context and every seam it needs, with TWO callers:
         // CreateGraphVehicles at boot, and SwitchProject's
         // "render_bridge" stage on every project switch -- which rebuilds this
@@ -2050,13 +2053,13 @@ namespace Arcane::Editor
         // needs a caller-side hook; same-context does not.
         Arcane::Guid      m_graphLogoId;
         Arcane::PixelData m_graphLogoPixels;
-        std::uint64_t     m_graphLogoTexture = 0;   // ImTextureID (raw nri::Texture*)
-        // The toolbar's mark -- 0 = no mark, which DrawSimTimeToolbar already
-        // treats as "skip it".
-        [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept
-        {
-            return m_graphLogoTexture;
-        }
+        // mutable: the mark's texture is created at boot but UPLOADED by a later frame
+        // (Plan C Task 5 deferral), so the first ToolbarLogoTextureId() calls that find
+        // it not ready re-ask the cache until the id appears.
+        mutable std::uint64_t m_graphLogoTexture = 0;   // ImTextureID (raw nri::Texture*)
+        // The toolbar's mark -- 0 = no mark (or not uploaded yet), which
+        // DrawSimTimeToolbar already treats as "skip it".
+        [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept;
 
         // File -> Open Project (soft-restart). The menu sets menuReq.openProject;
         // DrawEditorUi launches the async .arcproj FILE dialog via the shared

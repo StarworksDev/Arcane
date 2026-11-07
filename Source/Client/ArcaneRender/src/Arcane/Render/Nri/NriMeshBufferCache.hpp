@@ -39,10 +39,22 @@
 //     NOTHING and the draw is skipped -- quietly while pending, loudly when
 //     missing or refused.
 //
-// NO BARRIERS, and none needed -- uploads go through nri::HelperInterface::
-// UploadData, which submits and waits internally, so these buffers are NOT graph
-// resources. RESOLVE AT DECLARATION TIME ONLY, never inside a node's exec fn: the
-// same rule, and the same reason, NriTextureCache states in full.
+// UPLOADS ARE DEFERRED (Plan C Task 5, user ruling 2026-11-06). Resolve of a mesh
+// with no bytes on the GPU creates the vertex/index buffers (charged to the device
+// account at once), QUEUES the upload and answers NOT-READY (null) -- exactly the
+// answer a pending mesh already gets, so no consumer ever binds a not-ready pair.
+// The graph's `upload` node (nodes/UploadNode.hpp), declared first in the frame,
+// takes a SNAPSHOT of the queue (BeginUploadFrame), records the copies in its exec
+// fn (RecordUpload -- ring / retry / dedicated staging, classified AFTER
+// ring.BeginFrame), and the vehicle calls CommitUploads once the frame submitted:
+// only then is an entry ready, so its first consumer is a LATER frame's
+// declaration. Timeline: frame N queues, N+1 uploads, N+2 draws.
+//
+// The buffers are still not graph resources for DRAWING (draws bind them with no
+// barrier); the upload frame imports them for its CopyDst write and a no-work
+// `upload-settle` node reads them as VertexBuffer/IndexBuffer so the executor
+// leaves them in the state the draws bind them in. The pre-Task-5 blocking path
+// (UploadData inside Resolve) survives as NriUploadMode::Immediate, for tests only.
 
 // Include order: NRI headers first, ALWAYS -- see NriCommon.hpp.
 #include <NRI.h>
@@ -53,17 +65,21 @@
 #include <Arcane/Mesh/MeshAsset.hpp>
 #include <Arcane/Mesh/MeshBuilder.hpp>
 #include <Arcane/Render/Nri/MeshResidencyBudget.hpp>
+#include <Arcane/Render/Nri/NriUploadMode.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace Arcane
 {
     class Graveyard;
     class NriDevice;
+    class NriUploadRing;
     class ResidencyAccount;
 
     class ARC_RENDER_API NriMeshBufferCache
@@ -105,6 +121,22 @@ namespace Arcane
             // as a real CreateCommittedBuffer/UploadData refusal, even though it
             // never reaches either call.
             bool          uploadRefused = false;
+            // Created and charged, upload queued or in this frame's snapshot, NOT yet
+            // recorded and submitted. Neither ready nor memoized-refused: Resolve
+            // answers null for it, quietly. Cleared by CommitUploads (-> ready) or
+            // by any drop path (eviction / Invalidate / Release cancel the upload).
+            bool          queued = false;
+        };
+
+        // One entry of an `upload` node's snapshot: the buffers it imports and the
+        // byte counts it copies. The CPU bytes stay in the entry (Resident::cpu).
+        struct UploadJob
+        {
+            Guid          id;
+            nri::Buffer*  vertexBuffer = nullptr;
+            nri::Buffer*  indexBuffer  = nullptr;
+            std::uint64_t vertexBytes  = 0;
+            std::uint64_t indexBytes   = 0;
         };
 
         static std::unique_ptr<NriMeshBufferCache> Create(NriDevice& device);
@@ -113,6 +145,30 @@ namespace Arcane
         NriMeshBufferCache& operator=(const NriMeshBufferCache&) = delete;
 
         void SetMeshSupply(MeshSupplyFn supply) { m_supply = std::move(supply); }
+
+        // Production is Deferred. Immediate is the old blocking path, TEST ONLY.
+        void SetUploadMode(NriUploadMode mode) noexcept { m_mode = mode; }
+
+        // ---- the upload node's seams (Plan C Task 5) --------------------------
+
+        // True from the Resolve that queued an upload until one frame AFTER the
+        // entry became ready (the first frame that could draw it has then been
+        // recorded). The one-shot renderers' "is this picture final" question.
+        [[nodiscard]] bool HasPendingUploads() const noexcept;
+        // Entries queued and not yet in a snapshot.
+        [[nodiscard]] std::size_t QueuedUploadCount() const noexcept { return m_queue.size(); }
+        // The upload node's setup: moves the queue into the frame's snapshot and
+        // returns it. Entries queued AFTER this call wait for the next frame.
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame();
+        // The upload node's exec fn, after ring.BeginFrame: classifies the payload
+        // (ring / retry / dedicated) and records the copies. Never calls CmdBarrier.
+        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring);
+        // After the frame: `submitted` makes every snapshot entry that is still
+        // queued ready; false (Execute failed or the frame never ran) puts them back
+        // in the queue. Either way, buffers the exec fn buried are handed to
+        // `graveyard` at `fence` (this context's lane), and the cache's "settling"
+        // flag is advanced. Call exactly once per frame attempt.
+        void CommitUploads(bool submitted, Graveyard& graveyard, std::uint64_t fence);
 
         // The resident pair for `id`, uploading on first sight, and stamping
         // `lastDrawnFrame = frameCounter` on every HIT -- which is what makes the LRU
@@ -206,7 +262,17 @@ namespace Arcane
         // Uncharges the account, buries, and erases the map node -- the one drop path.
         void Discard(std::unordered_map<Guid, Resident>::iterator it, Graveyard& graveyard, std::uint64_t fence);
         void NoteDraw(const Guid& id, const Resident& r);
-        bool Upload(Resident& r, const Guid& id);
+        // Creates the vertex/index buffers into locals and publishes them (and the
+        // entry's byte count) only on full success. Does NOT upload.
+        bool CreateObjects(Resident& r, const Guid& id);
+        // The old blocking path (NriUploadMode::Immediate): UploadData inside Resolve.
+        bool UploadNow(Resident& r);
+        // Drops an entry's upload bookkeeping (queue + snapshot membership).
+        void CancelUpload(const Guid& id);
+        // Memoizes a refusal for an entry whose objects exist: uncharges, parks the
+        // buffers for burial, clears the CPU copy.
+        void RefuseQueued(const Guid& id, Resident& r);
+        void ParkBuffer(nri::Buffer* buffer);
 
         [[nodiscard]] static std::size_t SectionBytes(const MeshData& mesh) noexcept;
 
@@ -215,6 +281,13 @@ namespace Arcane
         MeshSupplyFn         m_supply;
         std::unordered_map<Guid, Resident> m_entries;
         ResidencyAccount*    m_account = nullptr;   // the device's account (NriDevice::Residency()); not owned
+        NriUploadMode        m_mode = NriUploadMode::Deferred;
+        std::vector<Guid>    m_queue;       // created, charged, waiting for an upload node
+        std::vector<Guid>    m_inflight;    // the current frame's snapshot, not yet committed
+        // Destroy thunks the exec fn parked (retry-buried buffers, dedicated staging
+        // buffers): they wait for CommitUploads, which knows this lane's fence.
+        std::vector<std::function<void()>> m_parked;
+        bool                 m_settling = false;   // an entry became ready last frame
         bool m_warnedOverBudget = false;
         bool m_warnedMiss       = false;
         // DebugFailNextUpload's own latch -- see that method's comment. Never read

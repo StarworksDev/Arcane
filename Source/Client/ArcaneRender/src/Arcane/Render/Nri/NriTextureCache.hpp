@@ -29,14 +29,24 @@
 // fires only on a Resolve that MISSES -- a frame full of colored quads (every
 // span carrying a nil Guid) says nothing at all.
 //
-// NO BARRIERS, and none needed. Uploads go through NRI's own
-// HelperInterface::UploadData, which submits and waits internally and leaves
-// the texture in SHADER_RESOURCE -- so these textures are NOT graph resources
-// (they are persistent, never written by a node, and their state never
-// changes), which is why nothing about them appears in a compiled frame. They
-// must therefore be resolved at DECLARATION time, never from inside a node's
-// exec fn: UploadData submitting while the frame's command buffer is open is
-// exactly the shape the graph's no-hand-barriers rule exists to prevent.
+// UPLOADS ARE DEFERRED (Plan C Task 5, user ruling 2026-11-06). Resolve of an image
+// with no bytes on the GPU creates the texture (charged to the device account at
+// once), COPIES the pixels, QUEUES the upload and answers NOT-READY (null, the same
+// "bind the white texel" answer every other not-ready key gives) -- so no consumer
+// ever binds or samples a not-ready texture. The graph's `upload` node
+// (nodes/UploadNode.hpp), declared first in the frame, takes a SNAPSHOT of the queue
+// (BeginUploadFrame), records the copies in its exec fn (RecordUpload -- ring / retry
+// / dedicated staging, classified AFTER ring.BeginFrame), imports the texture at the
+// unknown state and leaves it in its ShaderRead exit state. The vehicle calls
+// CommitUploads once the frame submitted: only then does the key get its view and
+// become ready, so its first consumer is a LATER frame's declaration. Timeline:
+// frame N queues, N+1 uploads, N+2 draws.
+//
+// Textures stay NOT graph resources for SAMPLING (persistent, never written by a
+// node after their upload frame, state never changes), which is why nothing about
+// them appears in an ordinary compiled frame. Resolve is still a DECLARATION-time
+// call, never an exec-fn one. The pre-Task-5 blocking path (UploadData inside
+// Resolve) survives as NriUploadMode::Immediate, for tests only.
 //
 // Include order: NRI headers first, ALWAYS -- see NriCommon.hpp
 // (Extensions/NRIDeviceCreation.h declares nri::Message::ERROR and
@@ -46,6 +56,7 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Guid.hpp>
+#include <Arcane/Render/Nri/NriUploadMode.hpp>
 
 #include <array>
 #include <cstddef>
@@ -54,11 +65,13 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Arcane
 {
     class Graveyard;
     class NriDevice;
+    class NriUploadRing;
     class ResidencyAccount;
     struct PixelData;
     struct LoadedClientArtifact;
@@ -161,6 +174,40 @@ namespace Arcane
         // own comment for exactly where this is consulted.
         using CookPendingOracle = std::function<bool(const Guid&)>;
         void SetCookPendingOracle(CookPendingOracle oracle) { m_cookPendingOracle = std::move(oracle); }
+
+        // Production is Deferred. Immediate is the old blocking path, TEST ONLY.
+        void SetUploadMode(NriUploadMode mode) noexcept { m_mode = mode; }
+
+        // ---- the upload node's seams (Plan C Task 5) --------------------------
+
+        // One entry of an `upload` node's snapshot.
+        struct UploadJob
+        {
+            Guid                 id;
+            ColorSpace           space   = ColorSpace::Srgb;
+            nri::Texture*        texture = nullptr;
+        };
+
+        // True from the Resolve that queued an upload until one frame AFTER the key
+        // became ready (the first frame that could sample it has then been recorded).
+        // The one-shot renderers' "is this picture final" question.
+        [[nodiscard]] bool HasPendingUploads() const noexcept;
+        // Keys queued and not yet in a snapshot.
+        [[nodiscard]] std::size_t QueuedUploadCount() const noexcept { return m_queue.size(); }
+        // Whether (id, space) was created and is waiting for its upload (queued or in
+        // the current snapshot) -- how a caller tells "not yet" from "refused".
+        [[nodiscard]] bool UploadQueued(const Guid& id, ColorSpace space = ColorSpace::Srgb) const noexcept;
+        // The upload node's setup: moves the queue into the frame's snapshot. Keys
+        // queued AFTER this call wait for the next frame.
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame();
+        // The upload node's exec fn, after ring.BeginFrame: classifies the payload
+        // (ring / retry / dedicated) and records one upload per mip. No CmdBarrier.
+        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring);
+        // After the frame: `submitted` gives every snapshot key that is still queued
+        // its view and makes it ready; false (Execute failed or the frame never ran)
+        // puts them back in the queue. Buffers/textures the exec fn buried go to
+        // `graveyard` at `fence` (this context's lane). Call once per frame attempt.
+        void CommitUploads(bool submitted, Graveyard& graveyard, std::uint64_t fence);
 
         // The texture for `id` on this device, uploading it on first sight.
         //
@@ -329,6 +376,23 @@ namespace Arcane
                            // legacy path's own failures already use), memoized.
         };
 
+        // The bytes and shape of an upload that has not been recorded yet. Owned by the
+        // Resident while the key is queued; copied out of the supply because the supply
+        // only promises its pointer for the duration of the call.
+        struct PendingUpload
+        {
+            struct Mip
+            {
+                std::uint64_t offset = 0;      // into `payload`
+                std::uint32_t rowPitch = 0;    // source pitches, as the cache has always written them
+                std::uint32_t slicePitch = 0;
+            };
+            nri::TextureDesc          desc{};      // what the texture was (and, on a retry, is re-)created with
+            std::vector<Mip>          mips;
+            std::vector<std::uint8_t> payload;
+            std::string               debugName;
+        };
+
         // One image made resident here. A FAILED load is kept with null
         // members: attempted once, not once per frame -- EXCEPT PendingCook,
         // which is deliberately retried, THROTTLED (see ResidentState and
@@ -346,6 +410,9 @@ namespace Arcane
             // The GPU bytes this key charges the device residency account (Resident
             // state only; 0 for PendingCook / Refused, which hold no object of their own).
             std::uint64_t    bytes = 0;
+            // Non-null from creation until the upload is committed: the key is created and
+            // charged but NOT ready (view stays null, so Resolve/View answer null).
+            std::unique_ptr<PendingUpload> pending;
         };
 
         // (asset, colour space) -- see ColorSpace. The SPACE is part of the
@@ -397,7 +464,17 @@ namespace Arcane
         // so Release()/the destructor still finds it and destroys it -- this
         // function never leaks the object it created even when it fails
         // partway through). Returns whether `resident.view` ended up non-null.
-        bool UploadArtifact(const LoadedClientArtifact& artifact, Resident& resident);
+        bool UploadArtifact(const Key& key, const LoadedClientArtifact& artifact, Resident& resident);
+
+        // Creates `resident.texture` from `pending.desc`, ready for the upload node.
+        bool CreateTextureObject(Resident& resident, const PendingUpload& pending);
+        // The key's upload leaves the queue: Deferred queues it, Immediate (tests only)
+        // uploads it now through UploadData and creates the view.
+        bool FinishCreate(const Key& key, Resident& resident, std::unique_ptr<PendingUpload> pending);
+        bool UploadPendingNow(Resident& resident);
+        bool CreateViewFor(Resident& resident, const nri::TextureDesc& desc);
+        void CancelUpload(const Key& key);
+        void ParkTexture(nri::Texture* texture);
 
         // The shared 8x8 checkerboard for `space` -- created on the FIRST
         // PendingCook resolve in that space, reused (never recreated) by
@@ -430,5 +507,13 @@ namespace Arcane
         // existing legacy contract already extended to more reasons, not a
         // new latch per reason.
         bool m_warnedMiss = false;
+
+        NriUploadMode     m_mode = NriUploadMode::Deferred;
+        std::vector<Key>  m_queue;      // created, charged, waiting for an upload node
+        std::vector<Key>  m_inflight;   // the current frame's snapshot, not yet committed
+        // Destroy thunks the exec fn parked (retry-buried textures, dedicated staging
+        // buffers): they wait for CommitUploads, which knows this lane's fence.
+        std::vector<std::function<void()>> m_parked;
+        bool              m_settling = false;   // a key became ready last frame
     };
 }

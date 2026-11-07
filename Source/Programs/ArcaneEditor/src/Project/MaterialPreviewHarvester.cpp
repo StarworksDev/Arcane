@@ -479,7 +479,17 @@ namespace Arcane::Editor
     void MaterialPreviewHarvester::Impl::ReleaseThumbTexture(Entry& e)
     {
         if (e.texture == 0)
+        {
+            // Created and queued on the chrome cache but not uploaded yet (the texture
+            // id is only handed out once it is ready): the queued copy holds the OLD
+            // pixels, so drop it now or it would upload them over the new ones.
+            if (e.thumbId.IsValid())
+                if (Arcane::NriGraphContext* chrome = Chrome())
+                    if (Arcane::NriTextureCache* cache = chrome->Textures())
+                        if (cache->UploadQueued(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display))
+                            chrome->InvalidateContentTexture(e.thumbId);
             return;
+        }
         if (Arcane::NriGraphContext* chrome = Chrome())
         {
             if (Arcane::RenderOverlayNode* hud = chrome->ImGuiHud())
@@ -1214,6 +1224,12 @@ namespace Arcane::Editor
         //                  lens -- so "trivially reachable" was true, and the
         //                  mocks show spheres.
         Arcane::Batcher2D& b = *batch;
+
+        // The picture's 2D half, as a lambda because a frame whose uploads were still
+        // in flight is RENDERED AGAIN (below): RenderFrameOffscreen drains the batcher,
+        // so every pass re-fills it.
+        const auto fillBatch = [&]()
+        {
         b.Begin(thumb.size, thumb.size);
         b.SetGlobals(globals);   // AFTER Begin -- matching every other call site
 
@@ -1237,6 +1253,8 @@ namespace Arcane::Editor
                            glm::vec2(s, s),
                            glm::vec2(0.0f), glm::vec2(1.0f), glm::vec4(1.0f));
         }
+        };   // fillBatch
+        fillBatch();
 
         Arcane::NriGraphContext::FrameDesc vp;
         vp.batch   = &b;
@@ -1308,7 +1326,38 @@ namespace Arcane::Editor
             vp.mesh = &meshScene;
         }
 
-        if (ctx->RenderFrameOffscreen(vp) != Arcane::NriGraphContext::FrameOutcome::Presented)
+        Arcane::NriGraphContext::FrameOutcome outcome = ctx->RenderFrameOffscreen(vp);
+
+        // ===== DEFERRED UPLOADS (Plan C Task 5): ONE FRAME IS NOT THE PICTURE ========
+        // A mesh, a texture or a declared material image that this frame resolved for
+        // the first time is only QUEUED by it: the next frame uploads, the one after
+        // draws. So while the vehicle reports uploads in flight the same picture is
+        // rendered again -- bounded by the retry budget this harvester already owns
+        // (editor.thumbnail.maxRetries, default 3 = the upload frame, the first
+        // drawing frame, and one spare). The stash SetMeshSupply serves from stays
+        // alive across the loop; it is released only after the last frame.
+        for (int again = 0;
+             outcome == Arcane::NriGraphContext::FrameOutcome::Presented && ctx->HasPendingUploads()
+             && again < thumb.maxRetries;
+             ++again)
+        {
+            fillBatch();
+            outcome = ctx->RenderFrameOffscreen(vp);
+        }
+
+        if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented && ctx->HasPendingUploads())
+        {
+            // Gave up: the uploads never settled inside the budget. Behave as today's
+            // failure path does for a picture that cannot be made -- the item is
+            // Refused (memoized, kind icon), not published half-drawn.
+            ARC_WARN("[thumbs] the preview for {} {} still had uploads in flight after {} extra frame(s) "
+                     "-- giving up on it", r.subject == Subject::Mesh ? "mesh" : "material",
+                     r.id.ToString(), thumb.maxRetries);
+            ReleaseMeshHarvest();
+            return HarvestOutcome::Refused;
+        }
+
+        if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
         {
             // Skipped is impossible at a fixed 64px; Failed has already
             // latched + logged. The vehicle is dropped so the replacement is
@@ -1403,6 +1452,8 @@ namespace Arcane::Editor
         // it decodes a second time and reads dark. These bytes are already
         // display-referred -- they came out of the tonemap.
         nri::Texture* t = cache->Resolve(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display);
+        if (!t && cache->UploadQueued(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display))
+            return 0;   // created and queued: the chrome context's next frames upload it; asked again every draw
         if (!t)
         {
             ARC_WARN("[thumbs] the chrome texture cache refused the preview for material {}",

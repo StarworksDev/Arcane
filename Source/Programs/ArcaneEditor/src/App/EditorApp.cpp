@@ -58,6 +58,7 @@
 #include <Arcane/Config/Settings.hpp>   // Settings<EditorUiStyleSettings>: the boot style metrics (settings S6-28)
 #include "Settings/AssetBrowserSettings.hpp"     // EditorOpenOptions: editor.assets.mountDiagnostics (settings S6-38)
 #include "Settings/EditorPlaySettings.hpp"       // ReadPlayModeIniLine: the old [EditorPlayMode] section (settings S6-32)
+#include "Settings/EditorThumbnailSettings.hpp"   // maxRetries: the cover capture's upload-settle budget (Plan C Task 5)
 #include "Settings/EditorViewportSettings.hpp"   // EditorGizmoSettings: the session's starting gizmo tool (settings S6-31)
 #include "Settings/GraphCanvasSettings.hpp"        // CaptureGraphNodePaddingAtBoot: editor.graph.nodePadding (Restart; S6-44)
 #include <Arcane/Platform/Paths.hpp>   // Arcane::Paths -- Saved/, Diagnostics and the layouts dir resolve through it (settings spec s11.0)
@@ -1212,6 +1213,17 @@ namespace Arcane::Editor
         return (*refs)[0].target;
     }
 
+    std::uint64_t EditorApp::ToolbarLogoTextureId() const noexcept
+    {
+        if (m_graphLogoTexture == 0 && m_graphLogoId.IsValid())
+            if (Arcane::NriGraphContext* chrome = ChromeGraph())
+                if (Arcane::NriTextureCache* cache = chrome->Textures())
+                    if (nri::Texture* logo = cache->Resolve(
+                            m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display))
+                        m_graphLogoTexture = (std::uint64_t)(std::intptr_t)logo;
+        return m_graphLogoTexture;
+    }
+
     bool EditorApp::StagePluginLoad(Arcane::HostBoot::BootContext&)
     {
         if (const Arcane::Project* project = m_runtime->CurrentProject())
@@ -2085,40 +2097,58 @@ namespace Arcane::Editor
         if (!graph)
             return false;
 
-        // The SAME submission phase 10 makes, through the same function, so
-        // the cover cannot drift from what the viewport shows. Re-Begin is
-        // safe at either call site: phase 10's own frame already drained this
-        // batcher, and the next frame's phase 10 re-Begins it again.
-        Arcane::Batcher2D& b = m_gpu->Batch();
-        b.Begin(graph->SurfaceWidth(), graph->SurfaceHeight());
-        SubmitSceneToBatcher(b);
+        // ONE SUBMISSION PER ATTEMPT (Plan C Task 5). A mesh or texture the scene
+        // resolves for the first time is only QUEUED by the frame that resolved it,
+        // uploaded by the next and drawn by the one after, so a cover taken from the
+        // first frame would miss it. The same frame is therefore submitted again while
+        // the vehicle reports uploads in flight -- bounded by the thumbnail retry budget
+        // (editor.thumbnail.maxRetries, default 3). Giving up is today's failure path:
+        // no cover is written, rather than one with holes in it.
+        const std::int32_t extraFrames =
+            Arcane::Settings<Arcane::Editor::EditorThumbnailSettings>().maxRetries;
+        Arcane::NriGraphContext::FrameOutcome outcome = Arcane::NriGraphContext::FrameOutcome::Failed;
+        for (std::int32_t attempt = 0;; ++attempt)
+        {
+            // The SAME submission phase 10 makes, through the same function, so
+            // the cover cannot drift from what the viewport shows. Re-Begin is
+            // safe at either call site: phase 10's own frame already drained this
+            // batcher, and the next frame's phase 10 re-Begins it again.
+            Arcane::Batcher2D& b = m_gpu->Batch();
+            b.Begin(graph->SurfaceWidth(), graph->SurfaceHeight());
+            SubmitSceneToBatcher(b);
 
-        // A SECOND FRAME BUILDER, so it extracts too (F5 plan 1 Task 5): the
-        // sprite sweep runs only inside ExtractFrame, so without it this
-        // batcher would drain empty and the cover would lose its sprites. The
-        // same request builder as the viewport frame, minus the gizmo the
-        // cover has never drawn.
-        Arcane::ExtractRequest req = BuildExtractRequest(graph->SurfaceWidth(), graph->SurfaceHeight());
-        req.gizmoPrims.Clear();
-        const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(m_runtime->Registry(), req, m_packetRing);
+            // A SECOND FRAME BUILDER, so it extracts too (F5 plan 1 Task 5): the
+            // sprite sweep runs only inside ExtractFrame, so without it this
+            // batcher would drain empty and the cover would lose its sprites. The
+            // same request builder as the viewport frame, minus the gizmo the
+            // cover has never drawn.
+            Arcane::ExtractRequest req = BuildExtractRequest(graph->SurfaceWidth(), graph->SurfaceHeight());
+            req.gizmoPrims.Clear();
+            const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(m_runtime->Registry(), req, m_packetRing);
 
-        const Arcane::GlobalParams globals =
-            m_resolver ? m_resolver->Globals() : Arcane::GlobalParams{};
+            const Arcane::GlobalParams globals =
+                m_resolver ? m_resolver->Globals() : Arcane::GlobalParams{};
 
-        Arcane::NriGraphContext::FrameDesc vp;
-        vp.batch   = &b;
-        vp.post    = m_resolver ? m_resolver->PostDesc() : nullptr;
-        vp.globals = &globals;
-        vp.capture = true;
-        graph->BindPacket(&packet);   // the vehicle unbinds it before RenderFrameOffscreen returns
-        const Arcane::NriGraphContext::FrameOutcome outcome = graph->RenderFrameOffscreen(vp);
-        // The cover's extract synced the mirror and vp.mesh stays unset, so
-        // no mesh pass uploaded that stage. Invalidate on every outcome,
-        // before the non-Presented return, so the next viewport sync is a
-        // full rebuild (ruling R-F).
-        Arcane::GpuSceneInvalidate(m_runtime->Registry());
+            Arcane::NriGraphContext::FrameDesc vp;
+            vp.batch   = &b;
+            vp.post    = m_resolver ? m_resolver->PostDesc() : nullptr;
+            vp.globals = &globals;
+            vp.capture = true;
+            graph->BindPacket(&packet);   // the vehicle unbinds it before RenderFrameOffscreen returns
+            outcome = graph->RenderFrameOffscreen(vp);
+            // The cover's extract synced the mirror and vp.mesh stays unset, so
+            // no mesh pass uploaded that stage. Invalidate on every outcome,
+            // before the non-Presented return, so the next viewport sync is a
+            // full rebuild (ruling R-F).
+            Arcane::GpuSceneInvalidate(m_runtime->Registry());
+            if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented
+                || !graph->HasPendingUploads() || attempt >= extraFrames)
+                break;
+        }
         if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
             return false;   // Skipped (collapsed panel) or Failed (already latched + logged)
+        if (graph->HasPendingUploads())
+            return false;   // uploads never settled inside the budget: no half-drawn cover
 
         std::uint32_t w = 0, h = 0;
         std::vector<unsigned char> rgba;
@@ -2384,6 +2414,13 @@ namespace Arcane::Editor
     // See the declaration: one place resolves the live chrome context, so no
     // call site branches on --headless to find it. Exactly one member is ever
     // non-null; both null before CreateGraphVehicles and after ShutdownGraphPath.
+    bool EditorApp::GraphUploadsPending() const noexcept
+    {
+        const Arcane::NriGraphContext* chrome = ChromeGraph();
+        const Arcane::NriGraphContext* viewport = m_viewportTargets.graph.get();
+        return (chrome && chrome->HasPendingUploads()) || (viewport && viewport->HasPendingUploads());
+    }
+
     Arcane::NriGraphContext* EditorApp::ChromeGraph() const noexcept
     {
         return m_offscreenChrome ? &m_offscreenChrome->Graph() : m_graphChrome.get();
@@ -2617,13 +2654,9 @@ namespace Arcane::Editor
                         return thumb;
                 return m_runtime ? m_runtime->AssetsFacade().PixelsFor(id) : nullptr;
             });
-        if (m_graphLogoId.IsValid())
-            if (Arcane::NriTextureCache* cache = ChromeGraph()->Textures())
-                if (nri::Texture* logo = cache->Resolve(
-                        m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display))
-                {
-                    m_graphLogoTexture = (std::uint64_t)(std::intptr_t)logo;
-                }
+        // Creates the mark's texture and queues its upload; the id is handed out by
+        // ToolbarLogoTextureId once a later frame has uploaded it (Plan C Task 5).
+        (void)ToolbarLogoTextureId();
 
         // THE VIEWPORT, at the boot extent -- 0/0 asks for the default that
         // function names (1280x720; see BuildGraphViewportContext's own

@@ -252,6 +252,7 @@
 #include <Arcane/Render/Nri/nodes/OverlayNode.hpp>
 #include <Arcane/Render/OverlayPrimitive.hpp>
 #include <Arcane/Render/Nri/nodes/PickOutlineNodes.hpp>
+#include <Arcane/Render/Nri/nodes/UploadNode.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -1502,6 +1503,55 @@ namespace Arcane
                 m_meshBuffers->CloseFrame();
             if (m_textures)
                 m_textures->CloseFrame();
+        }
+
+        // ---- DEFERRED UPLOADS (Plan C Task 5; nodes/UploadNode.hpp) ----------------
+        //
+        // A Resolve of a mesh or texture with no bytes on the GPU creates the device
+        // object, queues the upload and answers not-ready; the `upload` node declared
+        // FIRST in this context's frame records it, and the entry is ready for the NEXT
+        // frame's declaration. Timeline: frame N queues, N+1 uploads, N+2 draws.
+        //
+        // THE ONE-SHOT QUERY. True while a rendered picture may still be missing a mesh
+        // or texture that is on its way: from the Resolve that queued an upload until
+        // one frame AFTER the entry became ready. A caller that treats ONE frame as
+        // final (a thumbnail harvest, a cover capture, a preview, a `--compare`
+        // settle) must keep rendering while this is true -- bounded, and on giving up
+        // behave as its own failure path does.
+        [[nodiscard]] bool HasPendingUploads() const noexcept
+        {
+            return (m_textures && m_textures->HasPendingUploads())
+                || (m_meshBuffers && m_meshBuffers->HasPendingUploads());
+        }
+
+        // TEST ONLY: puts both residency caches on the old blocking UploadData path
+        // (NriUploadMode::Immediate), so a node-level pixel case that renders ONE frame
+        // of a scene whose meshes and textures are first used there sees them drawn. The
+        // deferred timeline has its own [gpu][upload] cases; production never calls this.
+        void SetUploadModeForTests(NriUploadMode mode)
+        {
+            if (m_textures)
+                m_textures->SetUploadMode(mode);
+            if (m_meshBuffers)
+                m_meshBuffers->SetUploadMode(mode);
+        }
+
+        // Declares this frame's `upload` node (and `upload-settle`) from a snapshot of
+        // both caches' queues, or nothing when neither has anything queued. Called by
+        // DeclareGraphFrame as the FIRST node of the frame. Public only because that
+        // is a free function.
+        bool DeclareUploadNodes(RenderGraph& graph);
+
+        // The frame's end for both caches' upload queues: `submitted` makes the
+        // snapshot ready, false puts it back. Hands the buffers the exec fns buried to
+        // this context's lane at the value this frame's submit signalled.
+        void CommitUploads(bool submitted)
+        {
+            const std::uint64_t fence = m_graph ? m_graph->DebugSubmitCount() : 0;
+            if (m_meshBuffers)
+                m_meshBuffers->CommitUploads(submitted, m_graves, fence);
+            if (m_textures)
+                m_textures->CommitUploads(submitted, m_graves, fence);
         }
 
         // THE SHARED image residency cache -- one per vehicle, consumed by

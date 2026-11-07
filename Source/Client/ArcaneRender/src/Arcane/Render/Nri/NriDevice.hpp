@@ -139,6 +139,13 @@ namespace Arcane
 
         [[nodiscard]] nri::Device& Device() const { return *m_device; }
         [[nodiscard]] const nri::CoreInterface& Core() const { return m_core; }
+
+        // TEST INSTRUMENT ONLY (Plan C Task 5): swaps THIS device's Core() table entry
+        // for DeviceWaitIdle with a forwarder that counts its calls, so a [gpu] case
+        // can prove an upload path issues none. Process-wide count; call once per
+        // device, before the code under test.
+        void EnableDeviceWaitIdleCounting();
+        [[nodiscard]] static std::uint64_t DeviceWaitIdleCount() noexcept;
         // nriGetInterface through THIS module's NRI (ArcaneRender links the only
         // NRI copy the engine modules share): a module that links no NRI of its
         // own -- ArcaneImGui's HelperInterface -- fetches extension tables here,

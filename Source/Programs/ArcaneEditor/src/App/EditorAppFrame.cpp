@@ -2031,7 +2031,10 @@ namespace Arcane::Editor
         };
         rc.producersIdle      = [](void* user) -> bool {
             auto* app = static_cast<EditorApp*>(user);
-            const bool shaderIdle       = app->m_shaderCompiler ? app->m_shaderCompiler->IsIdle() : true;
+            // Deferred mesh/texture uploads (Plan C Task 5) widen the shader conjunct: the
+            // upload frame renders byte-identical to the frame that queued it.
+            const bool shaderIdle       = (app->m_shaderCompiler ? app->m_shaderCompiler->IsIdle() : true)
+                                          && !app->GraphUploadsPending();
             const bool cookPending      = app->m_cookQueue && app->m_cookQueue->CookPending();
             const bool harvesterPending = app->m_materialThumbs && app->m_materialThumbs->PendingCount() != 0;
             return Arcane::SettleProducersIdle(shaderIdle, app->m_cookQueueSettling, cookPending, harvesterPending);
@@ -4879,7 +4882,11 @@ namespace Arcane::Editor
             const bool byteEqual = m_previousCaptureValid &&
                                     w == m_previousCaptureWidth && h == m_previousCaptureHeight &&
                                     actual == m_previousCaptureRgba;
-            const bool shaderIdle = m_shaderCompiler ? m_shaderCompiler->IsIdle() : true;
+            // Plus deferred mesh/texture uploads (Plan C Task 5): the upload frame renders
+            // byte-identical to the frame that queued it, so byte-equal frames alone would
+            // converge before the asset appears.
+            const bool shaderIdle = (m_shaderCompiler ? m_shaderCompiler->IsIdle() : true)
+                                    && !GraphUploadsPending();
             // Task 12a fix (task12-rca-report.md, root cause H3): byte-equal
             // + shader-idle proves the RENDER is quiescent, not that the
             // async cook/import-reconciliation pipeline feeding the Asset

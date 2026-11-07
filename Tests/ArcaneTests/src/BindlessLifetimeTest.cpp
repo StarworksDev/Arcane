@@ -555,6 +555,7 @@ TEST_CASE("a device-wide texture invalidation reaches every context's texture ca
     {
         c->cache = Arcane::NriTextureCache::Create(*device);
         REQUIRE(c->cache != nullptr);
+        c->cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
         c->cache->SetPixelSupply(supply);
         device->RegisterContext(c, [c](const Arcane::Guid& g) { c->cache->Invalidate(g, c->graves, c->fence); });
     }

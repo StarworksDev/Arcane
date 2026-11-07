@@ -1300,6 +1300,11 @@ namespace Arcane
         // format-keyed pipeline stays a cache HIT across every resize.
     }
 
+    bool NriGraphContext::DeclareUploadNodes(RenderGraph& graph)
+    {
+        return AddUploadNodes(graph, m_textures.get(), m_meshBuffers.get());
+    }
+
     bool NriGraphContext::EnsureCaptureBuffer()
     {
         const std::uint32_t width  = SurfaceWidth();
@@ -1395,6 +1400,14 @@ namespace Arcane
         // inside exec fns (record time). Batch2DNode does.
         // ---------------------------------------------------------------
         RgFrameHandles handles;
+
+        // THE UPLOAD NODE IS FIRST (Plan C Task 5): it records the copies for the
+        // snapshot of mesh/texture uploads queued BEFORE this declaration began, ahead
+        // of every node that could draw from them. Nothing is declared when nothing is
+        // queued. An entry queued by a Resolve further down this function waits for
+        // the next frame's upload node.
+        if (context)
+            (void)context->DeclareUploadNodes(graph);
 
         const auto addEmpty = [&](const char* name) {
             graph.AddNode(name, RenderGraph::NodeKind::Compute,
@@ -1958,6 +1971,9 @@ namespace Arcane
         // every entry stamped since and freeze eviction device-wide. Closes it on every
         // such exit (clock only, nothing is evicted).
         ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };
+        // The same for the upload queues: a frame that never submitted puts its
+        // snapshot back (and hands back what the exec fn buried).
+        ResidencyFrameGuard uploadGuard{ [this] { CommitUploads(false); } };
 
         // HOST-WINDOW ONLY. An offscreen context has no swapchain, so every
         // line below would dereference null; the twin is RenderFrameOffscreen.
@@ -2086,6 +2102,11 @@ namespace Arcane
         if (!m_graph->Execute(desc, *compiled))
             return RenderErrorCount() > errorsBefore ? FrameOutcome::Failed : FrameOutcome::Skipped;
 
+        // The frame SUBMITTED: its upload snapshot is recorded, so those entries are now
+        // ready -- for the NEXT frame's declaration, never this one's.
+        uploadGuard.done = true;
+        CommitUploads(true);
+
         // BEFORE the advance, deliberately: this frame's Resolve calls stamped
         // lastDrawnFrame with m_frameIndex's CURRENT value, and SelectEvictions
         // protects entries carrying exactly it. Evicting with the advanced counter
@@ -2140,6 +2161,7 @@ namespace Arcane
     {
         const PacketBindingReset packetReset{ m_packet };
         ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };   // see RenderFrame
+        ResidencyFrameGuard uploadGuard{ [this] { CommitUploads(false); } };         // see RenderFrame
 
         if (m_mode != Mode::Offscreen)
         {
@@ -2243,6 +2265,11 @@ namespace Arcane
         const std::uint64_t errorsBefore = RenderErrorCount();
         if (!m_graph->Execute(desc, *compiled))
             return RenderErrorCount() > errorsBefore ? FrameOutcome::Failed : FrameOutcome::Skipped;
+
+        // The frame SUBMITTED: its upload snapshot is recorded, so those entries are now
+        // ready -- for the NEXT frame's declaration, never this one's.
+        uploadGuard.done = true;
+        CommitUploads(true);
 
         // ...and the pacing stamp the present path gets from
         // NriSwapChain::Present: a submission carrying no command buffers and

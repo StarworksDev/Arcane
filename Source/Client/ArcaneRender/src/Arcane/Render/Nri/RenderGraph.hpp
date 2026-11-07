@@ -150,7 +150,12 @@ namespace Arcane
     {
         ColorWrite, DepthWrite, ShaderRead, ShaderWriteCs, // (UAV, compute)
         CopySrc, CopyDst, Present, ReadbackHost,
-        IndirectArgs   // an indirect-draw argument buffer (buffers only) -- F3 plan 1 T6
+        IndirectArgs,  // an indirect-draw argument buffer (buffers only) -- F3 plan 1 T6
+        // Input-assembly reads of a buffer (buffers only; Plan C Task 5): the state a
+        // resident mesh's vertex / index buffer is left in after the upload node's
+        // CopyDst write, so the draws that bind it in later frames need no barrier.
+        VertexBuffer,
+        IndexBuffer
     };
 
     // Handed to a node's Setup function. A thin wrapper over its owning

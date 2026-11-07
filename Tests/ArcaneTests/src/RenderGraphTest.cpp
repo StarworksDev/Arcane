@@ -715,6 +715,17 @@ TEST_CASE("rendergraph compile: IndirectArgs derives the argument-buffer state a
                nri::AccessBits::ARGUMENT_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::INDIRECT);
 }
 
+TEST_CASE("rendergraph compile: VertexBuffer and IndexBuffer derive the input-assembly states, "
+          "with no layout (Plan C Task 5)", "[nri][rendergraph][upload]")
+{
+    // What the upload node's buffers are moved to after their CopyDst write:
+    // VERTEX_BUFFER at the VERTEX_SHADER stage, INDEX_BUFFER at INDEX_INPUT.
+    CheckState(DerivedBufferState(Arcane::RgUsage::CopyDst, Arcane::RgUsage::VertexBuffer),
+               nri::AccessBits::VERTEX_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::VERTEX_SHADER);
+    CheckState(DerivedBufferState(Arcane::RgUsage::CopyDst, Arcane::RgUsage::IndexBuffer),
+               nri::AccessBits::INDEX_BUFFER, nri::Layout::UNDEFINED, nri::StageBits::INDEX_INPUT);
+}
+
 TEST_CASE("rendergraph compile: a buffer's derived state never carries a layout", "[nri]")
 {
     // The same usage that gives a texture Layout::SHADER_RESOURCE must give
@@ -751,11 +762,12 @@ TEST_CASE("rendergraph compile: EVERY RgUsage derives a state distinct from the 
         Arcane::RgUsage::CopySrc,    Arcane::RgUsage::CopyDst,
         Arcane::RgUsage::Present,    Arcane::RgUsage::ReadbackHost,
         Arcane::RgUsage::IndirectArgs,
+        Arcane::RgUsage::VertexBuffer, Arcane::RgUsage::IndexBuffer,   // Plan C Task 5
     };
     // Guards the list itself against drifting out of sync with the enum: the
     // enumerators are contiguous and unvalued (RenderGraph.hpp), so the count
     // is the only thing that can silently change under this test.
-    STATIC_REQUIRE(std::size(usages) == static_cast<std::size_t>(Arcane::RgUsage::IndirectArgs) + 1u);
+    STATIC_REQUIRE(std::size(usages) == static_cast<std::size_t>(Arcane::RgUsage::IndexBuffer) + 1u);
 
     for (const Arcane::RgUsage usage : usages)
     {

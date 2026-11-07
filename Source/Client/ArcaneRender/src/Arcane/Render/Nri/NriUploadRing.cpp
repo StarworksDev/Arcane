@@ -61,10 +61,10 @@ namespace Arcane
 
         const std::uint64_t alignedOffset = AlignUp(m_cursor, align);
 
-        // Overflow-safe: compare via subtraction, not
+        // Overflow-safe: Fits compares via subtraction, not
         // `alignedOffset + size > capacity`, which could itself wrap for a
         // pathological `size` before the comparison ever ran.
-        if (alignedOffset > m_capacity || size > m_capacity - alignedOffset)
+        if (!Fits(size, align))
         {
             ++m_overflowCount;
             return AllocResult{ 0, false };
@@ -173,6 +173,18 @@ namespace Arcane
         alloc.offset = result.offset;
         alloc.cpu    = static_cast<std::uint8_t*>(slot.cpu) + result.offset;
         return alloc;
+    }
+
+    bool NriUploadRing::Fits(std::uint64_t size, std::uint64_t align) const noexcept
+    {
+        if (m_currentSlot >= m_slots.size())
+            return false;
+        return m_slots[m_currentSlot].layout.Fits(size, align);
+    }
+
+    std::uint64_t NriUploadRing::SlotCapacity() const noexcept
+    {
+        return m_slots.empty() ? 0u : m_slots.front().layout.Capacity();
     }
 
     std::uint64_t NriUploadRing::HighWater(std::uint32_t slot) const

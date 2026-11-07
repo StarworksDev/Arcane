@@ -14,12 +14,16 @@
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriDevice.hpp>
 #include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/NriUploadRing.hpp>
+#include <Arcane/Render/Nri/NriUploadStaging.hpp>
 #include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #include <Arcane/Base/Log.hpp>
 
 #undef ERROR
 
+#include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -96,6 +100,14 @@ namespace Arcane
         for (auto& [id, r] : m_entries)
             Bury(r, graveyard, fence);
         m_entries.clear();
+        m_queue.clear();
+        m_inflight.clear();
+        m_settling = false;
+        // Parked thunks name buffers no entry owns any more: they go on this lane
+        // too, or they would outlive the cache.
+        for (std::function<void()>& thunk : m_parked)
+            graveyard.Bury(fence, std::move(thunk));
+        m_parked.clear();
         if (m_account)
             m_account->UnchargeOwner(this);
         // The warn latch stays SET across a release: a run that could not
@@ -115,6 +127,9 @@ namespace Arcane
     {
         if (m_account)
             m_account->Uncharge(this, it->first, ResidencySlice::Mesh, NriTextureCache::ColorSpace::Srgb);
+        // An eviction of a not-ready entry cancels its queued upload: never upload
+        // into an object the account already dropped.
+        CancelUpload(it->first);
         Bury(it->second, graveyard, fence);
         m_entries.erase(it);
     }
@@ -165,10 +180,12 @@ namespace Arcane
     // that already owned buffers OVERWROTE the live handles -- a leaked nri::Buffer
     // per call, forever, on any path that retried. Locals make that unrepresentable
     // rather than merely guarded: `r`'s handles are written once, at the end, when
-    // both buffers exist AND the copy has landed; every failure destroys exactly what
-    // this call created and leaves `r` with the null handles it came in with, so
-    // Release/Invalidate find nothing dangling and nothing to double-free.
-    bool NriMeshBufferCache::Upload(Resident& r, const Guid& id)
+    // both buffers exist; every failure destroys exactly what this call created and
+    // leaves `r` with the null handles it came in with, so Release/Invalidate find
+    // nothing dangling and nothing to double-free. (Plan C Task 5: the upload itself
+    // is no longer here -- the `upload` node records it, or UploadNow does in
+    // Immediate mode.)
+    bool NriMeshBufferCache::CreateObjects(Resident& r, const Guid& id)
     {
         const nri::CoreInterface& core = m_device->Core();
         const std::uint64_t vertexBytes = r.cpu.vertices.size() * sizeof(MeshVertex);
@@ -176,14 +193,8 @@ namespace Arcane
 
         nri::Buffer* vb = nullptr;
         nri::Buffer* ib = nullptr;
-        // `waitIdle` only on the UploadData arm: CreateCommittedBuffer failing means
-        // nothing was ever submitted, while UploadData submits and waits internally
-        // and may have failed after a partial submit -- the destructor's own
-        // DeviceWaitIdle-then-destroy discipline, applied to this one cold path.
-        const auto abandon = [&](bool waitIdle) -> bool
+        const auto abandon = [&]() -> bool
         {
-            if (waitIdle)
-                (void)ARC_NRI_CHECK(core.DeviceWaitIdle(&m_device->Device()));
             if (vb) core.DestroyBuffer(vb);
             if (ib) core.DestroyBuffer(ib);
             return false;
@@ -192,7 +203,7 @@ namespace Arcane
         // DebugFailNextUpload's latch (debt 13): reset ONLY when this call's current
         // stage equals the currently-armed stage -- an unrelated real failure at a
         // DIFFERENT stage leaves the latch untouched, still armed, for whichever
-        // Upload call next actually reaches the matching stage.
+        // call next actually reaches the matching stage.
         const bool debugFailVertex = (m_debugFailNextUpload == UploadStage::Vertex);
         if (debugFailVertex)
             m_debugFailNextUpload.reset();
@@ -206,7 +217,7 @@ namespace Arcane
             || !vb)
         {
             vb = nullptr;
-            return abandon(false);
+            return abandon();
         }
         core.SetDebugName(vb, ("mesh vb " + id.ToString()).c_str());
 
@@ -223,28 +234,45 @@ namespace Arcane
             || !ib)
         {
             ib = nullptr;
-            return abandon(false);
+            return abandon();
         }
         core.SetDebugName(ib, ("mesh ib " + id.ToString()).c_str());
 
+        r.vertexBuffer = vb;
+        r.indexBuffer  = ib;
+        r.indexCount   = static_cast<std::uint32_t>(r.cpu.indices.size());
+        r.bytes        = MeshResidencyBytes(static_cast<std::size_t>(vertexBytes),
+                                            static_cast<std::size_t>(indexBytes),
+                                            SectionBytes(r.cpu));
+        return true;
+    }
+
+    // THE OLD BLOCKING PATH (NriUploadMode::Immediate, tests only): UploadData
+    // submits and waits internally, and may have failed after a partial submit --
+    // hence the DeviceWaitIdle before the buffers are destroyed on failure.
+    bool NriMeshBufferCache::UploadNow(Resident& r)
+    {
+        const nri::CoreInterface& core = m_device->Core();
         nri::BufferUploadDesc uploads[2] = {};
         uploads[0].data   = r.cpu.vertices.data();
-        uploads[0].buffer = vb;
+        uploads[0].buffer = r.vertexBuffer;
         uploads[0].after  = { nri::AccessBits::VERTEX_BUFFER, nri::StageBits::VERTEX_SHADER };
         uploads[1].data   = r.cpu.indices.data();
-        uploads[1].buffer = ib;
+        uploads[1].buffer = r.indexBuffer;
         uploads[1].after  = { nri::AccessBits::INDEX_BUFFER, nri::StageBits::INDEX_INPUT };
 
         if (!ARC_NRI_CHECK(m_helper.UploadData(*m_device->GraphicsQueue(), nullptr, 0, uploads, 2)))
-            return abandon(true);
-
-        r.vertexBuffer = vb;
-        r.indexBuffer  = ib;
-        r.indexCount = static_cast<std::uint32_t>(r.cpu.indices.size());
-        r.bytes      = MeshResidencyBytes(static_cast<std::size_t>(vertexBytes),
-                                          static_cast<std::size_t>(indexBytes),
-                                          SectionBytes(r.cpu));
-        r.ready      = true;
+        {
+            (void)ARC_NRI_CHECK(core.DeviceWaitIdle(&m_device->Device()));
+            if (r.vertexBuffer) core.DestroyBuffer(r.vertexBuffer);
+            if (r.indexBuffer)  core.DestroyBuffer(r.indexBuffer);
+            r.vertexBuffer = nullptr;
+            r.indexBuffer  = nullptr;
+            r.indexCount   = 0;
+            r.bytes        = 0;
+            return false;
+        }
+        r.ready = true;
         return true;
     }
 
@@ -317,14 +345,17 @@ namespace Arcane
         }
 
         resident.cpu = *supplied.mesh;
-        if (!Upload(resident, id))
+        const bool created = CreateObjects(resident, id)
+                          && (m_mode == NriUploadMode::Deferred || UploadNow(resident));
+        if (!created)
         {
             // MEMOIZED, EXPLICITLY, AND NEVER RETRIED (final-review I1): the flag is
             // what makes the refusal legible beside a Failed supply, and dropping the
             // CPU copy is what keeps ResidentBytes() honest -- an entry that will
             // never upload must not hold a mesh's worth of memory the budget cannot
-            // see. Upload left no GPU objects behind, so there is nothing to bury.
-            // Invalidate(id) is the only un-latch, exactly as for a Failed supply.
+            // see. CreateObjects/UploadNow left no GPU objects behind, so there is
+            // nothing to bury. Invalidate(id) is the only un-latch, exactly as for a
+            // Failed supply.
             resident.uploadRefused = true;
             resident.cpu = MeshData{};
             reportMiss("CreateCommittedBuffer or UploadData failed");
@@ -334,7 +365,194 @@ namespace Arcane
         if (m_account)
             (void)m_account->Charge(this, ResidencyEntry{ id, ResidencySlice::Mesh,
                                                          NriTextureCache::ColorSpace::Srgb, resident.bytes, 0 });
-        return &resident;
+        if (m_mode == NriUploadMode::Immediate)
+            return &resident;
+
+        // DEFERRED: created and charged, not uploaded. The upload node records the copy
+        // in a later frame; until CommitUploads, this entry is not-ready and every
+        // Resolve answers null (quietly -- a pending mesh is not a miss).
+        resident.queued = true;
+        m_queue.push_back(id);
+        return nullptr;
+    }
+
+    bool NriMeshBufferCache::HasPendingUploads() const noexcept
+    {
+        return !m_queue.empty() || !m_inflight.empty() || m_settling;
+    }
+
+    void NriMeshBufferCache::CancelUpload(const Guid& id)
+    {
+        m_queue.erase(std::remove(m_queue.begin(), m_queue.end(), id), m_queue.end());
+        m_inflight.erase(std::remove(m_inflight.begin(), m_inflight.end(), id), m_inflight.end());
+    }
+
+    void NriMeshBufferCache::ParkBuffer(nri::Buffer* buffer)
+    {
+        if (!buffer)
+            return;
+        const nri::CoreInterface* core = &m_device->Core();
+        m_parked.push_back([core, buffer] { core->DestroyBuffer(buffer); });
+    }
+
+    std::vector<NriMeshBufferCache::UploadJob> NriMeshBufferCache::BeginUploadFrame()
+    {
+        std::vector<UploadJob> jobs;
+        jobs.reserve(m_queue.size());
+        for (const Guid& id : m_queue)
+        {
+            const auto it = m_entries.find(id);
+            if (it == m_entries.end() || !it->second.queued || !it->second.vertexBuffer || !it->second.indexBuffer)
+                continue;
+            const Resident& r = it->second;
+            jobs.push_back(UploadJob{ id, r.vertexBuffer, r.indexBuffer,
+                                      r.cpu.vertices.size() * sizeof(MeshVertex),
+                                      r.cpu.indices.size() * sizeof(std::uint32_t) });
+            m_inflight.push_back(id);
+        }
+        m_queue.clear();
+        return jobs;
+    }
+
+    void NriMeshBufferCache::RefuseQueued(const Guid& id, Resident& r)
+    {
+        if (m_account)
+            m_account->Uncharge(this, id, ResidencySlice::Mesh, NriTextureCache::ColorSpace::Srgb);
+        ParkBuffer(r.vertexBuffer);
+        ParkBuffer(r.indexBuffer);
+        r.vertexBuffer  = nullptr;
+        r.indexBuffer   = nullptr;
+        r.indexCount    = 0;
+        r.bytes         = 0;
+        r.cpu           = MeshData{};
+        r.queued        = false;
+        r.uploadRefused = true;
+        CancelUpload(id);
+    }
+
+    void NriMeshBufferCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring)
+    {
+        const auto it = m_entries.find(job.id);
+        if (it == m_entries.end())
+            return;   // evicted since the snapshot: the upload was cancelled
+        Resident& r = it->second;
+        if (!r.queued || r.vertexBuffer != job.vertexBuffer || r.indexBuffer != job.indexBuffer)
+            return;
+        if (std::find(m_inflight.begin(), m_inflight.end(), job.id) == m_inflight.end())
+            return;
+
+        const nri::CoreInterface& core = m_device->Core();
+        const std::uint64_t vertexBytes = job.vertexBytes;
+        const std::uint64_t indexBytes  = job.indexBytes;
+        const std::uint64_t indexOffset = RingAlignUp(vertexBytes, kMeshStagingAlign);
+        const std::uint64_t total       = MeshStagingBytes(vertexBytes, indexBytes);
+
+        // CLASSIFIED HERE, after ring.BeginFrame (the setup fn only declared).
+        const Staging cls = ClassifyFits(ring.Fits(total, kMeshStagingAlign), ring.SlotCapacity(), total);
+
+        const auto write = [&](std::uint8_t* base)
+        {
+            std::memcpy(base, r.cpu.vertices.data(), static_cast<std::size_t>(vertexBytes));
+            std::memcpy(base + indexOffset, r.cpu.indices.data(), static_cast<std::size_t>(indexBytes));
+        };
+        const auto copy = [&](nri::Buffer& staging, std::uint64_t base)
+        {
+            core.CmdCopyBuffer(cmd, *r.vertexBuffer, 0, staging, base, vertexBytes);
+            core.CmdCopyBuffer(cmd, *r.indexBuffer, 0, staging, base + indexOffset, indexBytes);
+        };
+
+        if (cls == Staging::Ring)
+        {
+            const NriUploadRing::Alloc a = ring.Allocate(total, kMeshStagingAlign);
+            if (a.buffer && a.cpu)
+            {
+                write(static_cast<std::uint8_t*>(a.cpu));
+                copy(*a.buffer, a.offset);
+                return;   // stays in the snapshot: CommitUploads makes it ready
+            }
+            // Fits said yes and Allocate disagreed (an uninitialised ring): fall
+            // through to the retry branch rather than recording from nowhere.
+        }
+
+        if (cls == Staging::Dedicated)
+        {
+            // Larger than a whole ring slot: one committed HOST_UPLOAD buffer, uploaded
+            // THIS frame (not a retry, and it never touches the ring's overflow count).
+            // The staging buffer is not a graph resource; it is buried after the submit.
+            nri::BufferDesc desc = {};
+            desc.size  = total;
+            desc.usage = nri::BufferUsageBits::NONE;
+            nri::Buffer* staging = nullptr;
+            void* mapped = nullptr;
+            bool ok = ARC_NRI_CHECK(core.CreateCommittedBuffer(m_device->Device(), nri::MemoryLocation::HOST_UPLOAD,
+                                                               0.0f, desc, staging)) && staging;
+            if (ok)
+            {
+                core.SetDebugName(staging, "mesh upload staging");
+                mapped = core.MapBuffer(*staging, 0, nri::WHOLE_SIZE);
+                ok = mapped != nullptr;
+            }
+            if (!ok)
+            {
+                ParkBuffer(staging);
+                ARC_WARN("[nri-graph] NriMeshBufferCache: the dedicated staging buffer for mesh {} could not be "
+                         "created or mapped -- the upload is refused", job.id.ToString());
+                RefuseQueued(job.id, r);
+                return;
+            }
+            write(static_cast<std::uint8_t*>(mapped));
+            core.UnmapBuffer(*staging);
+            copy(*staging, 0);
+            ParkBuffer(staging);   // buried after this frame's submit, on this context's lane
+            return;
+        }
+
+        // RETRY: the payload fits an empty slot but not what is left of this one. Bury
+        // the device-local pair (this command buffer references it only through the
+        // upload entry barrier, so it waits for this submit's fence) and queue a fresh
+        // pair for the next frame, whose cursor starts at 0. Allocate was not called,
+        // so the overflow count did not move.
+        ParkBuffer(r.vertexBuffer);
+        ParkBuffer(r.indexBuffer);
+        r.vertexBuffer = nullptr;
+        r.indexBuffer  = nullptr;
+        m_inflight.erase(std::remove(m_inflight.begin(), m_inflight.end(), job.id), m_inflight.end());
+        if (!CreateObjects(r, job.id))
+        {
+            ARC_WARN("[nri-graph] NriMeshBufferCache: mesh {} could not recreate its buffers for the retried "
+                     "upload -- refused", job.id.ToString());
+            RefuseQueued(job.id, r);
+            return;
+        }
+        m_queue.push_back(job.id);
+    }
+
+    void NriMeshBufferCache::CommitUploads(bool submitted, Graveyard& graveyard, std::uint64_t fence)
+    {
+        for (std::function<void()>& thunk : m_parked)
+            graveyard.Bury(fence, std::move(thunk));
+        m_parked.clear();
+
+        std::size_t readied = 0;
+        for (const Guid& id : m_inflight)
+        {
+            const auto it = m_entries.find(id);
+            if (it == m_entries.end() || !it->second.queued)
+                continue;   // dropped mid-frame
+            if (submitted)
+            {
+                it->second.queued = false;
+                it->second.ready  = true;
+                ++readied;
+            }
+            else
+            {
+                m_queue.push_back(id);   // the frame never ran: try again next frame
+            }
+        }
+        m_inflight.clear();
+        if (submitted)
+            m_settling = readied > 0;
     }
 
     // A draw on the device clock. A key the account no longer holds for this cache (it

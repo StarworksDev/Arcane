@@ -824,6 +824,11 @@ namespace Arcane
         nri::Descriptor* view = TextureView(id);
         if (!view)
         {
+            // CREATED AND QUEUED, NOT READY YET (Plan C Task 5): the upload node lands it
+            // a frame or two from now, so this must NOT be remembered as a miss -- the
+            // white texel is drawn meanwhile and the next frame asks again.
+            if (m_textureCache && m_textureCache->UploadQueued(id))
+                return m_set;
             // Not resident (NriTextureCache said why, once). Remembered as a
             // null set so this does not re-ask the cache every frame.
             m_spriteSets[id] = nullptr;
@@ -1201,6 +1206,11 @@ namespace Arcane
         {
             stamp = HashValue(id.hi, stamp);
             stamp = HashValue(id.lo, stamp);
+            // Whether the declared image is BINDABLE yet (Plan C Task 5). A param whose
+            // upload was still queued when the sets were written is baked in as the white
+            // texel; the flip to ready changes the stamp, so the material rebuilds ONCE
+            // through the re-registration path below (the same idle a re-save costs).
+            stamp = HashValue(m_textureCache && id.IsValid() && m_textureCache->View(id) ? 1u : 0u, stamp);
         }
 
         const auto known = m_materialSlotOf.find(material);

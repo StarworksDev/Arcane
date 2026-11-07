@@ -176,6 +176,7 @@ TEST_CASE("nri texture cache: an artifact key with nothing cooked yet is Pending
     REQUIRE(device != nullptr);
     auto cache = NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     CountingArtifactSupply supply;
     supply.answer = nullptr;   // nothing cooked yet
@@ -237,6 +238,7 @@ TEST_CASE("nri texture cache: the PendingCook re-poll cadence matches "
     REQUIRE(device != nullptr);
     auto cache = NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     CountingArtifactSupply supply;
     supply.answer = nullptr;   // stays pending for the whole test
@@ -291,6 +293,7 @@ TEST_CASE("nri texture cache: a lowered assets.cook.pendingRepollInterval re-pol
     REQUIRE(device != nullptr);
     auto cache = NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     CountingArtifactSupply supply;
     supply.answer = nullptr;   // stays pending
@@ -320,6 +323,7 @@ TEST_CASE("nri texture cache: an artifact this cache cannot upload is Refused, a
     REQUIRE(device != nullptr);
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::LoadedClientArtifact bad = MakeUnsupportedFormatArtifact();
     CountingArtifactSupply supply;
@@ -352,6 +356,7 @@ TEST_CASE("nri texture cache: an artifact with no mip levels, or dimensions nri:
     REQUIRE(device != nullptr);
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     SECTION("no mips")
     {
@@ -390,6 +395,7 @@ TEST_CASE("nri texture cache: the pending-cook checkerboard is ONE shared placeh
     REQUIRE(device != nullptr);
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     CountingArtifactSupply supply;
     supply.answer = nullptr;
@@ -429,6 +435,7 @@ TEST_CASE("nri texture cache: installing an artifact supply does not move "
     REQUIRE(device != nullptr);
     auto cache = Arcane::NriTextureCache::Create(*device);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     Arcane::PixelData chromePixels;
     chromePixels.width  = 2;
@@ -620,18 +627,29 @@ namespace
         constexpr float kX = 30.0f, kY = 20.0f, kSize = 64.0f;
         auto batcher = Arcane::Batcher2D::Create();
         REQUIRE(batcher != nullptr);
-        batcher->Begin(kW, kH);
-        batcher->SetLayer(0, 0);
-        batcher->QuadTextured(Arcane::Batcher2D::kMaterialSprite, guid,
-                              glm::vec2(kX, kY), glm::vec2(kSize, kSize),
-                              glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f),
-                              glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
 
+        // THE DEFERRED TIMELINE (Plan C Task 5), on the real 5->2->1 NPOT BC7 chain: frame
+        // N queues the artifact, N+1 records its three mips into the staging buffer (the
+        // aligned-footprint arithmetic UploadStagingTest pins), N+2 samples it. The same
+        // frame is submitted until the vehicle reports nothing in flight, so the capture
+        // read below is the first frame that CAN show the texture.
         Arcane::NriGraphContext::FrameDesc frame;
         frame.capture = true;
         frame.batch   = batcher.get();
-        const auto outcome = v.ctx->RenderFrameOffscreen(frame);
-        REQUIRE(outcome == Arcane::NriGraphContext::FrameOutcome::Presented);
+        int frames = 0;
+        do
+        {
+            batcher->Begin(kW, kH);
+            batcher->SetLayer(0, 0);
+            batcher->QuadTextured(Arcane::Batcher2D::kMaterialSprite, guid,
+                                  glm::vec2(kX, kY), glm::vec2(kSize, kSize),
+                                  glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f),
+                                  glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+            const auto outcome = v.ctx->RenderFrameOffscreen(frame);
+            REQUIRE(outcome == Arcane::NriGraphContext::FrameOutcome::Presented);
+        } while (v.ctx->HasPendingUploads() && ++frames < 6);
+        REQUIRE_FALSE(v.ctx->HasPendingUploads());
+        CHECK(frames == 2);   // queue, upload, draw
 
         std::uint32_t w = 0, h = 0;
         std::vector<unsigned char> rgba;

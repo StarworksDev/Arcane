@@ -841,8 +841,10 @@ namespace Arcane
             for (const bool twoSided : { false, true })
                 m_pipeline[PipelineIndex(blend, twoSided)] = PipelineFor(canvasFormat, blend, twoSided);
 
-        // Residency at DECLARATION time -- UploadData submits and waits
-        // internally. Record only looks this table up.
+        // Residency at DECLARATION time. A mesh seen for the first time is only QUEUED
+        // here (Plan C Task 5: the `upload` node records the copy a frame later and it
+        // is drawable from the frame after that), so Resolve answers null for it and
+        // the draw is skipped quietly until then. Record only looks this table up.
         //
         // GATED SEPARATELY FROM THE PIPELINE ABOVE, deliberately: a cache-less
         // context still gets its pipeline and still reports the real reason it drew

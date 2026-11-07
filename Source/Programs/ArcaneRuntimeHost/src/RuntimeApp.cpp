@@ -911,7 +911,10 @@ void RuntimeApp::MainLoop()
         // unsaved documents.
         rc.hookUser           = this;
         rc.producersIdle      = [](void* user) -> bool {
-            return static_cast<RuntimeApp*>(user)->m_shaderCompiler.IsIdle();
+            auto* app = static_cast<RuntimeApp*>(user);
+            // Plus the graph's deferred mesh/texture uploads (Plan C Task 5): the upload
+            // frame is byte-identical to the frame that queued it.
+            return app->m_shaderCompiler.IsIdle() && !(app->Graph() && app->Graph()->HasPendingUploads());
         };
         // Task 19 (ruling F16): the runtime's one world.
         rc.worlds.user        = this;

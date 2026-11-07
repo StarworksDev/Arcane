@@ -975,7 +975,11 @@ bool CaptureTail(FrameIo& io)
             // ShaderCompiler.hpp) is what actually answers whether async
             // work this capture could still be missing is outstanding, so
             // convergence requires BOTH.
-            const bool idle = io.compiler.IsIdle();
+            // AND no mesh or texture upload still in flight (Plan C Task 5): a first-use
+            // resolve is queued by one frame, uploaded by the next and drawn by the one
+            // after, and the upload frame renders byte-identical to the queuing one -- so
+            // byte-equal frames alone would "converge" before the asset ever appears.
+            const bool idle = io.compiler.IsIdle() && !(io.graph && io.graph->HasPendingUploads());
 
             // PLAN B (Task 8): the comparison is a THIRD conjunct, evaluated
             // HERE -- inside the loop -- and not after it. Settle without a

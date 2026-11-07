@@ -96,6 +96,28 @@ namespace Arcane
         // frame recovered from it.
         [[nodiscard]] AllocResult Allocate(std::uint64_t size, std::uint64_t align);
 
+        // Would `size` bytes at `align` fit what is left of this slot? EXACTLY the
+        // negation of the overflow condition Allocate uses (Allocate calls this).
+        // Does NOT bump the overflow count: the upload planner asks first, so a
+        // payload it routes elsewhere (retry, dedicated staging) never counts as
+        // a ring overflow. Claims nothing.
+        [[nodiscard]] bool Fits(std::uint64_t size, std::uint64_t align) const noexcept
+        {
+            return FitsAt(m_capacity, m_cursor, size, align);
+        }
+
+        // The same predicate with the state passed in -- what Fits evaluates, and
+        // what the pure staging classifier (NriUploadStaging.hpp) shares so there
+        // is ONE definition of "fits". Subtraction form: never wraps.
+        [[nodiscard]] static constexpr bool FitsAt(std::uint64_t capacity, std::uint64_t cursor,
+                                                    std::uint64_t size, std::uint64_t align) noexcept
+        {
+            const std::uint64_t alignedOffset = align <= 1 ? cursor : ((cursor + align - 1) / align) * align;
+            if (alignedOffset > capacity) return false;
+            if (size > capacity - alignedOffset) return false;
+            return true;
+        }
+
         [[nodiscard]] std::uint64_t Capacity() const noexcept { return m_capacity; }
         [[nodiscard]] std::uint64_t Cursor() const noexcept { return m_cursor; }
         // Peak cursor value ever reached -- survives Reset(); see Reset()'s comment.
@@ -160,6 +182,14 @@ namespace Arcane
         // (RingLayout::OverflowCount(), folded into the shutdown log
         // alongside HighWater()).
         [[nodiscard]] Alloc Allocate(std::uint64_t size, std::uint64_t align);
+
+        // Forwards to the CURRENT slot's RingLayout::Fits; allocates nothing and
+        // never bumps the overflow count. False before Init().
+        [[nodiscard]] bool Fits(std::uint64_t size, std::uint64_t align) const noexcept;
+
+        // The latched per-slot capacity (render.upload ring bytes per frame); 0
+        // before Init().
+        [[nodiscard]] std::uint64_t SlotCapacity() const noexcept;
 
         // Peak bytes ever claimed from `slot` across every BeginFrame()
         // reset since Init() -- meant to be read once, at shutdown, and

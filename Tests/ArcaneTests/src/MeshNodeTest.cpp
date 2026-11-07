@@ -343,6 +343,7 @@ namespace
         cfg.backend = Arcane::Test::kNativeBackend;
         v.ctx = Arcane::NriGraphContext::CreateOffscreen(cfg, *v.nri, kParityW, kParityH, {});
         REQUIRE(v.ctx != nullptr);
+        v.ctx->SetUploadModeForTests(Arcane::NriUploadMode::Immediate);   // node-level pixel case: it renders ONE frame of a scene whose mesh/textures are first used there (Plan C Task 5: the deferred timeline is UploadStagingGpuTest's)
         return v;
     }
 
