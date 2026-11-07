@@ -520,6 +520,7 @@ TEST_CASE("production eviction glue drops only the queued key and ends the frame
     // (200) and the Display key are both cold; sampling the Display slot makes it the
     // newer one, so the next admit that must evict takes key 200, not the sampled key.
     b.cache->EvictPending(b.graves, b.fence);
+    table->AcquireRef(x, Arcane::BindlessTable::ColorSpace::Display);   // a mapping with no reference is not stamped
     table->NoteSampledBy(a.cache.get(), 9);
     REQUIRE(a.cache->Resolve(Guid{ 300, 0 }) != nullptr);   // 3 KiB again: one victim
     CHECK(account.Holds(a.cache.get(), x, ResidencySlice::Texture, Space::Display));   // stamped: survives
@@ -673,5 +674,64 @@ TEST_CASE("an eviction leaves a mapping that views another holder's copy",
 
     a.cache->Release(a.graves, a.fence + 1);
     a.graves.Reap(a.fence + 1);
+    table->DestroyAllNow(true);
+}
+
+// Plan C final review I1: the only stamp used to land at record, so by the next frame's Refresh a visible albedo looked
+// cold. Once the visible set alone exceeds the allowance, every eviction forces a re-resolve whose Charge evicts the
+// next visible albedo. Stamping referenced slots ahead of the sweep keeps the set; the frame is kept intact, over budget.
+TEST_CASE("referenced mappings are stamped ahead of the sweep, so a visible set over budget does not churn; orphans age",
+          "[residency][account][nri][bindless]")
+{
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    ResidencyAccount& account = device->ResidencyForTests(KiBCaps(2));   // two 1 KiB images fit
+
+    Pixels1K px;
+    TexCtx a;
+    Wire(a, *device, px);
+    Arcane::BindlessTable* table = device->Bindless();
+    REQUIRE(table != nullptr);
+    struct Done { std::uint64_t fence = 0; } done;
+    table->SetCompletionQuery(
+        [](const void*, std::uint64_t f, void* user) { return static_cast<Done*>(user)->fence >= f; }, &done);
+    using BSpace = Arcane::BindlessTable::ColorSpace;
+
+    const Guid visible1{ 400, 1 }, visible2{ 400, 2 }, orphan{ 400, 3 }, incoming{ 400, 4 };
+    int next = 1;
+    const auto map = [&](const Guid& id, bool referenced)
+    {
+        const nri::Texture* texture = a.cache->Resolve(id);
+        REQUIRE(texture != nullptr);
+        REQUIRE(table->AddMapped(id, BSpace::Srgb, MockSrv(next++), &a, texture) != Arcane::BindlessTable::kInvalidSlot);
+        if (referenced)
+            table->AcquireRef(id, BSpace::Srgb);
+    };
+    map(visible1, true);
+    map(visible2, true);
+    a.cache->EvictPending(a.graves, a.fence);   // the frame's boundary moves the clock on
+    a.cache->EvictPending(a.graves, a.fence);
+
+    // THE NEXT FRAME: stamp first, then the sweep's Charge. Both visible albedos are protected.
+    table->StampReferenced();
+    map(incoming, false);
+    CHECK(account.TakePending(a.cache.get()).empty());
+    CHECK(account.Holds(a.cache.get(), visible1, ResidencySlice::Texture, Space::Srgb));
+    CHECK(account.Holds(a.cache.get(), visible2, ResidencySlice::Texture, Space::Srgb));
+    a.cache->EvictPending(a.graves, a.fence);
+
+    // ...and an orphan is not: it has aged by the time the next image needs room.
+    table->NoteSampledBy(a.cache.get(), 9);   // a record: stamps referenced mappings only
+    a.cache->EvictPending(a.graves, a.fence);
+    table->StampReferenced();
+    REQUIRE(a.cache->Resolve(orphan) != nullptr);
+    CHECK_FALSE(account.Holds(a.cache.get(), incoming, ResidencySlice::Texture, Space::Srgb));   // the unreferenced one went
+    CHECK(account.Holds(a.cache.get(), visible1, ResidencySlice::Texture, Space::Srgb));
+    CHECK(account.Holds(a.cache.get(), visible2, ResidencySlice::Texture, Space::Srgb));
+
+    done.fence = 100;
+    a.cache->Release(a.graves, a.fence + 1);
+    a.graves.Reap(a.fence + 1);
+    table->ProcessPending();
     table->DestroyAllNow(true);
 }

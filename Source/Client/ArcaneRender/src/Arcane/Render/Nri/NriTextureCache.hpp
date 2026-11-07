@@ -42,6 +42,13 @@
 // become ready, so its first consumer is a LATER frame's declaration. Timeline:
 // frame N queues, N+1 uploads, N+2 draws.
 //
+// A KEY CAN GO AWAY. The device residency account evicts cold keys and a cook invalidates
+// them, and the texture dies at this cache's fence. So whoever holds what this cache
+// handed out -- a descriptor set baked over View(), a raw nri::Texture* -- asks Resolve on
+// every frame it draws, before any memo of its own: the ask is the only thing that tells
+// the account it is drawn. And it compares ViewSerial, so it knows when what it baked is
+// gone (spec Revision 6). While a key is queued again it behaves as on first use.
+//
 // Textures stay NOT graph resources for SAMPLING (persistent, never written by a
 // node after their upload frame, state never changes), which is why nothing about
 // them appears in an ordinary compiled frame. Resolve is still a DECLARATION-time
@@ -199,10 +206,10 @@ namespace Arcane
         [[nodiscard]] bool UploadQueued(const Guid& id, ColorSpace space = ColorSpace::Srgb) const noexcept;
         // The upload node's setup: moves the queue into the frame's snapshot. Keys
         // queued AFTER this call wait for the next frame.
-        // `budget`: the context's per-frame ring budget, shared with the mesh cache -- FIFO admission
-        // while the keys' staging bytes fit; the first that does not fit stops the snapshot and stays
-        // queued with its texture (nothing destroyed or recreated); a payload over the cap is admitted
-        // at no ring cost (dedicated staging).
+        // `budget`: the context's per-frame budget, shared with the mesh cache -- FIFO admission while
+        // the keys' staging bytes fit; the first that does not fit stops the snapshot and stays queued
+        // with its texture (nothing destroyed or recreated); one payload over the cap is admitted per
+        // frame at no ring cost (dedicated staging), and the next one over it waits (UploadBudget).
         [[nodiscard]] std::vector<UploadJob> BeginUploadFrame(UploadBudget& budget);
         [[nodiscard]] std::vector<UploadJob> BeginUploadFrame()
         {
@@ -211,6 +218,8 @@ namespace Arcane
         }
         // The upload node's exec fn, after ring.BeginFrame: classifies the payload
         // (ring / retry / dedicated) and records one upload per mip. No CmdBarrier.
+        // A dedicated staging buffer that cannot be created or mapped takes the retry
+        // branch for up to kMaxStagingTries tries, then the key is memoized as refused.
         // `budgetCap`: the budget's cap -- a payload over it takes dedicated staging, never the ring.
         void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
                           std::uint64_t budgetCap = ~0ull);
@@ -279,6 +288,25 @@ namespace Arcane
         // safe to read without re-polling because Resolve always runs first.
         [[nodiscard]] nri::Descriptor* View(const Guid& id,
                                             ColorSpace space = ColorSpace::Srgb) const;
+
+        // WHICH view View() would answer with, as a value never reused on this cache: 0
+        // when there is none. A BAKED CONSUMER (a descriptor set) stores this next to what
+        // it baked and compares it every frame (spec Revision 6: evictions and cooks drop
+        // textures, and only the cache knows). Not the pointer: NRI does not ref-count, so
+        // a replacement view may land on the address the dead one vacated, and a consumer
+        // that was off screen meanwhile would see an equal pointer naming another object.
+        [[nodiscard]] std::uint64_t ViewSerial(const Guid& id,
+                                               ColorSpace space = ColorSpace::Srgb) const noexcept;
+
+        // Told about every texture leaving through the one drop path (eviction, Invalidate),
+        // BEFORE this cache buries it, with the lane and fence it is about to be buried at. So
+        // something that caches per raw nri::Texture* -- ImGuiNri, whose entries key on the
+        // pointer -- can bury its own view in the same lane, ahead of the texture. Installed
+        // once, by the vehicle. A key whose texture a bindless slot views dies through the
+        // slot's retire instead (AdoptTextureBacking), which no ImGui entry shares: ImGui draws
+        // Display textures and a bindless albedo is always Srgb.
+        using TextureDropFn = std::function<void(nri::Texture*, Graveyard&, std::uint64_t)>;
+        void SetDropHook(TextureDropFn hook) { m_dropHook = std::move(hook); }
 
         // Buries every NRI object this cache owns at `fence` and empties it --
         // views before the textures they view, so the graveyard's in-order
@@ -406,6 +434,7 @@ namespace Arcane
             std::vector<Mip>          mips;
             std::vector<std::uint8_t> payload;
             std::string               debugName;
+            std::uint32_t             stagingTries = 0;   // dedicated staging failures so far (kMaxStagingTries)
         };
 
         // One image made resident here. A FAILED load is kept with null
@@ -416,6 +445,7 @@ namespace Arcane
         {
             nri::Texture*    texture = nullptr;
             nri::Descriptor* view    = nullptr;
+            std::uint64_t    viewSerial = 0;   // see ViewSerial; set with `view`
             ResidentState    state   = ResidentState::Resident;
             // PendingCook ONLY: Resolve asks absorbed since the last actual
             // poll of the artifact supply. Reset to 0 every time a poll
@@ -532,6 +562,8 @@ namespace Arcane
         // buffers): they wait for CommitUploads, which knows this lane's fence.
         std::vector<std::function<void()>> m_parked;
         bool              m_settling = false;   // a key became ready last frame
+        TextureDropFn     m_dropHook;
+        std::uint64_t     m_viewSerials = 0;    // the last ViewSerial handed out
         std::uint32_t     m_debugForceRetry = 0;
         std::uint64_t     m_objectCreates = 0;
     };

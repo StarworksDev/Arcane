@@ -495,9 +495,9 @@ namespace Arcane
 
         if (cls == Staging::Dedicated)
         {
-            // Larger than a whole ring slot: one committed HOST_UPLOAD buffer, uploaded
-            // THIS frame (not a retry, and it never touches the ring's overflow count).
-            // The staging buffer is not a graph resource; it is buried after the submit.
+            // Over the budget's cap or larger than a whole ring slot: one committed HOST_UPLOAD
+            // buffer, uploaded THIS frame (not a retry, and it never touches the ring's overflow
+            // count). The staging buffer is not a graph resource; it is buried after the submit.
             nri::BufferDesc desc = {};
             desc.size  = total;
             desc.usage = nri::BufferUsageBits::NONE;
@@ -511,23 +511,28 @@ namespace Arcane
                 mapped = core.MapBuffer(*staging, 0, nri::WHOLE_SIZE);
                 ok = mapped != nullptr;
             }
-            if (!ok)
+            if (ok)
             {
-                ParkBuffer(staging);
+                write(static_cast<std::uint8_t*>(mapped));
+                core.UnmapBuffer(*staging);
+                copy(*staging, 0);
+                ParkBuffer(staging);   // buried after this frame's submit, on this context's lane
+                return;
+            }
+            ParkBuffer(staging);
+            // A burst can fail where this payload alone would not (spec Revision 6), so a failure
+            // takes the retry branch below, a bounded number of times, before it is memoized.
+            if (++r.stagingTries >= kMaxStagingTries)
+            {
                 ARC_WARN("[nri-graph] NriMeshBufferCache: the dedicated staging buffer for mesh {} could not be "
                          "created or mapped -- the upload is refused", job.id.ToString());
                 RefuseQueued(job.id, r);
                 return;
             }
-            write(static_cast<std::uint8_t*>(mapped));
-            core.UnmapBuffer(*staging);
-            copy(*staging, 0);
-            ParkBuffer(staging);   // buried after this frame's submit, on this context's lane
-            return;
         }
 
-        // RETRY: the payload fits an empty slot but not what is left of this one. Bury
-        // the device-local pair (this command buffer references it only through the
+        // RETRY: the payload fits an empty slot but not what is left of this one, or its
+        // dedicated staging failed above. Bury the device-local pair (this command buffer references it only through the
         // upload entry barrier, so it waits for this submit's fence) and queue a fresh
         // pair for the next frame, whose cursor starts at 0. Allocate was not called,
         // so the overflow count did not move.

@@ -342,11 +342,24 @@ namespace
     {
         // Fresh mesh + texture.
         CheckFirstUse(backend, SceneSpec{}, Expect{ 2, { 0, 1 }, 1, 0 });
-        // Oversized texture and mesh: ready after their single upload frame, no retry, no overflow.
+        // Oversized texture and mesh: no retry, no overflow, and at most one over-cap payload per frame (spec Revision
+        // 6), so the texture lands on frame 1, the mesh on frame 2, and frame 3 draws them.
         SceneSpec big;
         big.textureSide = 1100;   // ~5.1 MB staging > the 4 MiB slot
         big.sphereRings = 300;    // 150801 vertices x 32 B + 3.6 MB of indices > the 4 MiB slot
-        CheckFirstUse(backend, big, Expect{ 2, { 0, 1 }, 1, 0 });
+        CheckFirstUse(backend, big, Expect{ 3, { 0, 1 }, 0, 0 });
+    }
+
+    void CheckOverCapBurst(Arcane::GraphicsBackend backend)
+    {
+        // Four payloads over the cap: one per upload frame, FIFO, one texture each (no churn), and the small mesh goes
+        // with the first of them because it costs ring bytes, not the over-cap turn. The ready counts are the pacing.
+        // First drawn is frame 4, not 5: the fourth quad of the grid (x 61..77, y 36..52) sits behind the cube, which
+        // covers about x 52..108, y 20..76 here, so that image landing does not change the picture.
+        SceneSpec spec;
+        spec.textureSide = 1100;
+        spec.textureCount = 4;
+        CheckFirstUse(backend, spec, Expect{ 4, { 0, 1, 2, 3, 4 }, 1, 4 });
     }
 
     void CheckBudget(Arcane::GraphicsBackend backend)
@@ -403,11 +416,11 @@ namespace
         const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
         // A heavy upload (a 2000x2000 texture, 16 MB through dedicated staging) so A's upload submit has real GPU
         // work to retire; only the mesh samples the texture, so B has no copy of its own to make.
-        // WHAT A'S SUBMIT CARRIES, by 0-based repeat: each context has its own mesh cache, and A's frame resolves
-        // A's copy of the mesh during declaration, after that frame's upload snapshot. So repeat 0 carries the
-        // texture and leaves A's mesh queued, repeat 1 carries the texture AND A's mesh, and repeat 2 on carries
-        // the texture alone. The per-repeat readings logged below give the queued count. The fence covers the
-        // whole submit, not the texture copy.
+        // WHAT A'S SUBMIT CARRIES: each context has its own mesh cache, and A's frame resolves A's copy of the mesh
+        // during declaration, after that frame's upload snapshot, so A's mesh queues on repeat 0. It is over the cap
+        // too, and a frame takes one over-cap payload, the texture cache's first: each repeat's fresh texture takes
+        // the turn, so A's mesh stays queued and every repeat's submit carries the texture alone. The per-repeat
+        // readings logged below give the queued count. The fence covers the whole submit, not the texture copy.
         SceneSpec base;
         base.albedoMesh = true;
         base.textureCount = 1;
@@ -770,6 +783,8 @@ UPLOAD_GPU_CASE("a fresh texture and mesh, and an oversized pair, are drawn two 
                 "queued, byte-identical to the blocking path", CheckAll, D3D12, "d3d12")
 UPLOAD_GPU_CASE("a fresh texture and mesh, and an oversized pair, are drawn two frames after they were "
                 "queued, byte-identical to the blocking path", CheckAll, Vulkan, "vulkan")
+UPLOAD_GPU_CASE("a burst of over-cap payloads uploads one per frame, FIFO, no churn", CheckOverCapBurst, D3D12, "d3d12")
+UPLOAD_GPU_CASE("a burst of over-cap payloads uploads one per frame, FIFO, no churn", CheckOverCapBurst, Vulkan, "vulkan")
 UPLOAD_GPU_CASE("a second texture over the per-frame budget waits one frame", CheckBudget, D3D12, "d3d12")
 UPLOAD_GPU_CASE("a second texture over the per-frame budget waits one frame", CheckBudget, Vulkan, "vulkan")
 UPLOAD_GPU_CASE("the retry guard buries, recreates and uploads one frame later", CheckInjectedRetry, D3D12, "d3d12")

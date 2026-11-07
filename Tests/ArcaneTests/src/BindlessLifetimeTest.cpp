@@ -820,6 +820,110 @@ TEST_CASE("a material that finds the table full is re-resolved once a slot frees
     std::error_code ec; fs::remove_all(dir, ec);
 }
 
+// Plan C final review I2: mappings minted through a plain resolve hold no reference and nothing ever releases them, so
+// a full table reclaims the oldest of them before it refuses.
+TEST_CASE("a full table reclaims the oldest unreferenced mapping before it refuses", "[nri][bindless]")
+{
+    DeviceFixture dev(3);
+    BindlessTable& t = dev.Table();
+    std::vector<std::uint32_t> released;
+    t.SetObserver(&released, [&](std::uint32_t slot) { released.push_back(slot); });
+
+    const Arcane::Guid a{ 91, 1 }, b{ 91, 2 }, c{ 91, 3 }, d{ 91, 4 }, e{ 91, 5 };
+    const std::uint32_t slotA = t.AddMapped(a, kSrgb, MockSrv(1));
+    const std::uint32_t slotB = t.AddMapped(b, kSrgb, MockSrv(2));
+    const std::uint32_t slotC = t.AddMapped(c, kSrgb, MockSrv(3));
+    t.AcquireRef(b, kSrgb);   // a material holds b: never reclaimed, though it is older than c
+
+    // Nothing has sampled a, so its slot retires at once and this Add gets it.
+    const std::uint32_t slotD = t.AddMapped(d, kSrgb, MockSrv(4));
+    CHECK(slotD == slotA);
+    CHECK(t.Lookup(a, kSrgb) == BindlessTable::kInvalidSlot);
+    CHECK(released == std::vector<std::uint32_t>{ slotA });   // the holders heard about it first
+    CHECK(t.Lookup(b, kSrgb) == slotB);
+    CHECK(t.Lookup(c, kSrgb) == slotC);
+
+    // The next oldest is c, not the referenced b and not the newer d.
+    const std::uint32_t slotE = t.AddMapped(e, kSrgb, MockSrv(5));
+    CHECK(slotE == slotC);
+    CHECK(t.Lookup(b, kSrgb) == slotB);
+    CHECK(t.Lookup(d, kSrgb) == slotD);
+}
+
+TEST_CASE("a reclaimed slot an earlier frame may still read waits for it, and one ask costs one mapping", "[nri][bindless]")
+{
+    DeviceFixture dev(2);
+    BindlessTable& t = dev.Table();
+    const Arcane::Guid a{ 92, 1 }, b{ 92, 2 }, c{ 92, 3 };
+    const std::uint32_t slotA = t.AddMapped(a, kSrgb, MockSrv(1));
+    const std::uint32_t slotB = t.AddMapped(b, kSrgb, MockSrv(2));
+    t.NoteSampledBy(ContextA(), 5);   // a frame in flight samples both
+
+    // The referenced acquire of a third: a's mapping goes now, its index only once fence 5 completes.
+    CHECK(t.AddMapped(c, kSrgb, MockSrv(3)) == BindlessTable::kInvalidSlot);
+    CHECK(t.Lookup(a, kSrgb) == BindlessTable::kInvalidSlot);
+    CHECK(t.PendingCount() == 1u);
+
+    // The caller re-asks every frame while it waits. That must not cost b's mapping too.
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        t.NoteFrame();
+        CHECK(t.AddMapped(c, kSrgb, MockSrv(3)) == BindlessTable::kInvalidSlot);
+        CHECK(t.Lookup(b, kSrgb) == slotB);
+    }
+
+    dev.completed[ContextA()] = 5;
+    t.NoteFrame();
+    CHECK(t.AddMapped(c, kSrgb, MockSrv(3)) == slotA);
+    CHECK(t.Lookup(b, kSrgb) == slotB);
+}
+
+TEST_CASE("a burst of asks at capacity reclaims one mapping per ask", "[nri][bindless]")
+{
+    DeviceFixture dev(3);
+    BindlessTable& t = dev.Table();
+    const Arcane::Guid a{ 93, 1 }, b{ 93, 2 }, c{ 93, 3 }, x{ 93, 4 }, y{ 93, 5 };
+    (void)t.AddMapped(a, kSrgb, MockSrv(1));
+    (void)t.AddMapped(b, kSrgb, MockSrv(2));
+    (void)t.AddMapped(c, kSrgb, MockSrv(3));
+    t.NoteSampledBy(ContextA(), 5);
+    CHECK(t.AddMapped(x, kSrgb, MockSrv(4)) == BindlessTable::kInvalidSlot);
+    CHECK(t.AddMapped(y, kSrgb, MockSrv(5)) == BindlessTable::kInvalidSlot);
+    CHECK(t.PendingCount() == 2u);
+    CHECK(t.Lookup(c, kSrgb) != BindlessTable::kInvalidSlot);
+}
+
+TEST_CASE("a table of referenced mappings still refuses, and releases nothing", "[nri][bindless]")
+{
+    DeviceFixture dev(2);
+    BindlessTable& t = dev.Table();
+    const Arcane::Guid a{ 94, 1 }, b{ 94, 2 }, c{ 94, 3 };
+    const std::uint32_t slotA = t.AddMapped(a, kSrgb, MockSrv(1));
+    const std::uint32_t slotB = t.AddMapped(b, kSrgb, MockSrv(2));
+    t.AcquireRef(a, kSrgb);
+    t.AcquireRef(b, kSrgb);
+    CHECK(t.AddMapped(c, kSrgb, MockSrv(3)) == BindlessTable::kInvalidSlot);
+    CHECK(t.Lookup(a, kSrgb) == slotA);
+    CHECK(t.Lookup(b, kSrgb) == slotB);
+    CHECK(t.PendingCount() == 0u);
+}
+
+// Plan C final review M1: a frame with no mesh records nothing, so NoteSampledBy's sweep does not run.
+TEST_CASE("the frame boundary sweeps pending slots on a frame that draws no mesh", "[nri][bindless]")
+{
+    DeviceFixture dev(2);
+    BindlessTable& t = dev.Table();
+    const Arcane::Guid a{ 95, 1 };
+    (void)t.AddMapped(a, kSrgb, MockSrv(1));
+    t.NoteSampledBy(ContextA(), 5);
+    t.ReleaseAll(a, kSrgb);
+    REQUIRE(t.PendingCount() == 1u);
+    dev.completed[ContextA()] = 5;
+    t.FlushZeroRefs();   // what FlushMeshAlbedoReleases runs, every Refresh, whatever the frame draws
+    CHECK(t.PendingCount() == 0u);
+    CHECK(t.FreeCount() == 1u);
+}
+
 // ---------------------------------------------------------------------------
 // [gpu]: two contexts on ONE real device share the bindless index space. A
 // slot context A and B both sampled is released, the new descriptor is written

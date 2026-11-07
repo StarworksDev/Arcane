@@ -306,7 +306,7 @@ namespace Arcane
         //   * one built-in set per distinct SPRITE TEXTURE, capped at
         //     caps.spriteTextures -- no frame-slot dimension, because a
         //     built-in set's contents (t0 + s0) carry nothing per-frame, so it
-        //     is written once and never rewritten;
+        //     is written once per view and never while a frame may read it;
         //   * per registered material: one set per (texture variant, frame
         //     slot), where variant 0 is the nil-texture one Task 9 had. Hence
         //     the (1 + caps.spriteTextures) factor.
@@ -410,9 +410,11 @@ namespace Arcane
         // out of this file entirely. The built-in set binds the white texel and
         // is written once. A material's sets are per FRAME SLOT, so the set a
         // frame binds is the one whose constant-buffer region that same frame
-        // owns -- and the only path that rewrites an existing set is a material
-        // REBUILD (an asset re-save at the desk), which idles the device first
-        // and says so. NRI's own guidance: "DescriptorSet is a tiny struct, so
+        // owns -- and the paths that rewrite an existing set are a material
+        // REBUILD (an asset re-save, or a declared image's view changing), which
+        // idles the device first and says so, and a sprite or variant set whose
+        // view changed, which waits out its readers (RetireWhenUnread). NRI's own
+        // guidance: "DescriptorSet is a tiny struct, so
         // lots of descriptor sets can be created in advance and reused without
         // calling ResetDescriptorPool" (NRI.h).
         //
@@ -678,6 +680,8 @@ namespace Arcane
         // Owned by the pool buried above; the images behind them belong to the
         // vehicle's shared NriTextureCache, which the vehicle releases itself.
         m_spriteSets.clear();
+        m_freeSpriteSets = std::make_shared<std::vector<nri::DescriptorSet*>>();
+        m_spriteSetsAllocated = 0;
 
         for (nri::Descriptor*& view : m_globalsView)
         {
@@ -729,7 +733,7 @@ namespace Arcane
             // wrong shader rather than dropping the content, which is the same
             // degradation Batcher2D::QuadMaterial already applies to an unknown
             // id. The reason it could not be built was reported there.
-            if (!m_warnedRegisteredMaterial)
+            if (!m_warnedRegisteredMaterial && !m_materialsHeld.contains(material))
             {
                 m_warnedRegisteredMaterial = true;
                 ARC_WARN("[nri-graph] Batch2DNode: material id {} has no NRI pipeline -- the graph "
@@ -818,29 +822,36 @@ namespace Arcane
             return m_set;
 
         const auto known = m_spriteSets.find(id);
-        if (known != m_spriteSets.end())
-            return known->second ? known->second : m_set;
+        if (known != m_spriteSets.end() && !known->second.set)
+            return m_set;   // the budget or the pool refused it: reported once, and it holds nothing
 
+        // DRAWN MEANS DRAWN (spec Revision 6): asked on every frame that draws it, ahead of any
+        // memo, because the ask is what tells the device account this image is in use.
         nri::Descriptor* view = TextureView(id);
-        if (!view)
+        const std::uint64_t serial = view ? m_textureCache->ViewSerial(id) : 0;
+        if (known != m_spriteSets.end())
         {
-            // CREATED AND QUEUED, NOT READY YET (Plan C Task 5): the upload node lands it
-            // a frame or two from now, so this must NOT be remembered as a miss -- the
-            // white texel is drawn meanwhile and the next frame asks again.
-            if (m_textureCache && m_textureCache->UploadQueued(id))
-                return m_set;
-            // Not resident (NriTextureCache said why, once). Remembered as a
-            // null set so this does not re-ask the cache every frame.
-            m_spriteSets[id] = nullptr;
-            return m_set;
+            if (known->second.viewSerial == serial)
+                return known->second.set;
+            // AN EVICTION OR A COOK DROPPED THE VIEW THIS SET BAKES, or replaced it. Nothing binds
+            // this set again (the map entry goes), and it is rewritten only after the frames that
+            // may have bound it retire -- so no idle, and no dead view on the GPU.
+            RetireWhenUnread([free = m_freeSpriteSets, set = known->second.set] { free->push_back(set); });
+            m_spriteSets.erase(known);
         }
 
-        // Counts LIVE sets, not map entries: a memoized miss holds no
+        // Created and queued, not ready yet (the upload node lands it a frame or two from now), or
+        // refused (NriTextureCache said why, once, and answers the same in O(1) every frame): the
+        // white texel either way, and the next frame asks again.
+        if (!view)
+            return m_set;
+
+        // Counts LIVE sets, not map entries: a memoized refusal holds no
         // descriptor set, and letting eight unresolvable images spend the
         // budget would refuse a ninth that actually resolved.
         std::size_t live = 0;
         for (const auto& [key, existing] : m_spriteSets)
-            if (existing)
+            if (existing.set)
                 ++live;
         if (live >= m_caps.spriteTextures)
         {
@@ -851,26 +862,40 @@ namespace Arcane
                           "rest draw with the white texel. Raise render.batch2d.maxSpriteTextures (it "
                           "sizes the descriptor pool).", m_caps.spriteTextures);
             }
-            m_spriteSets[id] = nullptr;
+            m_spriteSets[id] = SpriteSet{};
             return m_set;
         }
 
         const nri::CoreInterface& core = m_device->Core();
         nri::PipelineLayout* layout = m_pipelines->Layout(m_layoutId);
         nri::DescriptorSet* set = nullptr;
-        if (!layout
-            || !ARC_NRI_CHECK(core.AllocateDescriptorSets(*m_pool, *layout, 0, &set, 1, 0))
-            || !set)
+        if (!m_freeSpriteSets->empty())
+        {
+            set = m_freeSpriteSets->back();   // retired, and its last reader has completed
+            m_freeSpriteSets->pop_back();
+        }
+        else if (m_spriteSetsAllocated >= m_caps.spriteTextures)
+        {
+            return m_set;   // every set is live or retiring, and fewer than the cap are live: next frame
+        }
+        else if (!layout
+                 || !ARC_NRI_CHECK(core.AllocateDescriptorSets(*m_pool, *layout, 0, &set, 1, 0))
+                 || !set)
         {
             ARC_ERROR("[nri-graph] Batch2DNode: descriptor-set allocation failed for sprite "
                       "texture {} -- it draws with the white texel", id.ToString());
-            m_spriteSets[id] = nullptr;
+            m_spriteSets[id] = SpriteSet{};
             return m_set;
         }
+        else
+        {
+            ++m_spriteSetsAllocated;
+        }
 
-        // Written ONCE, here, and never again -- the same discipline every set
-        // in this node obeys (see the pool comment in CreateBindings), which is
-        // what keeps ResetDescriptorPool and its fence rules out of this file.
+        // Written ONCE per view, here, and never while a frame may read it -- the
+        // same discipline every set in this node obeys (see the pool comment in
+        // CreateBindings), which is what keeps ResetDescriptorPool and its fence
+        // rules out of this file.
         const nri::Descriptor* texture = view;
         const nri::Descriptor* sampler = m_sampler;
         nri::UpdateDescriptorRangeDesc updates[2] = {};
@@ -884,8 +909,15 @@ namespace Arcane
         updates[1].descriptorNum = 1;
         core.UpdateDescriptorRanges(updates, 2);
 
-        m_spriteSets[id] = set;
+        m_spriteSets[id] = SpriteSet{ set, serial };
         return set;
+    }
+
+    void Batch2DNode::RetireWhenUnread(std::function<void()> recycle)
+    {
+        // The value the last submit signalled: everything recorded so far is at or before it.
+        // A burial made here is in order on this lane, whose other declaration-time burials use it too.
+        m_owner->Graves().Bury(m_owner->Graph().DebugSubmitCount(), std::move(recycle));
     }
 
     void Batch2DNode::WriteMaterialSet(const MaterialSlot& slot, nri::DescriptorSet& set,
@@ -965,13 +997,27 @@ namespace Arcane
             return slot.variants.empty() ? nullptr : &slot.variants.front();
         };
 
-        for (MaterialSlot::TextureVariant& variant : slot.variants)
-            if (variant.id == id)
-                return &variant;
         if (!id.IsValid())
             return fallback();
 
+        // DRAWN MEANS DRAWN, as for a plain sprite (EnsureSpriteSet): asked before any memo.
         nri::Descriptor* spriteView = TextureView(id);
+        const std::uint64_t serial = spriteView ? m_textureCache->ViewSerial(id) : 0;
+        for (auto it = slot.variants.begin(); it != slot.variants.end(); ++it)
+        {
+            if (it->id != id)
+                continue;
+            if (it->viewSerial == serial)
+                return &*it;
+            // The view at t0 was dropped or replaced. The span takes the nil variant until a new
+            // one exists (the white texel, as on first use), and these sets wait out their readers.
+            MaterialSlot::VariantSets sets;
+            for (std::uint32_t frameSlot = 0; frameSlot < kMaxFramesInFlight; ++frameSlot)
+                sets.set[frameSlot] = it->set[frameSlot];
+            RetireWhenUnread([free = slot.freeVariantSets, sets] { free->push_back(sets); });
+            slot.variants.erase(it);
+            break;
+        }
         if (!spriteView)
             return fallback();
 
@@ -996,21 +1042,37 @@ namespace Arcane
 
         MaterialSlot::TextureVariant fresh;
         fresh.id = id;
+        fresh.viewSerial = serial;
         const std::uint32_t framesInFlight = FramesInFlight();
-        for (std::uint32_t frameSlot = 0; frameSlot < framesInFlight; ++frameSlot)
+        if (!slot.freeVariantSets->empty())
         {
-            if (!ARC_NRI_CHECK(core.AllocateDescriptorSets(*m_pool, *layout, 0,
-                                                            &fresh.set[frameSlot], 1, 0))
-                || !fresh.set[frameSlot])
-            {
-                ARC_ERROR("[nri-graph] Batch2DNode: descriptor-set allocation failed for a "
-                          "material's sprite-texture variant -- the pool holds {} material sets, "
-                          "sized by render.batch2d.maxMaterialSlots x maxSpriteTextures",
-                          m_caps.materialSlots * framesInFlight * (1 + m_caps.spriteTextures));
-                return fallback();
-            }
-            WriteMaterialSet(slot, *fresh.set[frameSlot], frameSlot, spriteView);
+            for (std::uint32_t frameSlot = 0; frameSlot < kMaxFramesInFlight; ++frameSlot)
+                fresh.set[frameSlot] = slot.freeVariantSets->back().set[frameSlot];
+            slot.freeVariantSets->pop_back();
         }
+        else if (slot.variantsAllocated >= 1 + m_caps.spriteTextures)
+        {
+            return fallback();   // every set is live or retiring: next frame
+        }
+        else
+        {
+            for (std::uint32_t frameSlot = 0; frameSlot < framesInFlight; ++frameSlot)
+            {
+                if (!ARC_NRI_CHECK(core.AllocateDescriptorSets(*m_pool, *layout, 0,
+                                                                &fresh.set[frameSlot], 1, 0))
+                    || !fresh.set[frameSlot])
+                {
+                    ARC_ERROR("[nri-graph] Batch2DNode: descriptor-set allocation failed for a "
+                              "material's sprite-texture variant -- the pool holds {} material sets, "
+                              "sized by render.batch2d.maxMaterialSlots x maxSpriteTextures",
+                              m_caps.materialSlots * framesInFlight * (1 + m_caps.spriteTextures));
+                    return fallback();
+                }
+            }
+            ++slot.variantsAllocated;
+        }
+        for (std::uint32_t frameSlot = 0; frameSlot < framesInFlight; ++frameSlot)
+            WriteMaterialSet(slot, *fresh.set[frameSlot], frameSlot, spriteView);
 
         slot.variants.push_back(fresh);
         return &slot.variants.back();
@@ -1069,6 +1131,8 @@ namespace Arcane
                      "sets are re-allocated (the previous ones are stranded in the pool until "
                      "shutdown)", desc.templ->Name());
             slot.variants.clear();   // every variant's sets were the OLD shape
+            slot.freeVariantSets = std::make_shared<std::vector<MaterialSlot::VariantSets>>();   // and so were these
+            slot.variantsAllocated = 0;
         }
 
         // The PSO key. shaderPairId is the CONTENT hash of the blob pair, which
@@ -1150,6 +1214,7 @@ namespace Arcane
                 }
             }
             slot.variants.push_back(nil);
+            ++slot.variantsAllocated;
         }
         // EVERY variant is rewritten, not just the nil one. On a REBUILD (a
         // material re-save) the constant-buffer views above were destroyed and
@@ -1160,6 +1225,7 @@ namespace Arcane
         for (MaterialSlot::TextureVariant& variant : slot.variants)
         {
             nri::Descriptor* spriteView = variant.id.IsValid() ? TextureView(variant.id) : nullptr;
+            variant.viewSerial = spriteView ? m_textureCache->ViewSerial(variant.id) : 0;
             for (std::uint32_t frameSlot = 0; frameSlot < framesInFlight; ++frameSlot)
                 if (variant.set[frameSlot])
                     WriteMaterialSet(slot, *variant.set[frameSlot], frameSlot, spriteView);
@@ -1189,16 +1255,20 @@ namespace Arcane
             return refuse("its registration carries no stitched shader bytecode "
                           "(Material2DDesc::vsBytes)");
 
-        // HOLD THE FIRST BUILD while a declared image is still queued (Plan C Task 5 review I5). Asking
-        // the cache here creates + queues it; the descriptor sets bake the views once, so building now
-        // would bake the white texel and force a rebuild (behind a device idle) the moment the image
-        // lands. Holding means first use needs no idle: the material draws through the plain sprite
-        // pipeline until every declared image is bindable or refused (a refused one uses the white
-        // texel, as before). Only the FIRST build holds -- a rebuild is a content change like a re-save.
-        if (m_textureCache && m_materialSlotOf.find(material) == m_materialSlotOf.end())
+        // DRAWN MEANS DRAWN (spec Revision 6): every declared image is asked for on every frame that
+        // draws this material, ahead of any memo, because the ask is what tells the device account.
+        //
+        // AND HOLD WHILE ONE IS QUEUED (Plan C Task 5 review I5). The descriptor sets bake the views, so
+        // building now would bake the white texel and force a rebuild (behind a device idle) the moment
+        // the image lands. Holding means first use needs no idle: the material draws through the plain
+        // sprite pipeline until every declared image is bindable or refused (a refused one uses the white
+        // texel, as before). The same hold covers an image evicted from under a BUILT material: its sets
+        // name a dead view, so it stops being drawable here and now, whichever frame it last drew on.
+        const std::vector<Guid> declaredImages = desc->instance->ResolveTextures();
+        if (m_textureCache)
         {
             bool held = false;
-            for (const Guid& id : desc->instance->ResolveTextures())
+            for (const Guid& id : declaredImages)
             {
                 if (!id.IsValid())
                     continue;
@@ -1206,7 +1276,13 @@ namespace Arcane
                 held = held || m_textureCache->UploadQueued(id);
             }
             if (held)
+            {
+                m_materialsHeld.insert(material);
+                if (const auto built = m_materialSlotOf.find(material); built != m_materialSlotOf.end())
+                    m_materials[built->second].ready = false;
                 return nullptr;
+            }
+            m_materialsHeld.erase(material);
         }
 
         // The identity of THIS registration. A material re-save replaces the
@@ -1222,16 +1298,17 @@ namespace Arcane
         stamp = HashValue(desc->psBytes->size(), stamp);
         stamp = HashValue((std::uint64_t)(std::uintptr_t)desc->templ.get(), stamp);
         stamp = HashValue((std::uint64_t)(std::uintptr_t)desc->instance.get(), stamp);
-        for (const Guid& id : desc->instance->ResolveTextures())
+        for (const Guid& id : declaredImages)
         {
             stamp = HashValue(id.hi, stamp);
             stamp = HashValue(id.lo, stamp);
-            // Whether the declared image is BINDABLE now (Plan C Task 5). A FIRST build never sees
-            // a queued image (it is held above), so first use costs no idle. The flag still flips
-            // for CONTENT changes -- an eviction's re-upload, a PendingCook key promoted to its real
-            // artifact -- and those rebuild once through the re-registration path below (the same
-            // idle a re-save costs): they are content changes like a re-save, not first use.
-            stamp = HashValue(m_textureCache && id.IsValid() && m_textureCache->View(id) ? 1u : 0u, stamp);
+            // WHICH VIEW of the declared image is there now, not merely whether one is (spec Revision
+            // 6): an image evicted while this material was off screen and re-resolved by another
+            // consumer is bindable both times, and the sets still name the dead view. A FIRST build
+            // never sees a queued image (it is held above), so first use costs no idle. CONTENT changes
+            // -- an eviction's re-upload, a PendingCook key promoted to its real artifact, a cook --
+            // rebuild once through the re-registration path below (the same idle a re-save costs).
+            stamp = HashValue(m_textureCache && id.IsValid() ? m_textureCache->ViewSerial(id) : 0u, stamp);
         }
 
         const auto known = m_materialSlotOf.find(material);
@@ -1295,8 +1372,8 @@ namespace Arcane
         // and waits, and a descriptor set must never be allocated or written
         // inside the frame's open command buffer.
         //
-        // The result is memoized in m_spriteSets (including the misses), so a
-        // scene that draws the same sprites every frame does this once.
+        // The set is memoized in m_spriteSets, so a scene that draws the same sprites
+        // every frame builds it once and only asks the cache after that.
         // ---------------------------------------------------------------
         // The budget is checked ONCE, up front, from the same pure count the
         // [nri] cases pin -- so the number in the message is the frame's real
@@ -1417,7 +1494,7 @@ namespace Arcane
         if (!id.IsValid())
             return m_set;
         const auto known = m_spriteSets.find(id);
-        return (known != m_spriteSets.end() && known->second) ? known->second : m_set;
+        return (known != m_spriteSets.end() && known->second.set) ? known->second.set : m_set;
     }
 
     void Batch2DNode::Record(RenderGraphNodeContext& context, const Batch2DDrained& batch,

@@ -687,7 +687,7 @@ namespace Arcane
         m_packed.assign(cbSize, 0);
 
         // A POST MATERIAL'S DECLARED TEXTURE PARAMS are resolved HERE -- at
-        // declaration time, because the upload submits and waits -- through
+        // declaration time, ahead of any open command buffer -- through
         // the vehicle's SHARED NriTextureCache, the same one Batch2DNode
         // uses. An unbound, unresolvable or undecodable param falls back to
         // the white texel (the cache says why, once). Chain INPUTS are
@@ -856,14 +856,18 @@ namespace Arcane
             for (std::uint32_t input : pass.inputs)
                 stamp = HashValue(input, stamp);
         }
-        // HOLD THE FIRST BUILD while a declared image is still queued (Plan C Task 5 review I5): the
-        // sets bake the views once, so building now would bake the white texel and rebuild (behind
-        // an idle) when the image lands. Returning 0 draws the frame without the chain; first use
-        // costs no idle. A refused image uses the white texel as before.
-        if (!m_ready && m_textures && desc.instance)
+        // DRAWN MEANS DRAWN (spec Revision 6): every declared image is asked for on every frame that
+        // binds this chain, ahead of any memo, because the ask is what tells the device account.
+        //
+        // AND HOLD WHILE ONE IS QUEUED (Plan C Task 5 review I5): the sets bake the views, so building
+        // now would bake the white texel and rebuild (behind an idle) when the image lands. Returning 0
+        // draws the frame without the chain, so first use costs no idle, and nothing binds this chain's
+        // sets while they name a dead view after an eviction. A refused image uses the white texel.
+        if (m_textures && desc.instance)
         {
+            const std::vector<Guid> declaredImages = desc.instance->ResolveTextures();
             bool held = false;
-            for (const Guid& id : desc.instance->ResolveTextures())
+            for (const Guid& id : declaredImages)
             {
                 if (!id.IsValid())
                     continue;
@@ -872,13 +876,13 @@ namespace Arcane
             }
             if (held)
                 return 0;
+            // WHICH VIEW of each declared image is there now, not merely whether one is: an image
+            // evicted while the chain was off and re-resolved by another consumer is bindable both
+            // times, and the sets still name the dead view. These are CONTENT changes (an eviction's
+            // re-upload, a PendingCook promotion, a cook): they rebuild once, like a re-bind.
+            for (const Guid& id : declaredImages)
+                stamp = HashValue(id.IsValid() ? m_textures->ViewSerial(id) : 0u, stamp);
         }
-        // Whether each declared image is BINDABLE now. Flips only for CONTENT changes after the
-        // first build (an eviction's re-upload, a PendingCook promotion): they rebuild once, like
-        // a re-bind, and are not first use.
-        if (m_textures && desc.instance)
-            for (const Guid& id : desc.instance->ResolveTextures())
-                stamp = HashValue(id.IsValid() && m_textures->View(id) ? 1u : 0u, stamp);
 
         if (stamp != m_stamp)
         {
@@ -886,7 +890,8 @@ namespace Arcane
             // per edit, so the GPU must not be reading them. Idling is honest
             // here for the same reason it is in Batch2DNode::EnsureMaterial: the
             // edit already cost a shader compile, and it only happens on an
-            // asset re-save at the desk. A FIRST build has nothing in flight.
+            // asset re-save at the desk, or when a declared image came back from
+            // an eviction or a cook. A FIRST build has nothing in flight.
             if (m_ready)
             {
                 ARC_INFO("[nri-graph] PostChainNode: the scene post chain was re-bound -- "
@@ -1026,8 +1031,9 @@ namespace Arcane
             {
                 // THE INDEX IS THE DISCRIMINATOR, and it has to be: a DECLARED
                 // param (t < m_textureCount) is an asset texture owned by the
-                // shared cache, whose view is created once and lives as long as
-                // the cache; a CHAIN INPUT is a graph POOL texture, whose view
+                // shared cache, whose view lives until the cache drops the key (an
+                // eviction or a cook, which PrepareChain's stamp turns into a rebuild
+                // before this runs); a CHAIN INPUT is a graph POOL texture, whose view
                 // this node caches and BURIES on every pool-epoch move. Routing
                 // a cache texture through EnsureView would put a view over a
                 // non-pool texture into that epoch-buried cache -- destroyed

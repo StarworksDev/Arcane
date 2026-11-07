@@ -1038,6 +1038,11 @@ namespace Arcane::Editor
                 if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
                     graph->FlushMeshAlbedoReleases();
             };
+            rs.stampReferencedAlbedoSlots = [this]()
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->StampReferencedMeshAlbedos();
+            };
             rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
             {
                 if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
@@ -1215,13 +1220,15 @@ namespace Arcane::Editor
 
     std::uint64_t EditorApp::ToolbarLogoTextureId() const noexcept
     {
-        if (m_graphLogoTexture == 0 && m_graphLogoId.IsValid())
+        // ASKED EVERY DRAW, never memoized (spec Revision 6): the ask is what tells the device
+        // account the mark is drawn, and an id kept across frames would dangle after an eviction.
+        if (m_graphLogoId.IsValid())
             if (Arcane::NriGraphContext* chrome = ChromeGraph())
                 if (Arcane::NriTextureCache* cache = chrome->Textures())
                     if (nri::Texture* logo = cache->Resolve(
                             m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display))
-                        m_graphLogoTexture = (std::uint64_t)(std::intptr_t)logo;
-        return m_graphLogoTexture;
+                        return (std::uint64_t)(std::intptr_t)logo;
+        return 0;
     }
 
     bool EditorApp::StagePluginLoad(Arcane::HostBoot::BootContext&)
@@ -2101,11 +2108,13 @@ namespace Arcane::Editor
         // resolves for the first time is only QUEUED by the frame that resolved it,
         // uploaded by the next and drawn by the one after, so a cover taken from the
         // first frame would miss it. The same frame is therefore submitted again while
-        // the vehicle reports uploads in flight -- bounded by the thumbnail retry budget
-        // (editor.thumbnail.maxRetries, default 3). Giving up is today's failure path:
-        // no cover is written, rather than one with holes in it.
-        const std::int32_t extraFrames =
-            Arcane::Settings<Arcane::Editor::EditorThumbnailSettings>().maxRetries;
+        // the vehicle reports uploads in flight -- bounded on PROGRESS by the thumbnail
+        // retry budget (UploadSettleBound, editor.thumbnail.maxRetries, default 3 frames
+        // without the upload queue reaching a new low), because the per-frame budget paces
+        // a large scene over many frames. Giving up is today's failure path: no cover is
+        // written, rather than one with holes in it.
+        Arcane::UploadSettleBound settle;
+        settle.maxStalled = Arcane::Settings<Arcane::Editor::EditorThumbnailSettings>().maxRetries;
         Arcane::NriGraphContext::FrameOutcome outcome = Arcane::NriGraphContext::FrameOutcome::Failed;
         for (std::int32_t attempt = 0;; ++attempt)
         {
@@ -2141,8 +2150,11 @@ namespace Arcane::Editor
             // before the non-Presented return, so the next viewport sync is a
             // full rebuild (ruling R-F).
             Arcane::GpuSceneInvalidate(m_runtime->Registry());
-            if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented
-                || !graph->HasPendingUploads() || attempt >= extraFrames)
+            if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented || !graph->HasPendingUploads())
+                break;
+            if (attempt == 0)
+                settle.lowestQueued = graph->QueuedUploadCount();
+            if (!settle.AllowAnotherFrame(graph->QueuedUploadCount()))
                 break;
         }
         if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
@@ -3189,7 +3201,7 @@ namespace Arcane::Editor
         // handed to ImGui (it is only ever ReadCapture'd), and the THUMBNAIL
         // textures live in the CHROME context's own cache, which is the same
         // context whose ImGuiNri caches them -- the same-context case
-        // ~NriGraphContext's ordering already covers (m_graphLogoTexture's own
+        // ~NriGraphContext's ordering already covers (m_graphLogoId's own
         // declaration states this distinction in full).
         if (m_materialThumbs)
             m_materialThumbs->Shutdown();

@@ -102,10 +102,18 @@ namespace Arcane
         // ---------------- index level ----------------------------------------
 
         // Pops a retired free index, else appends. Refuses -- returns
-        // kInvalidSlot, no slot consumed, no warning -- when `srv` is null; at
-        // capacity with nothing recyclable it returns kInvalidSlot with a ONE-SHOT
-        // warning. `owner` (a context identity, may be null) is whose objects the
-        // descriptor views: ReleaseOwnedBy discharges them at that owner's teardown.
+        // kInvalidSlot, no slot consumed, no warning -- when `srv` is null. AT
+        // CAPACITY it RECLAIMS: the oldest live mapping with no references (a
+        // thumbnail's or a preview's, minted through a plain resolve, which nothing
+        // would ever release) is released through the mapping path, so holders hear
+        // about it and the index waits on the last-use record like any other. A
+        // slot an earlier frame may still read therefore cannot serve THIS Add,
+        // which answers kInvalidSlot, and the caller's re-ask on a later frame gets
+        // it: one reclaim per ask per frame that nothing pending already covers.
+        // With nothing reclaimable and nothing pending it returns kInvalidSlot with
+        // a ONE-SHOT warning. `owner` (a context identity, may be null) is whose
+        // objects the descriptor views: ReleaseOwnedBy discharges them at that
+        // owner's teardown.
         // Does NOT write any descriptor set (see AddAndWrite).
         [[nodiscard]] std::uint32_t Add(nri::Descriptor* srv, const void* owner = nullptr);
 
@@ -127,7 +135,11 @@ namespace Arcane
         // the first descriptor write after NoteFrame() waits for device idle.
         void SetUpdateAfterSet(bool updateAfterSet) noexcept { m_updateAfterSet = updateAfterSet; }
         // One frame boundary: the next descriptor-rewriting Add may idle again.
-        void NoteFrame() noexcept { m_idledThisFrame = false; }
+        void NoteFrame() noexcept
+        {
+            m_idledThisFrame = false;
+            m_refusedThisFrame = 0;
+        }
 
         // Add + write the descriptor into every registered set. kInvalidSlot on
         // refusal (or an idle failure).
@@ -170,8 +182,16 @@ namespace Arcane
         // whole-cache Clear + re-resolve in one frame keeps every index (acquire
         // before release). A key with no references is untouched.
         void Release(const Guid& guid, ColorSpace space);
-        // The frame boundary: ReleaseAll every queued key still at zero references.
+        // The frame boundary: ReleaseAll every queued key still at zero references,
+        // then the retire sweep (a frame that draws no mesh records nothing, so
+        // NoteSampledBy's sweep does not run and slots would wait in VRAM).
         void FlushZeroRefs();
+        // Every mapped slot some material holds a reference on is DRAWN as far as the
+        // device account knows: stamps its entry at the account's Now(). Hosts call it
+        // ahead of the frame's Refresh sweep, whose Charges would otherwise see last
+        // frame's stamp and take a visible albedo for a cold one (spec Revision 6). A
+        // mapping with no references is not stamped, so an orphan ages.
+        void StampReferenced();
         // Unconditional: erase the memo, notify observers, take the index path.
         void ReleaseAll(const Guid& guid, ColorSpace space);
         // Project switch: ReleaseAll for every mapping.
@@ -241,6 +261,7 @@ namespace Arcane
             const void*      owner = nullptr;
             State            state = State::Free;
             bool             mapped = false;
+            std::uint64_t    mintedAt = 0;           // Add order: the reclaim takes the oldest
             const nri::Texture* texture = nullptr;   // what the descriptor views (optional)
             // Pending only: the contexts that already noted this slot since it was
             // released (a context notes a pending slot ONCE, at its first record).
@@ -279,6 +300,7 @@ namespace Arcane
         };
 
         void PurgeZeroRef(const MapKey& key);                 // forget a queued zero-ref release
+        void ReclaimOldestUnreferenced();                     // Add at capacity
         void DropMapping(std::uint32_t slot);                 // erase memo + notify observers
         void PendIndex(std::uint32_t slot, bool force);       // Live -> Pending, retire now if possible
         bool TryRetire(std::uint32_t slot, bool force);       // Pending -> Free when AllRetired (or forced)
@@ -310,6 +332,8 @@ namespace Arcane
         void*   m_hookUser  = nullptr;
         bool    m_updateAfterSet  = true;
         bool    m_idledThisFrame  = false;
+        std::uint64_t m_mintCount = 0;           // Slot::mintedAt
+        std::uint32_t m_refusedThisFrame = 0;    // Adds at capacity since the last frame boundary
 
         // THE ONE-SHOT CAPACITY WARN: one line per table, not one per refused Add().
         bool    m_warnedFull = false;

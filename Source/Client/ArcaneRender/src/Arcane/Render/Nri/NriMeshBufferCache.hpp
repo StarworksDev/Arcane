@@ -21,10 +21,9 @@
 // there applies here unless this comment says otherwise.
 //
 // WHAT IS DIFFERENT FROM NriTextureCache, and why:
-//   * A BYTE BUDGET AND AN LRU (MeshResidencyBudget.hpp). NriTextureCache has
-//     neither -- it never evicts a single entry (NriGraphContext's own note says
-//     so). Mesh geometry is where eviction became a real question (F2a's spec
-//     assigned it here by name). EVICTION ERASES THE WHOLE ENTRY, the CPU copy
+//   * ITS OWN BYTE BUDGET AND LRU (MeshResidencyBudget.hpp), besides the device
+//     residency account both caches charge (ResidencyAccount.hpp, which evicts
+//     texture entries as well). EVICTION ERASES THE WHOLE ENTRY, the CPU copy
 //     with it (final-review I2, ruled), so ResidentBytes() is exactly the
 //     resident CPU+GPU bytes and a cold entry can never hide memory behind a
 //     `ready == false`. The CPU copy that a re-upload reads after an eviction
@@ -103,6 +102,7 @@ namespace Arcane
             std::uint32_t indexCount   = 0;
             std::uint64_t bytes        = 0;
             std::uint64_t lastDrawnFrame = 0;
+            std::uint32_t stagingTries = 0;   // dedicated staging failures so far (kMaxStagingTries)
             // The CPU copy of a RESIDENT mesh, counted in `bytes` alongside the two
             // GPU buffers (MeshResidencyBudget.hpp). It does NOT outlive the entry:
             // eviction erases the whole entry, and a refused upload clears this

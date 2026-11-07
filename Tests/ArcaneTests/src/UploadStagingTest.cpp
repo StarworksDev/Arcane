@@ -31,6 +31,9 @@
 #include <memory>
 #include <vector>
 
+#include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/NriUploadRing.hpp>
+
 namespace
 {
     using Arcane::Guid;
@@ -284,6 +287,12 @@ TEST_CASE("upload budget: FIFO admission against a per-frame cap", "[nri][upload
     CHECK(b.Admit(40));          // exactly what is left
     CHECK_FALSE(b.Admit(1));     // empty
     CHECK(b.Admit(101));         // over the cap: dedicated staging, costs no ring bytes
+    CHECK_FALSE(b.Admit(101));   // and only one per frame: the next over-cap payload waits, FIFO
+    CHECK_FALSE(b.Admit(5000));
+    CHECK(b.remaining == 0u);    // neither touched the ring bytes
+    Arcane::UploadBudget bigFirst = Arcane::UploadBudget::WithCap(100);
+    CHECK(bigFirst.Admit(101));  // a first entry over the cap is always admitted, so progress holds
+    CHECK(bigFirst.Admit(100));  // and it costs the small ones nothing
     CHECK(Arcane::UploadBudget::WithCap(100).Admit(100));   // a fresh budget always admits the first entry <= cap
 
     // The exec-time class with the cap: over the cap -> dedicated even when it would fit the slot.
@@ -362,15 +371,202 @@ TEST_CASE("mesh cache: a burst drains FIFO under the budget with one object pair
     CHECK(f.cache->ObjectCreateCount() == static_cast<std::uint64_t>(kPayloads));
 }
 
-TEST_CASE("mesh cache: a payload over the cap is admitted at no ring cost and does not stall the queue", "[nri][upload]")
+TEST_CASE("mesh cache: payloads over the cap are admitted one per frame, FIFO, with no object churn", "[nri][upload]")
 {
     MeshFixture f;
     const std::uint64_t cost = Arcane::MeshStagingBytes(f.cube.vertices.size() * sizeof(Arcane::MeshVertex),
                                                         f.cube.indices.size() * sizeof(std::uint32_t));
     CHECK(f.cache->Resolve(kMeshA, 1) == nullptr);
     CHECK(f.cache->Resolve(kMeshB, 1) == nullptr);
-    Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(cost - 1);   // every cube is "over the cap": dedicated
-    CHECK(f.cache->BeginUploadFrame(budget).size() == 2u);
+    const auto frame = [&]()
+    {
+        Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(cost - 1);   // every cube is "over the cap": dedicated
+        return f.cache->BeginUploadFrame(budget);
+    };
+    const auto first = frame();
+    REQUIRE(first.size() == 1u);
+    CHECK(first[0].id == kMeshA);
+    CHECK(f.cache->QueuedUploadCount() == 1u);
+    f.cache->CommitUploads(true, f.device->Graves(), 1);
+    const auto second = frame();
+    REQUIRE(second.size() == 1u);
+    CHECK(second[0].id == kMeshB);
+    f.cache->CommitUploads(true, f.device->Graves(), 1);
+    CHECK(f.cache->ObjectCreateCount() == 2u);
+}
+
+TEST_CASE("texture cache: payloads over the cap are admitted one per frame, FIFO, with no object churn", "[nri][upload]")
+{
+    TextureFixture f;
+    CHECK(f.cache->Resolve(kTexA) == nullptr);
+    CHECK(f.cache->Resolve(kTexB) == nullptr);
+    Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(1);
+    const auto first = f.cache->BeginUploadFrame(budget);
+    REQUIRE(first.size() == 1u);
+    CHECK(first[0].id == kTexA);
+    CHECK(f.cache->QueuedUploadCount() == 1u);
+    f.cache->CommitUploads(true, f.device->Graves(), 1);
+    Arcane::UploadBudget next = Arcane::UploadBudget::WithCap(1);
+    const auto second = f.cache->BeginUploadFrame(next);
+    REQUIRE(second.size() == 1u);
+    CHECK(second[0].id == kTexB);
+    f.cache->CommitUploads(true, f.device->Graves(), 1);
+    CHECK(f.cache->ObjectCreateCount() == 2u);
+}
+
+// NONE's MapBuffer always refuses, which is exactly a dedicated staging failure, and a never-Init'd ring classifies
+// over-cap payloads as dedicated without touching the command buffer.
+TEST_CASE("texture cache: a dedicated staging failure requeues for a bounded number of tries, then is refused", "[nri][upload]")
+{
+    TextureFixture f;
+    Arcane::NriUploadRing ring;
+    char notACommandBuffer = 0;   // the failure path records nothing
+    nri::CommandBuffer& noCommands = reinterpret_cast<nri::CommandBuffer&>(notACommandBuffer);
+    CHECK(f.cache->Resolve(kTexA) == nullptr);
+    for (std::uint32_t attempt = 1; attempt <= Arcane::kMaxStagingTries; ++attempt)
+    {
+        INFO("attempt " << attempt);
+        REQUIRE(f.cache->UploadQueued(kTexA));
+        Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(1);
+        const auto jobs = f.cache->BeginUploadFrame(budget);
+        REQUIRE(jobs.size() == 1u);
+        f.cache->RecordUpload(jobs[0], noCommands, ring, budget.cap);
+        f.cache->CommitUploads(true, f.device->Graves(), 1);
+        CHECK(f.cache->Resolve(kTexA) == nullptr);
+        CHECK(f.cache->ResidentCount() == 0u);
+        CHECK(f.cache->QueuedUploadCount() == (attempt < Arcane::kMaxStagingTries ? 1u : 0u));   // a retry, then memoized
+    }
+    CHECK_FALSE(f.cache->UploadQueued(kTexA));   // refused: Resolve above answered from the memo, nothing is queued
+    CHECK(f.cache->ObjectCreateCount() == Arcane::kMaxStagingTries);   // the original and one per retry
+}
+
+TEST_CASE("mesh cache: a dedicated staging failure requeues for a bounded number of tries, then is refused", "[nri][upload]")
+{
+    MeshFixture f;
+    Arcane::NriUploadRing ring;
+    char notACommandBuffer = 0;   // the failure path records nothing
+    nri::CommandBuffer& noCommands = reinterpret_cast<nri::CommandBuffer&>(notACommandBuffer);
+    CHECK(f.cache->Resolve(kMeshA, 1) == nullptr);
+    for (std::uint32_t attempt = 1; attempt <= Arcane::kMaxStagingTries; ++attempt)
+    {
+        INFO("attempt " << attempt);
+        REQUIRE(f.cache->QueuedUploadCount() == 1u);
+        CHECK(f.cache->RefusedCount() == 0u);
+        Arcane::UploadBudget budget = Arcane::UploadBudget::WithCap(1);
+        const auto jobs = f.cache->BeginUploadFrame(budget);
+        REQUIRE(jobs.size() == 1u);
+        f.cache->RecordUpload(jobs[0], noCommands, ring, budget.cap);
+        f.cache->CommitUploads(true, f.device->Graves(), 1);
+    }
+    CHECK(f.cache->QueuedUploadCount() == 0u);
+    CHECK(f.cache->RefusedCount() == 1u);
+    CHECK(f.cache->ResidentCount() == 0u);
+}
+
+TEST_CASE("the one-shot renderers' bound is on upload progress, not on frames", "[nri][upload]")
+{
+    // A paced queue of ten: never refused, however many frames it takes.
+    Arcane::UploadSettleBound paced;
+    paced.maxStalled = 3;
+    paced.lowestQueued = 10;
+    for (std::size_t queued = 10; queued-- > 0;)
+        CHECK(paced.AllowAnotherFrame(queued));
+
+    // No progress at all: exactly maxStalled more frames.
+    Arcane::UploadSettleBound stuck;
+    stuck.maxStalled = 3;
+    stuck.lowestQueued = 2;
+    CHECK(stuck.AllowAnotherFrame(2));
+    CHECK(stuck.AllowAnotherFrame(2));
+    CHECK(stuck.AllowAnotherFrame(2));
+    CHECK_FALSE(stuck.AllowAnotherFrame(2));
+
+    // The settle frames after the queue empties count as no progress, and fit the default.
+    Arcane::UploadSettleBound settling;
+    settling.maxStalled = 3;
+    settling.lowestQueued = 0;
+    CHECK(settling.AllowAnotherFrame(0));
+
+    // A queue that climbs back does not earn new frames: only a new LOW does, so it terminates.
+    Arcane::UploadSettleBound bouncing;
+    bouncing.maxStalled = 1;
+    bouncing.lowestQueued = 3;
+    CHECK(bouncing.AllowAnotherFrame(2));         // a new low
+    CHECK(bouncing.AllowAnotherFrame(5));         // the one stall allowed
+    CHECK_FALSE(bouncing.AllowAnotherFrame(3));   // above the low of 2: still stalled
+    CHECK(bouncing.AllowAnotherFrame(1));         // a new low again
+}
+
+TEST_CASE("texture cache: ViewSerial names the view, and a dropped key's replacement gets another", "[nri][upload]")
+{
+    TextureFixture f;
+    f.cache->SetUploadMode(Arcane::NriUploadMode::Immediate);
+    CHECK(f.cache->ViewSerial(kTexA) == 0u);   // nothing yet
+    REQUIRE(f.cache->Resolve(kTexA) != nullptr);
+    const std::uint64_t first = f.cache->ViewSerial(kTexA);
+    CHECK(first != 0u);
+    CHECK(f.cache->ViewSerial(kTexA) == first);   // stable while the view lives
+
+    // NONE hands out one dummy handle, so the POINTER here is equal across the replacement: exactly the
+    // recycled address a pointer compare could not see.
+    nri::Descriptor* const firstView = f.cache->View(kTexA);
+    f.cache->Invalidate(kTexA, f.device->Graves(), 1);
+    CHECK(f.cache->ViewSerial(kTexA) == 0u);
+    REQUIRE(f.cache->Resolve(kTexA) != nullptr);
+    CHECK(f.cache->View(kTexA) == firstView);
+    CHECK(f.cache->ViewSerial(kTexA) != 0u);
+    CHECK(f.cache->ViewSerial(kTexA) != first);
+}
+
+TEST_CASE("texture cache: a queued key has no view serial until its upload commits", "[nri][upload]")
+{
+    TextureFixture f;
+    CHECK(f.cache->Resolve(kTexA) == nullptr);
+    CHECK(f.cache->ViewSerial(kTexA) == 0u);
+    (void)f.cache->BeginUploadFrame();
+    CHECK(f.cache->ViewSerial(kTexA) == 0u);
+    f.cache->CommitUploads(true, f.device->Graves(), 1);
+    CHECK(f.cache->ViewSerial(kTexA) != 0u);
+}
+
+TEST_CASE("texture cache: the drop hook hears every drop, ahead of the burial, on the drop's own lane and fence", "[nri][upload]")
+{
+    TextureFixture f;
+    f.cache->SetUploadMode(Arcane::NriUploadMode::Immediate);
+    struct Heard
+    {
+        nri::Texture*  texture = nullptr;
+        Arcane::Graveyard* graves = nullptr;
+        std::uint64_t  fence = 0;
+        int            count = 0;
+    } heard;
+    bool buriedWhenHeard = false;
+    bool textureDestroyed = false;
+    f.cache->SetDropHook([&](nri::Texture* texture, Arcane::Graveyard& graves, std::uint64_t fence)
+    {
+        heard = Heard{ texture, &graves, fence, heard.count + 1 };
+        // The hook's own burial, as ImGuiNri makes one: it must run ahead of the texture's.
+        graves.Bury(fence, [&, wasDestroyed = &textureDestroyed] { buriedWhenHeard = !*wasDestroyed; });
+    });
+    nri::Texture* const texture = f.cache->Resolve(kTexA);
+    REQUIRE(texture != nullptr);
+    Arcane::Graveyard lane;
+    f.cache->Invalidate(kTexA, lane, 7);
+    CHECK(heard.count == 1);
+    CHECK(heard.texture == texture);
+    CHECK(heard.graves == &lane);
+    CHECK(heard.fence == 7u);
+    lane.Bury(7, [&] { textureDestroyed = true; });   // after the cache's own view + texture burials
+    lane.Reap(7);
+    CHECK(buriedWhenHeard);
+
+    // An eviction takes the same path; a key the cache does not hold hears nothing.
+    REQUIRE(f.cache->Resolve(kTexA) != nullptr);
+    f.cache->Evict(kTexA, NriTextureCache::ColorSpace::Srgb, lane, 8);
+    CHECK(heard.count == 2);
+    f.cache->Invalidate(kTexB, lane, 8);
+    CHECK(heard.count == 2);
+    lane.Reap(8);
 }
 
 TEST_CASE("texture cache: a later small entry never overtakes a waiting one", "[nri][upload]")

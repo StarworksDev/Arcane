@@ -164,6 +164,9 @@ namespace Arcane
         // An eviction of a not-ready key cancels its queued upload: never upload into
         // a texture the account already dropped.
         CancelUpload(Key{ id, space });
+        // Whoever caches per raw texture pointer goes first, in this lane, ahead of the burial below.
+        if (m_dropHook && it->second.texture)
+            m_dropHook(it->second.texture, graveyard, fence);
         // A bindless slot (mapped or pending) may still view this texture from
         // ANOTHER context's in-flight submit. Its destruction then joins the
         // slot's retire (spec 3.5: the descriptor and the texture wait on the
@@ -294,6 +297,17 @@ namespace Arcane
         if (found->second.state == ResidentState::PendingCook)
             return m_placeholders[static_cast<std::size_t>(space)].view;
         return found->second.view;
+    }
+
+    std::uint64_t NriTextureCache::ViewSerial(const Guid& id, ColorSpace space) const noexcept
+    {
+        const auto found = m_textures.find(Key{ id, space });
+        if (found == m_textures.end())
+            return 0;
+        // The same answer View() gives: a PendingCook key shows the shared checkerboard.
+        if (found->second.state == ResidentState::PendingCook)
+            return m_placeholders[static_cast<std::size_t>(space)].viewSerial;
+        return found->second.view ? found->second.viewSerial : 0;
     }
 
     nri::Texture* NriTextureCache::Resolve(const Guid& id, ColorSpace space)
@@ -757,6 +771,7 @@ namespace Arcane
             resident.view = nullptr;
             return false;
         }
+        resident.viewSerial = ++m_viewSerials;
         return true;
     }
 
@@ -868,7 +883,7 @@ namespace Arcane
             return;
 
         const nri::CoreInterface& core = m_device->Core();
-        const PendingUpload& pending = *r->pending;
+        PendingUpload& pending = *r->pending;
         const nri::DeviceDesc& deviceDesc = core.GetDeviceDesc(m_device->Device());
         const std::uint32_t rowAlign   = deviceDesc.memoryAlignment.uploadBufferTextureRow;
         const std::uint32_t sliceAlign = deviceDesc.memoryAlignment.uploadBufferTextureSlice;
@@ -934,9 +949,9 @@ namespace Arcane
 
         if (cls == Staging::Dedicated)
         {
-            // Larger than a whole ring slot: one committed HOST_UPLOAD buffer, uploaded
-            // THIS frame (not a retry; the ring's overflow count never moves). The
-            // staging buffer is not a graph resource; it is buried after the submit.
+            // Over the budget's cap or larger than a whole ring slot: one committed HOST_UPLOAD
+            // buffer, uploaded THIS frame (not a retry; the ring's overflow count never moves).
+            // The staging buffer is not a graph resource; it is buried after the submit.
             nri::BufferDesc desc = {};
             desc.size  = total;
             desc.usage = nri::BufferUsageBits::NONE;
@@ -950,10 +965,19 @@ namespace Arcane
                 mapped = core.MapBuffer(*staging, 0, nri::WHOLE_SIZE);
                 ok = mapped != nullptr;
             }
-            if (!ok)
+            if (ok)
             {
-                if (staging)
-                    m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
+                writeAndCopy(*staging, static_cast<std::uint8_t*>(mapped), 0);
+                core.UnmapBuffer(*staging);
+                m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
+                return;
+            }
+            if (staging)
+                m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
+            // A burst can fail where this payload alone would not (spec Revision 6), so a failure
+            // takes the retry branch below, a bounded number of times, before it is memoized.
+            if (++pending.stagingTries >= kMaxStagingTries)
+            {
                 ReportIssue("the dedicated staging buffer for a texture upload could not be created or mapped "
                             "-- the upload is refused");
                 // Memoized refusal: the key keeps its (now empty) entry; nothing retries it.
@@ -967,14 +991,10 @@ namespace Arcane
                 CancelUpload(key);
                 return;
             }
-            writeAndCopy(*staging, static_cast<std::uint8_t*>(mapped), 0);
-            core.UnmapBuffer(*staging);
-            m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
-            return;
         }
 
-        // RETRY: the payload fits an empty slot but not what is left of this one. Bury
-        // the device-local texture (this command buffer references it only through the
+        // RETRY: the payload fits an empty slot but not what is left of this one, or its
+        // dedicated staging failed above. Bury the device-local texture (this command buffer references it only through the
         // upload entry barrier, so it waits for this submit's fence) and queue a fresh
         // one for the next frame, whose cursor starts at 0. Allocate was not called, so
         // the overflow count did not move.

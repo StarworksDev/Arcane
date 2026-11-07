@@ -46,7 +46,8 @@ namespace Arcane::Editor
             ARC_REFLECT_ATTR(Flags, CVarFlags::Dev)
             ARC_REFLECT_ATTR(Keywords, "asset browser preview retries give up")
             ARC_REFLECT_ATTR(Tooltip, "How many times the thumbnail renderer may fail and be rebuilt before thumbnails are "
-                                      "switched off for the rest of the session.")
+                                      "switched off for the rest of the session. Also how many frames without upload progress a "
+                                      "thumbnail or a cover waits before giving up on that picture.")
         ARC_REFLECT_FIELD(EditorThumbnailSettings, meshFovDegrees)
             ARC_REFLECT_ATTR(DisplayName, "Mesh field of view") ARC_REFLECT_ATTR(Range, 10.0, 120.0)
             ARC_REFLECT_ATTR(Flags, CVarFlags::Dev)

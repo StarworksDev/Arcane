@@ -113,14 +113,23 @@ namespace Arcane
         }
         else
         {
-            if (!m_warnedFull)
+            ReclaimOldestUnreferenced();
+            if (m_free.empty())
             {
-                m_warnedFull = true;
-                ARC_WARN("[nri] BindlessTable: capacity {} exhausted -- Add refused, returning "
-                         "kInvalidSlot (further occurrences are silent)",
-                         m_capacity);
+                // Something pending is on its way to the free list, and the caller re-asks
+                // on a later frame. With nothing pending the table really is full of
+                // referenced slots.
+                if (m_pending.empty() && !m_warnedFull)
+                {
+                    m_warnedFull = true;
+                    ARC_WARN("[nri] BindlessTable: capacity {} exhausted -- Add refused, returning "
+                             "kInvalidSlot (further occurrences are silent)",
+                             m_capacity);
+                }
+                return kInvalidSlot;
             }
-            return kInvalidSlot;
+            slot = m_free.back();
+            m_free.pop_back();
         }
 
         Slot& s = m_slots[slot];
@@ -128,7 +137,32 @@ namespace Arcane
         s.srv   = srv;
         s.owner = owner;
         s.state = State::Live;
+        s.mintedAt = ++m_mintCount;
         return slot;
+    }
+
+    void BindlessTable::ReclaimOldestUnreferenced()
+    {
+        // What is already pending covers that many asks: the same ask repeating every frame
+        // until its slot retires must not cost one more mapping each time.
+        ++m_refusedThisFrame;
+        if (m_pending.size() >= m_refusedThisFrame)
+            return;
+
+        std::uint32_t oldest = kInvalidSlot;
+        for (const auto& [key, mapping] : m_map)
+        {
+            if (mapping.refs != 0 || m_slots[mapping.slot].state != State::Live)
+                continue;
+            if (oldest == kInvalidSlot || m_slots[mapping.slot].mintedAt < m_slots[oldest].mintedAt)
+                oldest = mapping.slot;
+        }
+        if (oldest == kInvalidSlot)
+            return;
+        // The mapping path: holders drop the index before it can mean anything else. It waits on
+        // the last-use record, so if an earlier frame may still read it, it is free later, not now.
+        DropMapping(oldest);
+        PendIndex(oldest, false);
     }
 
     void BindlessTable::Release(std::uint32_t slot)
@@ -384,6 +418,20 @@ namespace Arcane
             if (it != m_map.end() && it->second.refs == 0)
                 ReleaseAll(k.guid, k.space);
         }
+        m_refusedThisFrame = 0;
+        ProcessPending();
+    }
+
+    void BindlessTable::StampReferenced()
+    {
+        ResidencyAccount* account = m_device ? m_device->ResidencyIfCreated() : nullptr;
+        if (!account)
+            return;
+        for (const auto& [key, mapping] : m_map)
+            if (mapping.refs > 0)
+                account->Stamp(key.guid, ResidencySlice::Texture,
+                               key.space == ColorSpace::Display ? NriTextureCache::ColorSpace::Display
+                                                                : NriTextureCache::ColorSpace::Srgb);
     }
 
     void BindlessTable::ReleaseAll(const Guid& guid, ColorSpace space)
@@ -455,20 +503,15 @@ namespace Arcane
     {
         // A mapped texture sampled through a bindless slot is DRAWN, though no cache
         // Resolve ran for it this frame: stamp it on the device residency account so
-        // a texture a live mesh material samples is never the account's oldest.
-        // (An orphaned mapping with no material ref is stamped every record too, so it
-        // does not age: accepted, Task 4 review Q5.)
-        ResidencyAccount* account = m_device ? m_device->ResidencyIfCreated() : nullptr;
+        // a texture a live mesh material samples is never the account's oldest. An
+        // orphaned mapping (no material reference) is not, so it ages.
+        StampReferenced();
         for (std::uint32_t i = 0; i < m_slots.size(); ++i)
         {
             Slot& s = m_slots[i];
             if (s.state == State::Live)
             {
                 m_life->NoteSample(i, context, fence);
-                if (account && s.mapped)
-                    account->Stamp(s.guid, ResidencySlice::Texture,
-                                   s.space == ColorSpace::Display ? NriTextureCache::ColorSpace::Display
-                                                                  : NriTextureCache::ColorSpace::Srgb);
             }
             else if (s.state == State::Pending
                      && std::find(s.pendingNotedBy.begin(), s.pendingNotedBy.end(), context)

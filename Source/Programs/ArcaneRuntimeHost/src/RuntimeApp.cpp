@@ -417,6 +417,11 @@ bool RuntimeApp::StageSpriteTables(Arcane::HostBoot::BootContext&)
         if (Arcane::NriGraphContext* graph = Graph())
             graph->FlushMeshAlbedoReleases();
     };
+    rs.stampReferencedAlbedoSlots = [this]()
+    {
+        if (Arcane::NriGraphContext* graph = Graph())
+            graph->StampReferencedMeshAlbedos();
+    };
     rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
     {
         if (Arcane::NriGraphContext* graph = Graph())

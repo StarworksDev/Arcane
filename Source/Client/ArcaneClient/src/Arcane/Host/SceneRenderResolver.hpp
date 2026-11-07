@@ -142,6 +142,11 @@ namespace Arcane
             // still at zero is released. Null leaves zero-reference keys queued.
             std::function<void()> flushMeshAlbedoReleases;
 
+            // Called once per Refresh, BEFORE the sweeps: every albedo a material holds a
+            // reference on counts as drawn now, so a Charge in the sweeps below cannot evict
+            // a visible one for a colder-looking stamp (spec Revision 6). Null skips it.
+            std::function<void()> stampReferencedAlbedoSlots;
+
             // F2c Plan 2 Task 6: drop resident GPU buffers for this .arcmesh
             // guid. Injected for the same reason resolveMeshAlbedoSlot is --
             // this class holds no device. Null (tests that do not care, a host

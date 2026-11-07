@@ -469,35 +469,19 @@ namespace Arcane::Editor
     // ref-count -- so a later Resolve may land its replacement on the address
     // this one just vacated. ImGuiNri caches per texture by RAW POINTER, so a
     // bit-identical id would report a cache HIT on a descriptor set naming the
-    // DESTROYED texture. The evict therefore runs BEFORE the destroy, and
-    // unconditionally rather than "if the pointer changed" -- an unchanged
-    // pointer is precisely the case a recycled address fakes.
+    // DESTROYED texture. The cache's drop path takes that entry with it, in the
+    // chrome context's own lane, ahead of the texture (SetDropHook, spec Revision
+    // 6), which is also what an eviction does.
     //
-    // COST, stated because it is not free: InvalidateUserTextureNow idles the
-    // whole device unconditionally (ImGuiNri.cpp's own note). Both call sites
-    // are rare -- a material edit, a project switch -- and the `e.texture == 0`
-    // guard means an entry nothing ever uploaded costs nothing at all.
+    // WHENEVER THE KEY EXISTS, not only when a draw has already got a texture id
+    // out of it: a picture that is queued, or ready and not asked for since, is
+    // still the OLD picture, and the next draw would be served it. A no-op for a
+    // key the cache does not hold.
     void MaterialPreviewHarvester::Impl::ReleaseThumbTexture(Entry& e)
     {
-        if (e.texture == 0)
-        {
-            // Created and queued on the chrome cache but not uploaded yet (the texture
-            // id is only handed out once it is ready): the queued copy holds the OLD
-            // pixels, so drop it now or it would upload them over the new ones.
-            if (e.thumbId.IsValid())
-                if (Arcane::NriGraphContext* chrome = Chrome())
-                    if (Arcane::NriTextureCache* cache = chrome->Textures())
-                        if (cache->UploadQueued(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display))
-                            chrome->InvalidateContentTexture(e.thumbId);
-            return;
-        }
-        if (Arcane::NriGraphContext* chrome = Chrome())
-        {
-            if (Arcane::RenderOverlayNode* hud = chrome->ImGuiHud())
-                hud->InvalidateUserTextureNow(
-                    reinterpret_cast<nri::Texture*>(static_cast<std::intptr_t>(e.texture)));
-            chrome->InvalidateContentTexture(e.thumbId);
-        }
+        if (e.thumbId.IsValid())
+            if (Arcane::NriGraphContext* chrome = Chrome())
+                chrome->InvalidateContentTexture(e.thumbId);
         e.texture = 0;
     }
 
@@ -520,7 +504,7 @@ namespace Arcane::Editor
         // point the chrome context is about to be destroyed, and
         // ~NriGraphContext's own ordering covers a texture and the ImGuiNri
         // that cached it when both belong to the SAME context (see
-        // EditorApp's m_graphLogoTexture, which states the distinction).
+        // EditorApp's m_graphLogoId, which states the distinction).
         // Paying N device idles on the way out would buy nothing.
         for (auto& [id, e] : im.entries)
             e.texture = 0;
@@ -1398,7 +1382,9 @@ namespace Arcane::Editor
         // draws. So while the vehicle reports uploads in flight the same picture is
         // rendered again -- bounded by the retry budget this harvester already owns
         // (editor.thumbnail.maxRetries, default 3 = the upload frame, the first
-        // drawing frame, and one spare). The stash SetMeshSupply serves from stays
+        // drawing frame, and one spare) of frames WITHOUT PROGRESS, because the budget
+        // paces a picture with several large images over several upload frames, and being
+        // paced is not failing (UploadSettleBound). The stash SetMeshSupply serves from stays
         // alive across the loop; it is released only after the last frame.
         // NOTE (review, fix round 3): no path where a slot flips with NOTHING pending has been constructed -- a texture
         // becomes ready only through a committed upload, which leaves HasPendingUploads() true for one more frame, and
@@ -1407,11 +1393,12 @@ namespace Arcane::Editor
         // Render again while uploads are in flight, an albedo is still on its way, OR a slot changed since the
         // picture last rendered (that picture used the old slot and is stale).
         SlotState slots = refreshAlbedoSlots();
-        for (int again = 0;
-             outcome == Arcane::NriGraphContext::FrameOutcome::Presented
-             && (ctx->HasPendingUploads() || slots.changed || slots.outstanding)
-             && again < thumb.maxRetries;
-             ++again)
+        Arcane::UploadSettleBound settle;
+        settle.maxStalled   = thumb.maxRetries;
+        settle.lowestQueued = ctx->QueuedUploadCount();
+        while (outcome == Arcane::NriGraphContext::FrameOutcome::Presented
+               && (ctx->HasPendingUploads() || slots.changed || slots.outstanding)
+               && settle.AllowAnotherFrame(ctx->QueuedUploadCount()))
         {
             fillBatch();
             outcome = ctx->RenderFrameOffscreen(vp);
@@ -1425,7 +1412,7 @@ namespace Arcane::Editor
             // failure path does for a picture that cannot be made -- the item is
             // Refused (memoized, kind icon), not published half-drawn.
             ARC_WARN("[thumbs] the preview for {} {} still had uploads in flight after {} extra frame(s) "
-                     "-- giving up on it", r.subject == Subject::Mesh ? "mesh" : "material",
+                     "without progress -- giving up on it", r.subject == Subject::Mesh ? "mesh" : "material",
                      r.id.ToString(), thumb.maxRetries);
             ReleaseMeshHarvest();
             return HarvestOutcome::Refused;
@@ -1513,8 +1500,10 @@ namespace Arcane::Editor
     std::uint64_t MaterialPreviewHarvester::Impl::EnsureTexture(const Arcane::Guid& material,
                                                                 Entry& e) const
     {
-        if (e.texture != 0)
-            return e.texture;
+        // ASKED ON EVERY DRAW, never answered from a memo (spec Revision 6). The ask is what tells
+        // the device account this thumbnail is drawn, and the cache may have dropped the texture
+        // since the last one: a raw pointer kept across frames would dangle.
+        e.texture = 0;
         if (!e.pixels.Valid() || !e.thumbId.IsValid())
             return 0;
         Arcane::NriGraphContext* chrome = Chrome();

@@ -405,6 +405,8 @@ namespace Arcane
         // graph context exists).
         if (im.services.ensureAlbedoSlotObserver)
             im.services.ensureAlbedoSlotObserver(m_impl, im.slotObserver);
+        if (im.services.stampReferencedAlbedoSlots)
+            im.services.stampReferencedAlbedoSlots();
 
         im.globals.time           = (float)frame.sceneTime.value_or(frame.now);
         im.globals.deltaTime      = (float)frame.dt;

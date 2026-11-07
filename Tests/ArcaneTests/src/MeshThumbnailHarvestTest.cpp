@@ -58,6 +58,7 @@
 
 #include <Arcane/Guid.hpp>
 #include <Arcane/Mesh/MeshAsset.hpp>
+#include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/RenderErrorLatch.hpp>
 
 // The golden set below (F2c debts arc, Task E) drives the harvester against the
@@ -224,10 +225,10 @@ TEST_CASE("pixel: two meshes harvested through ONE preview vehicle each render t
 
     // THE ASSERTION (final-review C1): the second harvest through a shared vehicle
     // draws the CUBE, pixel for pixel the same picture the cube gets alone.
-    CHECK(cubeShared == cubeAlone);
+    CHECK((cubeShared == cubeAlone));   // (parenthesized: the reporter aborts printing PNG byte vectors)
     // ...and the two assets really are different pictures, so the check above is
     // pinning "the right geometry" rather than "everything looks the same".
-    CHECK(sphereShared != cubeAlone);
+    CHECK((sphereShared != cubeAlone));
 
     // No OOB index read, no refused upload, no validation error on either harvest.
     CHECK(Arcane::RenderErrorCount() == errorsBefore);
@@ -788,7 +789,7 @@ static void CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend backe
         REQUIRE(!flatAlone.empty());
     }
     // The control really shows the albedo (otherwise equality below would prove nothing).
-    REQUIRE(texturedAlone != flatAlone);
+    REQUIRE((texturedAlone != flatAlone));   // (parenthesized: the reporter aborts printing PNG byte vectors)
 
     // ---- THE SUBJECT: the sprite is started first, the mesh-kind material second, and the sprite's
     // compile result lands AFTER both are started, so the sprite is harvested first (LIFO) ----
@@ -847,7 +848,7 @@ static void CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend backe
     }
     compiler.Shutdown();
 
-    CHECK(texturedShared == texturedAlone);   // the albedo is there, not the flat colour baked before it landed
+    CHECK((texturedShared == texturedAlone));   // the albedo is there, not the flat colour baked before it landed
     CHECK(Arcane::RenderErrorCount() == errorsBefore);
 
     std::error_code ec;
@@ -864,4 +865,207 @@ TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through ano
           "[gpu][thumbs]")
 {
     CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend::Vulkan);
+}
+
+// ===========================================================================
+// Plan C final review C1 + Task 5 minor 6: a thumbnail is a raw nri::Texture* in the
+// chrome cache. The holder re-asks on every draw, so a texture the cache dropped (an
+// eviction takes the same drop path as this invalidation) is never handed to ImGui
+// again; and a re-harvest drops the old picture even when no draw asked for it since
+// it became resident.
+// ===========================================================================
+static void CheckThumbHolderReAsks(Arcane::GraphicsBackend backend)
+{
+    ARC_REQUIRE_BACKEND(backend);
+
+    Arcane::HostConfig cfg;
+    cfg.backend  = backend;
+    cfg.headless = true;
+    auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
+    REQUIRE(chrome != nullptr);
+    auto batch = Arcane::Batcher2D::Create();
+    REQUIRE(batch != nullptr);
+
+    const fs::path assets = FreshDir("reask_assets");
+    const fs::path thumbs = FreshDir("reask_thumbs");
+    const fs::path cubeFile = assets / "cube.arcmesh";
+    const Guid cubeId = WriteMesh(cubeFile, Arcane::MeshSource::Cube, "probe-cube");
+
+    MaterialPreviewHarvester::Services s;
+    s.chromeGraph = [&]() { return &chrome->Graph(); };
+    s.hostConfig  = &cfg;
+    s.backend     = backend;
+    s.resolveAsset = [&](const Guid& g) -> std::optional<fs::path>
+    {
+        if (g == cubeId)
+            return cubeFile;
+        return std::nullopt;
+    };
+    s.thumbnailDir = [thumbs]() { return thumbs; };
+    MaterialPreviewHarvester h(s);
+
+    Guid thumbId;   // the synthetic guid, seen as the chrome cache asks its supply for the pixels
+    chrome->Graph().SetPixelSupply([&](const Guid& g) -> const Arcane::PixelData*
+    {
+        const Arcane::PixelData* p = h.PixelsForThumb(g);
+        if (p)
+            thumbId = g;
+        return p;
+    });
+    const auto chromeFrames = [&](int count)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            batch->Begin(256, 128);
+            Arcane::NriGraphContext::FrameDesc frame;
+            frame.batch = batch.get();
+            REQUIRE(chrome->Graph().RenderFrameOffscreen(frame) == Arcane::NriGraphContext::FrameOutcome::Presented);
+        }
+    };
+
+    const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
+    double clock = 0.0;
+    h.RequestMesh(cubeId);
+    Drain(h, clock);
+    REQUIRE(thumbId.IsValid());   // the harvest asked the chrome cache, so the picture is queued there
+
+    // MINOR 6: the picture became resident in the chrome cache and NO draw has asked for it since, so the holder has
+    // no texture id. A re-harvest must still drop it, or the next draw is served the old picture.
+    chromeFrames(4);
+    const std::uint64_t createsBefore = chrome->Graph().Textures()->ObjectCreateCount();
+    h.InvalidateMesh(cubeId);
+    h.RequestMesh(cubeId);
+    Drain(h, clock);
+    CHECK(chrome->Graph().Textures()->ObjectCreateCount() == createsBefore + 1u);   // the new picture got a new texture
+
+    // C1: the holder's id is live while the cache has the texture...
+    chromeFrames(4);
+    const std::uint64_t id = h.ThumbTextureId(cubeId);
+    CHECK(id != 0u);
+    // ...and once the cache drops it, the next ask answers "not yet", never the dead pointer. It is queued again.
+    chrome->Graph().InvalidateContentTexture(thumbId);
+    CHECK(h.ThumbTextureId(cubeId) == 0u);
+    CHECK(chrome->Graph().Textures()->UploadQueued(thumbId, Arcane::NriTextureCache::ColorSpace::Display));
+    chromeFrames(4);
+    CHECK(h.ThumbTextureId(cubeId) != 0u);   // and it comes back
+
+    CHECK(Arcane::RenderErrorCount() == errorsBefore);
+
+    h.Shutdown();
+    chrome->Graph().SetPixelSupply(nullptr);
+    std::error_code ec;
+    fs::remove_all(fs::temp_directory_path() / "arcane_mesh_thumb_harvest", ec);
+}
+
+TEST_CASE("a thumbnail holder re-asks a dropped texture, and a re-harvest drops an unasked picture (d3d12)", "[gpu][thumbs]")
+{
+    CheckThumbHolderReAsks(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("a thumbnail holder re-asks a dropped texture, and a re-harvest drops an unasked picture (vulkan)", "[gpu][thumbs]")
+{
+    CheckThumbHolderReAsks(Arcane::GraphicsBackend::Vulkan);
+}
+
+// ===========================================================================
+// Plan C final review I3: the budget takes at most one over-cap payload per frame, so a picture with several large images
+// needs one upload frame each, and that must not read as a failure. maxRetries bounds frames WITHOUT PROGRESS.
+// ===========================================================================
+static void CheckPacedPictureIsNotRefused(Arcane::GraphicsBackend backend)
+{
+    ARC_REQUIRE_BACKEND(backend);
+
+    Arcane::ShaderSourceProvider sources;
+    sources.AddRoot("data/shaders");
+    Arcane::ShaderCompiler compiler;
+    REQUIRE(compiler.InitializeWithDebounce(0.0));
+    REQUIRE(compiler.IsAvailable());
+
+    Arcane::HostConfig cfg;
+    cfg.backend  = backend;
+    cfg.headless = true;
+    auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
+    REQUIRE(chrome != nullptr);
+
+    // Six declared images, each 1100x1100 RGBA8 (~5 MB of staging: over the cap at any budget setting). The
+    // default maxRetries is 3, so a bound on frames would run out with images still queued.
+    constexpr int kImages = 6;
+    Arcane::PixelData image;
+    image.width = image.height = 1100;
+    image.rgba.assign(1100u * 1100u * 4u, 0xA0);
+    std::vector<Guid> images;
+    Arcane::MaterialAssetData d;
+    d.id   = Guid::Generate();
+    d.name = "paced";
+    d.kind = "sprite";
+    std::string shade = "float4 shade(Varyings v) { return float4(0.0, 0.0, 0.0, 1.0)";
+    for (int i = 0; i < kImages; ++i)
+    {
+        const std::string name = "Detail" + std::to_string(i);
+        images.push_back(Guid::Generate());
+        d.snippet += "//@param texture " + name + "\n";
+        d.params.emplace_back(name, Arcane::MatParamValue::MakeTexture(images.back()));
+        shade += " + " + name + ".Sample(MaterialSampler, v.uv) * 0.1";
+    }
+    d.snippet += shade + "; }\n";
+
+    const fs::path assets = FreshDir("paced_assets");
+    const fs::path thumbs = FreshDir("paced_thumbs");
+    const fs::path file = assets / "paced.arcmat";
+    REQUIRE(Arcane::SaveMaterialAsset(file, d));
+
+    MaterialPreviewHarvester::Services s;
+    s.chromeGraph = [&]() { return &chrome->Graph(); };
+    s.hostConfig  = &cfg;
+    s.compiler    = &compiler;
+    s.sources     = &sources;
+    s.backend     = backend;
+    s.resolveAsset = [&](const Guid& g) -> std::optional<fs::path>
+    {
+        if (g == d.id)
+            return file;
+        return std::nullopt;
+    };
+    s.pixelSupply = [&](const Guid& g) -> const Arcane::PixelData*
+    {
+        for (const Guid& known : images)
+            if (known == g)
+                return &image;
+        return nullptr;
+    };
+    s.thumbnailDir = [thumbs]() { return thumbs; };
+
+    const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
+    MaterialPreviewHarvester h(s);
+    chrome->Graph().SetPixelSupply([&](const Guid& g) { return h.PixelsForThumb(g); });
+    h.Request(d.id);
+    double clock = 0.0;
+    for (int i = 0; i < 1500 && h.PendingCount() != 0; ++i)
+    {
+        compiler.Poll(clock);
+        for (const Arcane::ShaderCompileResult& r : compiler.Drain())
+            h.OfferCompileResult(r);
+        h.Pump(clock);
+        clock += 1.0 / 60.0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(h.PendingCount() == 0u);
+    CHECK(fs::exists(thumbs / (d.id.ToString() + ".png")));   // published, not Refused
+    CHECK(Arcane::RenderErrorCount() == errorsBefore);
+
+    h.Shutdown();
+    chrome->Graph().SetPixelSupply(nullptr);
+    compiler.Shutdown();
+    std::error_code ec;
+    fs::remove_all(fs::temp_directory_path() / "arcane_mesh_thumb_harvest", ec);
+}
+
+TEST_CASE("a picture paced over several upload frames is published, not refused (d3d12)", "[gpu][thumbs]")
+{
+    CheckPacedPictureIsNotRefused(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("a picture paced over several upload frames is published, not refused (vulkan)", "[gpu][thumbs]")
+{
+    CheckPacedPictureIsNotRefused(Arcane::GraphicsBackend::Vulkan);
 }

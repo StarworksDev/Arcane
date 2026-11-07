@@ -22,6 +22,7 @@
 #include <Arcane/Render/RenderBudgetSettings.hpp>   // RenderPostSettings -- the device-less post clamp
 #include <Arcane/Render/RenderDeviceSettings.hpp>   // MakeRenderDeviceDesc -- render.debug.*, render.uploadRingBytesPerFrame, the graph formats
 #include <Arcane/Render/Nri/NriDiagnostics.hpp>     // the crash chain, armed by whichever device exists
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>   // the albedo memo hit stamps it
 #include <Arcane/Render/RenderErrorLatch.hpp>   // the tagged "nri-graph" error seam
 #include <Arcane/Render/PostChainCache.hpp>         // PostChainDesc -- the frame's post-chain shape
 #include <Arcane/Render/GpuInstrumentation.hpp>       // GpuDeviceLostObserved -- the device-lost teardown gate
@@ -463,6 +464,16 @@ namespace Arcane
         if (!m_textures)
             return false;   // already logged
 
+        // The drop path takes ImGui's per-texture entries with it (spec Revision 6): both HUD
+        // nodes are built below and may stay null, and a dropped texture is on this lane.
+        m_textures->SetDropHook([this](nri::Texture* texture, Graveyard& graves, std::uint64_t fence)
+        {
+            if (m_imguiHud)
+                (void)m_imguiHud->InvalidateUserTexture(texture, graves, fence);
+            if (m_imguiGame)
+                (void)m_imguiGame->InvalidateUserTexture(texture, graves, fence);
+        });
+
         // Device-wide texture invalidation reaches THIS context's cache through
         // this hook (NriDevice::InvalidateTexture); the dtor unregisters it.
         m_device->RegisterContext(this, [this](const Guid& id) { InvalidateContentTexture(id); },
@@ -711,7 +722,13 @@ namespace Arcane
             return BindlessTable::kInvalidSlot;
         const std::uint32_t known = bindless->Lookup(id, BindlessTable::ColorSpace::Srgb);
         if (known != BindlessTable::kInvalidSlot)
+        {
+            // Asked for means about to be drawn. Never a cache Resolve here: another context may
+            // own the mapped copy, and resolving would make this context upload its own.
+            if (ResidencyAccount* account = m_device->ResidencyIfCreated())
+                account->Stamp(id, ResidencySlice::Texture, NriTextureCache::ColorSpace::Srgb);
             return known;
+        }
 
         // Srgb, the scene default (NriTextureCache::ColorSpace) -- a mesh
         // albedo is scene content like a sprite's own texture, never chrome.
@@ -809,6 +826,14 @@ namespace Arcane
             return;
         if (BindlessTable* bindless = m_device->BindlessIfCreated())
             bindless->FlushZeroRefs();
+    }
+
+    void NriGraphContext::StampReferencedMeshAlbedos()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            bindless->StampReferenced();
     }
 
     void NriGraphContext::ReleaseAllMeshAlbedoSlots()

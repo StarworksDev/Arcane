@@ -115,6 +115,7 @@
 #include <Arcane/Render/FramePacing.hpp>   // kMaxFramesInFlight, FramesInFlight()
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -423,8 +424,10 @@ namespace Arcane
             // sort splits a run per texture). t0 is the only thing that
             // differs, so a variant is one set per frame slot, allocated
             // lazily on first use of that (material, texture) pair and written
-            // ONCE -- never rewritten, which is what keeps this node free of
-            // ResetDescriptorPool and its fence discipline.
+            // ONCE -- never rewritten while it may be read, which is what keeps
+            // this node free of ResetDescriptorPool and its fence discipline. A
+            // variant whose texture view changed (an eviction, a cook) retires
+            // its sets and takes others; see RetireWhenUnread.
             //
             // `variants[0]` is always the NIL-texture variant (the white
             // texel), which is what an untextured span through a registered
@@ -433,8 +436,17 @@ namespace Arcane
             {
                 Guid                id{};
                 nri::DescriptorSet* set[kMaxFramesInFlight]{};
+                // NriTextureCache::ViewSerial of the view these sets bake at t0.
+                std::uint64_t       viewSerial = 0;
             };
             std::vector<TextureVariant> variants;
+            // Retired variants' sets, usable again once the lane's fence passes them.
+            struct VariantSets
+            {
+                nri::DescriptorSet* set[kMaxFramesInFlight]{};
+            };
+            std::shared_ptr<std::vector<VariantSets>> freeVariantSets = std::make_shared<std::vector<VariantSets>>();
+            std::uint32_t variantsAllocated = 0;   // out of the pool, of 1 + Caps::spriteTextures
 
             // BuildMaterial's resolved shape, kept so a later variant can be
             // written without rebuilding the layout or re-resolving the
@@ -473,6 +485,10 @@ namespace Arcane
         // never disagree about a set's contents.
         void WriteMaterialSet(const MaterialSlot& slot, nri::DescriptorSet& set,
                               std::uint32_t frameSlot, nri::Descriptor* spriteView);
+        // Hands `recycle` to this context's lane at the last submitted fence, which covers
+        // every frame that can have bound what it recycles. So a set whose view died is
+        // rewritten only once nothing reads it, with no device idle. NRI cannot free one set.
+        void RetireWhenUnread(std::function<void()> recycle);
         // The BUILT-IN set for `id` as a pure LOOKUP -- record-time only, and
         // deliberately not the Ensure above: nothing inside the recording
         // window may allocate a set or upload a texture.
@@ -559,8 +575,22 @@ namespace Arcane
         std::unordered_set<std::uint16_t>                m_materialRefused;
         // The BUILT-IN per-texture sets, keyed by asset Guid. `m_set` (above)
         // is the nil-Guid one; these bind a real image at t0 instead. Written
-        // once each, never rewritten -- see the file header.
-        std::unordered_map<Guid, nri::DescriptorSet*>    m_spriteSets;
+        // once per view and never while one may be read: each draw asks the
+        // cache (which is what tells the device account it is drawn) and compares
+        // `viewSerial`, and a set whose view is gone retires (RetireWhenUnread).
+        // An entry with no set is a sticky budget or allocation refusal.
+        struct SpriteSet
+        {
+            nri::DescriptorSet* set = nullptr;
+            std::uint64_t       viewSerial = 0;   // NriTextureCache::ViewSerial of the view baked at t0
+        };
+        std::unordered_map<Guid, SpriteSet>              m_spriteSets;
+        std::shared_ptr<std::vector<nri::DescriptorSet*>> m_freeSpriteSets =
+            std::make_shared<std::vector<nri::DescriptorSet*>>();
+        std::uint32_t                                    m_spriteSetsAllocated = 0;   // of Caps::spriteTextures
+        // Registered materials whose images are queued this frame: drawn through the plain
+        // sprite pipeline ON PURPOSE, so PipelineFor has nothing to warn about.
+        std::unordered_set<std::uint16_t>                m_materialsHeld;
 
         // One WARN, not one per span per frame, for the degradations a reader
         // must be able to see: a material this node could not build (drawn

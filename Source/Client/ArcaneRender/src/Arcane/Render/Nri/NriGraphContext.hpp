@@ -1524,6 +1524,14 @@ namespace Arcane
                 || (m_meshBuffers && m_meshBuffers->HasPendingUploads());
         }
 
+        // Uploads queued and not yet in a snapshot, both caches: what a one-shot renderer's
+        // progress bound counts (UploadSettleBound).
+        [[nodiscard]] std::size_t QueuedUploadCount() const noexcept
+        {
+            return (m_textures ? m_textures->QueuedUploadCount() : 0u)
+                 + (m_meshBuffers ? m_meshBuffers->QueuedUploadCount() : 0u);
+        }
+
         // TEST ONLY: puts both residency caches on the old blocking UploadData path
         // (NriUploadMode::Immediate), so a node-level pixel case that renders ONE frame
         // of a scene whose meshes and textures are first used there sees them drawn. The
@@ -1667,6 +1675,10 @@ namespace Arcane
         // release across a whole-cache Clear). SceneRenderResolver::Refresh calls it
         // once its mesh sweep has re-resolved.
         void FlushMeshAlbedoReleases();
+        // Ahead of the frame's Refresh sweep: every albedo a material holds a reference on
+        // counts as drawn now, so that sweep's Charges cannot take it for a cold entry
+        // (BindlessTable::StampReferenced).
+        void StampReferencedMeshAlbedos();
 
         // Project switch: releases every mapping on the device table (same
         // semantics as InvalidateMeshAlbedoSlot, for all of them).

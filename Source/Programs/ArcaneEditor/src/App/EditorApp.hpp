@@ -2053,11 +2053,8 @@ namespace Arcane::Editor
         // needs a caller-side hook; same-context does not.
         Arcane::Guid      m_graphLogoId;
         Arcane::PixelData m_graphLogoPixels;
-        // mutable: the mark's texture is created at boot but UPLOADED by a later frame
-        // (Plan C Task 5 deferral), so the first ToolbarLogoTextureId() calls that find
-        // it not ready re-ask the cache until the id appears.
-        mutable std::uint64_t m_graphLogoTexture = 0;   // ImTextureID (raw nri::Texture*)
-        // The toolbar's mark -- 0 = no mark (or not uploaded yet), which
+        // The toolbar's mark as an ImTextureID (raw nri::Texture*), asked of the chrome cache
+        // on every draw and never kept: 0 = no mark, or not uploaded (again) yet, which
         // DrawSimTimeToolbar already treats as "skip it".
         [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept;
 
