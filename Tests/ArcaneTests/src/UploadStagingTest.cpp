@@ -450,6 +450,71 @@ TEST_CASE("texture cache: a queued entry that is asked for is stamped, so it sur
     CHECK(cache->UploadQueued(kTexA));
     CHECK(cache->UploadQueued(kTexB));
 
-    cache->Release(device->Graves(), 1);
-    device->Graves().Reap(1);
+    // ...and the whole way to READY: the snapshot takes all three, the frame submits, A and B are bindable.
+    const auto jobs = cache->BeginUploadFrame();
+    CHECK(jobs.size() == 3u);
+    cache->CommitUploads(true, device->Graves(), 1);
+    CHECK(cache->Resolve(kTexA) != nullptr);
+    CHECK(cache->Resolve(kTexB) != nullptr);
+    CHECK(cache->View(kTexA) != nullptr);
+    CHECK(cache->View(kTexB) != nullptr);
+
+    cache->Release(device->Graves(), 2);
+    device->Graves().Reap(2);
+}
+
+TEST_CASE("mesh cache: a queued entry that is asked for is stamped, so two queued meshes over budget both reach ready",
+          "[nri][upload]")
+{
+    // The cost of one cube on the account, measured on a probe device.
+    std::uint64_t cubeBytes = 0;
+    {
+        auto probe = Arcane::NriDevice::CreateNoneForTests();
+        REQUIRE(probe != nullptr);
+        auto cache = NriMeshBufferCache::Create(*probe);
+        REQUIRE(cache != nullptr);
+        cache->SetUploadMode(Arcane::NriUploadMode::Immediate);
+        MeshData cube = Arcane::BuildCube(1.0f);
+        cache->SetMeshSupply([&](const Guid&) { return NriMeshBufferCache::SupplyResult{ &cube, MeshResolveState::Ready }; });
+        const NriMeshBufferCache::Resident* r = cache->Resolve(kMeshA, 1);
+        REQUIRE(r != nullptr);
+        cubeBytes = r->bytes;
+        cache->Release(probe->Graves(), 1);
+        probe->Graves().Reap(1);
+    }
+    REQUIRE(cubeBytes > 0u);
+
+    auto device = Arcane::NriDevice::CreateNoneForTests();
+    REQUIRE(device != nullptr);
+    Arcane::ResidencyCaps caps;
+    caps.meshCap = cubeBytes * 2;   // room for two cubes
+    caps.textureCap = 0;
+    caps.reservationPercent = 0;
+    Arcane::ResidencyAccount& account = device->ResidencyForTests(caps);
+    auto cache = NriMeshBufferCache::Create(*device);
+    REQUIRE(cache != nullptr);
+    MeshData cube = Arcane::BuildCube(1.0f);
+    cache->SetMeshSupply([&](const Guid&) { return NriMeshBufferCache::SupplyResult{ &cube, MeshResolveState::Ready }; });
+    const Guid kMeshC = *Guid::FromString("a1a1a1a1-0000-0000-0000-000000000003");
+
+    // Frame 1: A and B are queued (and charged). The frame ends.
+    CHECK(cache->Resolve(kMeshA, 1) == nullptr);
+    CHECK(cache->Resolve(kMeshB, 1) == nullptr);
+    cache->CloseFrame();
+
+    // Frame 2: the scene still draws A and B (asked for again, still not ready) and a third mesh is charged over
+    // the cap. A and B were touched this frame, so neither is its victim.
+    CHECK(cache->Resolve(kMeshA, 2) == nullptr);
+    CHECK(cache->Resolve(kMeshB, 2) == nullptr);
+    CHECK(cache->Resolve(kMeshC, 2) == nullptr);
+    CHECK(account.TakePending(cache.get()).empty());
+
+    // ...and the whole way to ready.
+    CHECK(cache->BeginUploadFrame().size() == 3u);
+    cache->CommitUploads(true, device->Graves(), 1);
+    CHECK(cache->Resolve(kMeshA, 3) != nullptr);
+    CHECK(cache->Resolve(kMeshB, 3) != nullptr);
+
+    cache->Release(device->Graves(), 2);
+    device->Graves().Reap(2);
 }

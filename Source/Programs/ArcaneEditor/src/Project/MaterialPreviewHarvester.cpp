@@ -1334,25 +1334,29 @@ namespace Arcane::Editor
         // slot), so the slot baked into `instances` would stay invalid and the flat-colour
         // picture would be published as a success. Before every re-render the materials
         // are Requested again (a re-ask re-resolves an invalid slot) and the slots
-        // rewritten into `instances`. Returns whether an albedo is still on its way.
-        const auto refreshAlbedoSlots = [&]() -> bool
+        // rewritten into `instances`. Reports whether any slot CHANGED (the picture last rendered
+        // used the old one, so it must not be published) and whether an albedo is still on its way.
+        struct SlotState { bool changed = false; bool outstanding = false; };
+        const auto refreshAlbedoSlots = [&]() -> SlotState
         {
-            bool outstanding = false;
+            SlotState state;
             const auto onItsWay = [&](const Arcane::ResolvedMeshMaterial& m)
             {
                 if (m.albedo.IsValid() && m.materialSlot == 0xFFFFFFFFu
                     && (ctx->HasPendingUploads()
                         || (ctx->Textures() && ctx->Textures()->UploadQueued(m.albedo))))
-                    outstanding = true;
+                    state.outstanding = true;
             };
             if (!meshMats)
-                return false;
+                return state;
             if (r.subject == Subject::Material && r.surface == Arcane::MaterialSurface::Mesh && !instances.empty())
             {
                 meshMats->Request(r.id);
                 const auto& table = meshMats->Table();
                 if (const auto it = table.find(r.id); it != table.end())
                 {
+                    state.changed = state.changed || r.meshSlot != it->second.materialSlot
+                                 || r.meshColor != it->second.baseColor;
                     r.meshColor = it->second.baseColor;
                     r.meshSlot  = it->second.materialSlot;
                     instances[0] = MaterialPreviewSphereInstance(r.meshColor, r.meshSlot);
@@ -1370,14 +1374,21 @@ namespace Arcane::Editor
                     const auto& table = meshMats->Table();
                     if (const auto it = table.find(mat); it != table.end())
                     {
+                        state.changed = state.changed || instances[i].materialSlot != it->second.materialSlot
+                                     || instances[i].baseColor != it->second.baseColor;
                         instances[i].baseColor    = it->second.baseColor;
                         instances[i].materialSlot = it->second.materialSlot;
                         onItsWay(it->second);
                     }
                 }
             }
-            return outstanding;
+            return state;
         };
+
+        // REFRESH BEFORE THE FIRST RENDER too: a slot that became valid between StartOne and this harvest
+        // (another harvest's frames uploaded the albedo) must not be rendered flat. The first refresh's
+        // own `changed` is moot -- nothing was rendered with the old slot yet.
+        (void)refreshAlbedoSlots();
 
         Arcane::NriGraphContext::FrameOutcome outcome = ctx->RenderFrameOffscreen(vp);
 
@@ -1389,19 +1400,22 @@ namespace Arcane::Editor
         // (editor.thumbnail.maxRetries, default 3 = the upload frame, the first
         // drawing frame, and one spare). The stash SetMeshSupply serves from stays
         // alive across the loop; it is released only after the last frame.
+        // Render again while uploads are in flight, an albedo is still on its way, OR a slot changed since the
+        // picture last rendered (that picture used the old slot and is stale).
+        SlotState slots = refreshAlbedoSlots();
         for (int again = 0;
              outcome == Arcane::NriGraphContext::FrameOutcome::Presented
-             && (ctx->HasPendingUploads() || refreshAlbedoSlots())
+             && (ctx->HasPendingUploads() || slots.changed || slots.outstanding)
              && again < thumb.maxRetries;
              ++again)
         {
-            (void)refreshAlbedoSlots();
             fillBatch();
             outcome = ctx->RenderFrameOffscreen(vp);
+            slots = refreshAlbedoSlots();   // what the NEXT frame must use; changed == the one just rendered is stale
         }
 
         if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented
-            && (ctx->HasPendingUploads() || refreshAlbedoSlots()))
+            && (ctx->HasPendingUploads() || slots.changed))
         {
             // Gave up: the uploads never settled inside the budget. Behave as today's
             // failure path does for a picture that cannot be made -- the item is

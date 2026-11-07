@@ -648,3 +648,202 @@ TEST_CASE("golden: the harvester's own 64px renders of five ReferenceProject sub
     std::error_code ec;
     fs::remove_all(fs::temp_directory_path() / "arcane_mesh_thumb_harvest", ec);
 }
+
+// ===========================================================================
+// PLAN C TASK 5, FIX ROUND 2 (review I2): a textured MESH-KIND thumbnail must not
+// be published with a stale (flat) albedo slot.
+//
+// The reachable path: the mesh-kind material M is started first (its Request
+// queues the albedo upload and bakes the INVALID slot into the Ready), then a
+// sprite S's compile result lands and S is harvested BEFORE M (LIFO). S's frames
+// upload M's albedo and settle. When M is harvested its sphere and albedo are
+// already resident, so no upload is pending after its first frame -- and the slot
+// baked at start is stale. The harvester must refresh before the first render and
+// render again whenever a slot changed.
+//
+// Scratch materials (a mesh-kind .arcmat is JSON: baseColor + albedo), the real
+// ReferenceProject sprite `material-pulse_sprite` for the compile round trip.
+// ===========================================================================
+#include <Arcane/Material/MaterialAsset.hpp>
+
+namespace
+{
+    Guid WriteMeshKindMaterial(const fs::path& file, const char* name, const Guid* albedo)
+    {
+        Arcane::MaterialAssetData d;
+        d.id   = Guid::Generate();
+        d.name = name;
+        d.kind = "mesh";
+        d.params.emplace_back("baseColor", Arcane::MatParamValue::MakeColor(1.0f, 1.0f, 1.0f, 1.0f));
+        if (albedo)
+            d.params.emplace_back("albedo", Arcane::MatParamValue::MakeTexture(*albedo));
+        REQUIRE(Arcane::SaveMaterialAsset(file, d));
+        return d.id;
+    }
+}
+
+TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through another harvest still shows it",
+          "[gpu][thumbs]")
+{
+    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+
+    const fs::path sourceRoot = Arcane::Test::FindReferenceProjectDir();
+    REQUIRE_FALSE(sourceRoot.empty());
+    Arcane::Runtime runtime(Arcane::Test::Process());
+    REQUIRE(runtime.OpenProject(sourceRoot));
+    const Arcane::Project* proj = runtime.CurrentProject();
+    REQUIRE(proj != nullptr);
+    Arcane::Assets& assets = runtime.AssetsFacade();
+
+    Arcane::ShaderSourceProvider sources;
+    sources.AddRoot("data/shaders");
+    Arcane::ShaderCompiler compiler;
+    REQUIRE(compiler.InitializeWithDebounce(0.0));
+    REQUIRE(compiler.IsAvailable());
+
+    Arcane::HostConfig cfg;
+    cfg.backend  = Arcane::Test::kNativeBackend;
+    cfg.headless = true;
+
+    // The albedo: a distinctive gradient, so a textured sphere cannot equal a flat one.
+    const Guid albedo = Guid::Generate();
+    Arcane::PixelData albedoPixels;
+    albedoPixels.width = albedoPixels.height = 8;
+    albedoPixels.rgba.resize(8u * 8u * 4u);
+    for (unsigned y = 0; y < 8; ++y)
+        for (unsigned x = 0; x < 8; ++x)
+        {
+            unsigned char* t = albedoPixels.rgba.data() + (y * 8 + x) * 4;
+            t[0] = static_cast<unsigned char>(x * 36);
+            t[1] = static_cast<unsigned char>(y * 36);
+            t[2] = 30;
+            t[3] = 255;
+        }
+
+    const fs::path assetDir = FreshDir("albedo_assets");
+    const fs::path texFile  = assetDir / "textured.arcmat";
+    const fs::path flatFile = assetDir / "flat.arcmat";
+    const Guid texturedId = WriteMeshKindMaterial(texFile, "textured", &albedo);
+    const Guid flatId     = WriteMeshKindMaterial(flatFile, "flat", nullptr);
+    const Guid spriteId   = *Guid::FromString("7e5a0001-0001-4001-8001-000000000001");   // material-pulse_sprite
+
+    const auto makeServices = [&](Arcane::OffscreenVehicle& chrome, const fs::path& thumbs)
+    {
+        MaterialPreviewHarvester::Services s;
+        s.chromeGraph = [&chrome]() { return &chrome.Graph(); };
+        s.hostConfig  = &cfg;
+        s.compiler    = &compiler;
+        s.sources     = &sources;
+        s.backend     = Arcane::Test::kNativeBackend;
+        s.resolveAsset = [&, proj](const Guid& g) -> std::optional<fs::path>
+        {
+            if (g == texturedId) return texFile;
+            if (g == flatId)     return flatFile;
+            return proj->ResolveAsset(Arcane::AssetId::FromGuid(g));
+        };
+        s.pixelSupply = [&](const Guid& g) -> const Arcane::PixelData*
+        {
+            return g == albedo ? &albedoPixels : assets.PixelsFor(g);
+        };
+        s.thumbnailDir = [thumbs]() { return thumbs; };
+        return s;
+    };
+
+    const auto pumpCompiler = [&](MaterialPreviewHarvester& h, double clock) -> std::size_t
+    {
+        compiler.Poll(clock);
+        std::size_t offered = 0;
+        for (const Arcane::ShaderCompileResult& r : compiler.Drain())
+        {
+            h.OfferCompileResult(r);
+            ++offered;
+        }
+        return offered;
+    };
+
+    const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
+
+    // ---- THE CONTROL: textured and flat, each alone on a fresh vehicle (the normal path) ----
+    std::vector<unsigned char> texturedAlone, flatAlone;
+    {
+        auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
+        REQUIRE(chrome != nullptr);
+        const fs::path thumbs = FreshDir("albedo_control");
+        MaterialPreviewHarvester h(makeServices(*chrome, thumbs));
+        chrome->Graph().SetPixelSupply([&](const Guid& g) { return h.PixelsForThumb(g); });
+        h.Request(texturedId);
+        h.Request(flatId);
+        double clock = 0.0;
+        for (int i = 0; i < 400 && h.PendingCount() != 0; ++i)
+        {
+            pumpCompiler(h, clock);
+            h.Pump(clock);
+            clock += 1.0 / 60.0;
+        }
+        CHECK(h.PendingCount() == 0u);
+        h.Shutdown();
+        chrome->Graph().SetPixelSupply(nullptr);
+        texturedAlone = ReadAll(thumbs / (texturedId.ToString() + ".png"));
+        flatAlone     = ReadAll(thumbs / (flatId.ToString() + ".png"));
+        REQUIRE(!texturedAlone.empty());
+        REQUIRE(!flatAlone.empty());
+    }
+    // The control really shows the albedo (otherwise equality below would prove nothing).
+    REQUIRE(texturedAlone != flatAlone);
+
+    // ---- THE SUBJECT: the sprite is started first, the mesh-kind material second, and the sprite's
+    // compile result lands AFTER both are started, so the sprite is harvested first (LIFO) ----
+    std::vector<unsigned char> texturedShared;
+    {
+        auto chrome = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
+        REQUIRE(chrome != nullptr);
+        const fs::path thumbs = FreshDir("albedo_subject");
+        MaterialPreviewHarvester h(makeServices(*chrome, thumbs));
+        chrome->Graph().SetPixelSupply([&](const Guid& g) { return h.PixelsForThumb(g); });
+        // An EARLIER mesh-kind thumbnail has already made the shared sphere resident, so M's own first frame
+        // has no mesh upload pending (the review's reachable path).
+        h.Request(flatId);
+        double clock = 0.0;
+        for (int i = 0; i < 400 && h.PendingCount() != 0; ++i)
+        {
+            pumpCompiler(h, clock);
+            h.Pump(clock);
+            clock += 1.0 / 60.0;
+        }
+        REQUIRE(h.PendingCount() == 0u);
+        h.Request(texturedId);   // (the queue is served newest-first, so the sprite -- requested last -- starts first)
+        h.Request(spriteId);
+        h.Pump(clock);                 // starts the sprite: its compile is submitted, nothing is ready
+        clock += 1.0 / 60.0;
+        h.Pump(clock);                 // starts the mesh-kind material: its Request queues the albedo, ready = [M]
+        clock += 1.0 / 60.0;
+        // Let the compile land WITHOUT pumping the harvester, so M cannot be harvested yet.
+        std::size_t offered = 0;
+        for (int i = 0; i < 1500 && !(offered >= 2 && compiler.IsIdle()); ++i)
+        {
+            offered += pumpCompiler(h, clock);
+            clock += 1.0 / 60.0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        REQUIRE(offered >= 2u);   // BOTH stages of the sprite's compile landed while the mesh-kind material waits in `ready`
+        for (int i = 0; i < 400 && h.PendingCount() != 0; ++i)
+        {
+            pumpCompiler(h, clock);
+            h.Pump(clock);             // the sprite first (its frames upload M's albedo), then M
+            clock += 1.0 / 60.0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK(h.PendingCount() == 0u);
+        h.Shutdown();
+        chrome->Graph().SetPixelSupply(nullptr);
+        texturedShared = ReadAll(thumbs / (texturedId.ToString() + ".png"));
+        REQUIRE(!texturedShared.empty());
+    }
+    compiler.Shutdown();
+
+    CHECK(texturedShared == texturedAlone);   // the albedo is there, not the flat colour baked before it landed
+    CHECK(Arcane::RenderErrorCount() == errorsBefore);
+
+    std::error_code ec;
+    fs::remove_all(fs::temp_directory_path() / "arcane_mesh_thumb_harvest", ec);
+}
