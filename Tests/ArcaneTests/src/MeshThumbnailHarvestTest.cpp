@@ -682,10 +682,9 @@ namespace
     }
 }
 
-TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through another harvest still shows it",
-          "[gpu][thumbs]")
+static void CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend backend)
 {
-    ARC_REQUIRE_BACKEND(Arcane::Test::kNativeBackend);
+    ARC_REQUIRE_BACKEND(backend);
 
     const fs::path sourceRoot = Arcane::Test::FindReferenceProjectDir();
     REQUIRE_FALSE(sourceRoot.empty());
@@ -702,7 +701,7 @@ TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through ano
     REQUIRE(compiler.IsAvailable());
 
     Arcane::HostConfig cfg;
-    cfg.backend  = Arcane::Test::kNativeBackend;
+    cfg.backend  = backend;
     cfg.headless = true;
 
     // The albedo: a distinctive gradient, so a textured sphere cannot equal a flat one.
@@ -734,7 +733,7 @@ TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through ano
         s.hostConfig  = &cfg;
         s.compiler    = &compiler;
         s.sources     = &sources;
-        s.backend     = Arcane::Test::kNativeBackend;
+        s.backend     = backend;
         s.resolveAsset = [&, proj](const Guid& g) -> std::optional<fs::path>
         {
             if (g == texturedId) return texFile;
@@ -853,4 +852,16 @@ TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through ano
 
     std::error_code ec;
     fs::remove_all(fs::temp_directory_path() / "arcane_mesh_thumb_harvest", ec);
+}
+
+TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through another harvest still shows it (d3d12)",
+          "[gpu][thumbs]")
+{
+    CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend::D3D12);
+}
+
+TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through another harvest still shows it (vulkan)",
+          "[gpu][thumbs]")
+{
+    CheckAlbedoLandedThroughAnotherHarvest(Arcane::GraphicsBackend::Vulkan);
 }

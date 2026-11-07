@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -401,8 +402,12 @@ namespace
     {
         const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
         // A heavy upload (a 2000x2000 texture, 16 MB through dedicated staging) so A's upload submit has real GPU
-        // work to retire; only the mesh samples the texture, so B has no copy of its own to make. (A's upload
-        // submit carries the texture; the mesh is B's own and is resident before A starts.)
+        // work to retire; only the mesh samples the texture, so B has no copy of its own to make.
+        // WHAT A'S SUBMIT CARRIES, by 0-based repeat: each context has its own mesh cache, and A's frame resolves
+        // A's copy of the mesh during declaration, after that frame's upload snapshot. So repeat 0 carries the
+        // texture and leaves A's mesh queued, repeat 1 carries the texture AND A's mesh, and repeat 2 on carries
+        // the texture alone. The per-repeat readings logged below give the queued count. The fence covers the
+        // whole submit, not the texture copy.
         SceneSpec base;
         base.albedoMesh = true;
         base.textureCount = 1;
@@ -434,7 +439,8 @@ namespace
         constexpr int kMaxRepeats = 8;
         int repeats = 0;
         bool observedInFlight = false;
-        std::uint64_t lastSubmit = 0, lastCompletedAfterA = 0, lastCompletedAtRecord = 0;
+        std::uint32_t previousSlot = 0xFFFFFFFFu;
+        std::ostringstream readings;
         for (int r = 0; r < kMaxRepeats && !observedInFlight; ++r)
         {
             ++repeats;
@@ -447,19 +453,27 @@ namespace
             // 2. A queues and UPLOADS the texture in its frame (the texture is asked for before that frame is
             //    declared, so the frame's snapshot carries it). No capture, no fence wait, no idle.
             const std::uint64_t idleBefore = Arcane::NriDevice::DeviceWaitIdleCount();
+            const std::size_t aMeshQueued = v->ctx->MeshBuffers()->QueuedUploadCount();   // goes in A's snapshot too
             REQUIRE(scene.Render(*v->ctx, *batchA) == Arcane::NriGraphContext::FrameOutcome::Presented);
             const std::uint64_t uploadSubmit = v->ctx->Graph().DebugSubmitCount();
-            lastCompletedAfterA = v->ctx->Graph().CompletedFence();   // read IMMEDIATELY after A's render, before the resolve
+            const std::uint64_t completedAfterA = v->ctx->Graph().CompletedFence();   // read IMMEDIATELY after A's render, before the resolve
             //    ...then A maps the device-wide bindless slot with a plain resolve.
             const std::uint32_t slot = v->ctx->ResolveMeshAlbedoSlot(scene.texIds[0]);
             REQUIRE(slot != 0xFFFFFFFFu);
+            // The pixels ignore keyBase, so the picture alone would also pass on the previous repeat's texture.
+            CHECK(slot != previousSlot);
+            previousSlot = slot;
 
             // 3. B's very next frame resolves the slot (a lookup hit on A's mapping) and samples A's texture,
             //    recorded straight after A's upload submit.
-            lastCompletedAtRecord = v->ctx->Graph().CompletedFence();
-            lastSubmit = uploadSubmit;
+            const std::uint64_t completedAtRecord = v->ctx->Graph().CompletedFence();   // the START of B's frame
             REQUIRE(scene.Render(*v->ctxB, *batchB) == Arcane::NriGraphContext::FrameOutcome::Presented);
-            observedInFlight = lastCompletedAtRecord < uploadSubmit;
+            const std::uint64_t completedAfterB = v->ctx->Graph().CompletedFence();     // before Capture: it idles the device
+            CHECK(v->ctxB->ResolveMeshAlbedoSlot(scene.texIds[0]) == slot);
+            observedInFlight = completedAtRecord < uploadSubmit;
+            readings << "\nrepeat " << r << ": A mesh uploads queued " << aMeshQueued << ", A upload submit " << uploadSubmit
+                     << ", A completed fence right after A's render " << completedAfterA << ", when B recorded "
+                     << completedAtRecord << ", after B's render " << completedAfterB;
 
             CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);   // the slot write needed no idle either
             CHECK(v->ctxB->Textures()->ObjectCreateCount() == 0u);           // B never made a copy: it sampled A's
@@ -467,8 +481,9 @@ namespace
             // 4. B's frame draws exactly the picture the blocking path draws.
             const Arcane::PixelData picture = Capture(*v->ctxB);
             std::uint32_t diff = 0;
-            CHECK(SamePicture(picture, reference, &diff));
+            const bool samePicture = SamePicture(picture, reference, &diff);
             INFO("two-context repeat " << r << " diffCount " << diff);
+            CHECK(samePicture);
             CHECK(v->ctx->UploadRingOverflowCount() == 0u);
             CHECK(v->ctxB->UploadRingOverflowCount() == 0u);
             CHECK(Arcane::RenderErrorCount() == errorsBefore);
@@ -476,9 +491,8 @@ namespace
 
         // Reported through the test log either way; a fast GPU can legitimately never show A in flight.
         WARN("two-context: " << repeats << " repeat(s) ran; in-flight observed = " << (observedInFlight ? "yes" : "no")
-             << "; last repeat: A upload submit " << lastSubmit << ", A completed fence right after A's render "
-             << lastCompletedAfterA << ", when B recorded " << lastCompletedAtRecord
-             << (observedInFlight ? "" : " -- never observed in flight: on this GPU the upload retired before B recorded, "
+             << readings.str()
+             << (observedInFlight ? "" : "\nnever observed in flight: on this GPU the upload retired before B recorded, "
                                          "so the case proves ordering by submission order only"));
     }
 
@@ -719,22 +733,26 @@ namespace
         auto batch = Arcane::Batcher2D::Create();
         REQUIRE(batch != nullptr);
         int firstDrawn = -1;
-        bool sawHeldFrame = false;
+        bool sawUnfinishedFrame = false;
         for (int frame = 0; frame < 10; ++frame)
         {
             const std::uint64_t idleBefore = Arcane::NriDevice::DeviceWaitIdleCount();
             REQUIRE(v->ctx->RenderFrameOffscreen(draw(*batch)) == Arcane::NriGraphContext::FrameOutcome::Presented);
-            CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);   // count 0 across first use
+            // THE WITNESS OF THE HOLD: unchanged across each render (not 0: the captures below idle), since a
+            // chain built while its image is queued rebuilds behind a device idle once the image lands.
+            CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);
             const Arcane::PixelData picture = Capture(*v->ctx);
             const bool same = SamePicture(picture, reference);
             if (same && firstDrawn < 0)
                 firstDrawn = frame;
-            sawHeldFrame = sawHeldFrame || !same;   // (no BatchPresent probe: the chain tints every pixel once built)
+            sawUnfinishedFrame = sawUnfinishedFrame || !same;   // (no BatchPresent probe: the chain tints every pixel once built)
             if (!v->ctx->HasPendingUploads() && frame > 0)
                 break;
         }
         INFO("post chain first drawn frame " << firstDrawn);
-        CHECK(sawHeldFrame);        // held (frames drawn without the chain) while the image was queued
+        // Early frames differ from the finished picture. NOT proof of the hold: without it they would draw the chain
+        // over the white texel, which differs too. The idle check above is the witness.
+        CHECK(sawUnfinishedFrame);
         CHECK(firstDrawn == 2);     // queue, upload, build + draw
         CHECK(v->ctx->UploadRingOverflowCount() == 0u);
         CHECK(Arcane::RenderErrorCount() == errorsBefore);
