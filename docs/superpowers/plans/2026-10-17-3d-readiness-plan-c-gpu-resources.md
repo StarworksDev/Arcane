@@ -1212,3 +1212,7 @@ Unchanged and re-confirmed: no epoch bump; the digest stays put (no Plan C type 
 ### Rev 5 (user ruling, 2026-11-06)
 
 Task 5 implements deferred first-use uploads (spec Revision 4), because same-frame upload cannot be planned from the first node (`task-5-report-needs-context.md` in the SDD workspace has the call-order trace). The ruling at the end of `task-5-brief.md` overrides Task 5's text: no `SuppressConsumers`, no upload-frame consumer reads, and one-shot renderers wait for pending uploads. Branch merged origin/main at 047ad3ae before this revision.
+
+### Rev 6 (Task 5 review rulings, 2026-11-06)
+
+Spec Revision 5: per-frame upload budget, no explicit two-context queue wait, no idle on first-use material builds. The SDD workspace file task-5-fix1-findings.md has the details.

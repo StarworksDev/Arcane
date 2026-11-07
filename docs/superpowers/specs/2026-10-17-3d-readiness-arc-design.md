@@ -582,3 +582,13 @@ The 2026-10-17 second re-review (NEEDS REVISION, one critical and one test error
 ### Revision 4 (user ruling, 2026-11-06): first-use upload is deferred
 
 Section 3.7 assumed a payload resolved mid-frame could upload ahead of its first consumer in the same frame. It cannot: `Resolve` runs inside later nodes' declaration, after the `upload` node must be declared, and cached texture views are baked into descriptor sets at declaration. Option A, chosen by the user, replaces the same-frame claim: `Resolve` creates the object, queues the upload and returns not-ready; the next frame's first node uploads it; a later frame draws it. No consumer binds or samples a not-ready entry, so a miss draws nothing rather than undefined memory. Wherever 3.7, its Done list and the migration table say "the same frame" or "this frame's picture includes the new bytes", read "the frame the upload is recorded" for the copy and "the first frame after it" for the picture. The first-use `[gpu]` readback compares the first drawn frame. One-shot offscreen renders do not capture while uploads are pending. Ring classes, footprints and the no-`DeviceWaitIdle` requirement are unchanged.
+
+### Revision 5 (Task 5 review rulings, 2026-11-06)
+
+Three amendments to section 3.7, on top of Revision 4.
+
+**A per-frame upload budget.** Uploads run first in the frame, so an unbudgeted upload can fill the slot and starve Batch2D, overlays, the GPU scene and picking of the same slot. `render.upload.frameBudgetPercent` (default 50, range 10..100, latched) caps the ring bytes one frame's uploads may take. Entries are admitted FIFO at the snapshot and the rest wait, with no objects destroyed. A payload above the cap but within the slot uses dedicated staging. The retry class stays as a guard.
+
+**The two-context gate has no explicit queue wait.** An entry becomes ready only after its uploading frame submitted, and there is one graphics queue, so B records after A in submission order and A's exit barrier has already been issued. The two-context `[gpu]` case stays, with A still in flight and no idle.
+
+**First use has no idle on material paths.** A material or post chain holds its first build until its declared images are ready or refused. An eviction re-upload or a cook promotion may rebuild behind the existing idle, as a content change.
