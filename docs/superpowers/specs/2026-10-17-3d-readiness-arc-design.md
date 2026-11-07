@@ -592,3 +592,13 @@ Three amendments to section 3.7, on top of Revision 4.
 **The two-context gate has no explicit queue wait.** An entry becomes ready only after its uploading frame submitted, and there is one graphics queue, so B records after A in submission order and A's exit barrier has already been issued. The two-context `[gpu]` case stays, with A still in flight and no idle.
 
 **First use has no idle on material paths.** A material or post chain holds its first build until its declared images are ready or refused. An eviction re-upload or a cook promotion may rebuild behind the existing idle, as a content change.
+
+### Revision 6 (final review rulings, 2026-11-07)
+
+**A consumer that holds a texture says so every frame.** Section 3.6 assumed a drawn texture calls `Resolve`, so eviction could trust the stamp. Baked consumers (Batch2D sprite sets and material variants, declared params, post chains, ImGui entries) did not, so a drawn texture looked cold and eviction destroyed a view they still bound. Every baked consumer now declares use each frame and detects a changed view. Eviction never leaves a consumer holding a dead view.
+
+**Visible bindless albedos are protected at admission.** Mapped slots with references are stamped before the Refresh sweep, so section 3.6's "the frame renders intact" holds when the visible set exceeds the allowance.
+
+**The table reclaims unreferenced mappings at capacity,** so unreferenced preview mappings cannot starve the viewport from the device-wide table.
+
+**The per-frame budget in Revision 5 also paces dedicated staging.** At most one over-cap payload is admitted per frame, and the rest wait FIFO. A staging failure requeues for a bounded number of tries before it is memoized as refused, because a burst can fail where a single payload would not.

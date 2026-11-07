@@ -1216,3 +1216,7 @@ Task 5 implements deferred first-use uploads (spec Revision 4), because same-fra
 ### Rev 6 (Task 5 review rulings, 2026-11-06)
 
 Spec Revision 5: per-frame upload budget, no explicit two-context queue wait, no idle on first-use material builds. The SDD workspace file task-5-fix1-findings.md has the details.
+
+### Rev 7 (final review rulings, 2026-11-07)
+
+Spec Revision 6: baked consumers declare use and detect changed views, referenced bindless slots are stamped, the table reclaims at capacity, dedicated staging is paced. The SDD workspace file final-fix-findings.md has the details.
