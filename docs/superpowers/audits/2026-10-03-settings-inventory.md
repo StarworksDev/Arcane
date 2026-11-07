@@ -12,9 +12,9 @@
 | Part | SETTING | CONSTANT | DERIVED | OTHER-STORE |
 |---|---|---|---|---|
 | Part 1: ArcaneCore and the vendored library configs | 92 | 101 | 28 | 1 |
-| Part 2: ArcaneClient, ArcaneRuntime, ArcaneServer, ArcaneCrashReporter | 150 | 104 | 32 | 0 |
+| Part 2: ArcaneClient, ArcaneRuntime, ArcaneServer, ArcaneCrashReporter | 151 | 104 | 32 | 0 |
 | Part 3: ArcaneEditor and ArcaneHub | 221 | 40 | 100 | 14 |
-| **Total** | **463** | **245** | **160** | **15** |
+| **Total** | **464** | **245** | **160** | **15** |
 
 (SETTING rows were 82 / 126 / 207 = 415 at the freeze; the post-freeze amendments below split rows and add the names the sweeps registered.)
 
