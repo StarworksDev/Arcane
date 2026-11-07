@@ -33,6 +33,7 @@
 #include <Arcane/Render/Nri/NriGraphContext.hpp>
 #include <Arcane/Render/Nri/NriMeshBufferCache.hpp>
 #include <Arcane/Render/Nri/NriTextureCache.hpp>
+#include <Arcane/Render/PostChainCache.hpp>
 #include <Arcane/Render/RenderDeviceDesc.hpp>
 #include <Arcane/Render/RenderErrorLatch.hpp>
 #include <Arcane/Render/ShaderCompiler.hpp>
@@ -109,6 +110,7 @@ namespace
         std::uint32_t forceRetries = 0;   // test injection: send this many ring-class textures down the retry branch
         bool          checkIdle    = true;
         bool          quads        = true;   // draw a textured sprite quad per texture
+        std::uint32_t keyBase      = 0;      // distinguishes the texture keys of repeated runs (fresh keys)
     };
 
     struct GpuScene
@@ -124,7 +126,7 @@ namespace
             for (int i = 0; i < s.textureCount; ++i)
             {
                 char text[64];
-                std::snprintf(text, sizeof(text), "d4d4d4d4-0000-0000-0000-0000000000%02x", i + 1);
+                std::snprintf(text, sizeof(text), "d4d4d4d4-0000-0000-%04x-0000000000%02x", spec.keyBase, i + 1);
                 texIds.push_back(*Arcane::Guid::FromString(text));
                 Arcane::PixelData p;
                 p.width = p.height = s.textureSide;
@@ -398,24 +400,23 @@ namespace
     void CheckTwoContexts(Arcane::GraphicsBackend backend)
     {
         const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
-        // A heavy upload (a ~4 MB dedicated-staging texture and a ~8 MB mesh), so A's upload submit has real GPU
-        // work to retire; only the mesh samples the texture, so B has no copy of its own to make.
-        SceneSpec spec;
-        spec.albedoMesh = true;
-        spec.textureCount = 1;
-        spec.textureSide = 1000;
-        spec.sphereRings = 300;
-        spec.quads = false;
-        const Arcane::PixelData reference = ReferencePicture(backend, spec);
-        SceneSpec flatSpec = spec;
+        // A heavy upload (a 2000x2000 texture, 16 MB through dedicated staging) so A's upload submit has real GPU
+        // work to retire; only the mesh samples the texture, so B has no copy of its own to make. (A's upload
+        // submit carries the texture; the mesh is B's own and is resident before A starts.)
+        SceneSpec base;
+        base.albedoMesh = true;
+        base.textureCount = 1;
+        base.textureSide = 2000;
+        base.sphereRings = 300;
+        base.quads = false;
+        const Arcane::PixelData reference = ReferencePicture(backend, base);
+        SceneSpec flatSpec = base;
         flatSpec.albedoMesh = false;   // B's warm-up frames: the mesh, with no slot (it never asks for the texture)
 
         auto v = MakeGpuVehicle(backend, /*second=*/true);
         v->nri->EnableDeviceWaitIdleCounting();
-        GpuScene scene(spec);
         GpuScene flat(flatSpec);
-        scene.Install(*v->ctx);
-        scene.Install(*v->ctxB);
+        flat.Install(*v->ctxB);
         auto batchA = Arcane::Batcher2D::Create();
         auto batchB = Arcane::Batcher2D::Create();
         REQUIRE(batchA != nullptr);
@@ -428,37 +429,57 @@ namespace
         REQUIRE(v->ctxB->MeshBuffers()->ResidentCount() == 1u);
         CHECK_FALSE(v->ctxB->HasPendingUploads());
 
-        // 2. A queues and UPLOADS the texture: its frame submits the upload (the texture is asked for before
-        //    A's first frame is declared, so that frame's snapshot carries it). Then A maps the device-wide
-        //    bindless slot with a plain resolve. No capture, no fence wait, no idle.
-        const std::uint64_t idleBefore = Arcane::NriDevice::DeviceWaitIdleCount();
-        REQUIRE(scene.Render(*v->ctx, *batchA) == Arcane::NriGraphContext::FrameOutcome::Presented);
-        const std::uint64_t uploadSubmit = v->ctx->Graph().DebugSubmitCount();
-        const std::uint32_t slot = v->ctx->ResolveMeshAlbedoSlot(scene.texIds[0]);
-        REQUIRE(slot != 0xFFFFFFFFu);
+        // Bounded repeats with FRESH texture keys, until one repeat has A's upload still in flight when B records
+        // (completed fence < the upload's submit value). Every repeat passes the picture / idle / error checks.
+        constexpr int kMaxRepeats = 8;
+        int repeats = 0;
+        bool observedInFlight = false;
+        std::uint64_t lastSubmit = 0, lastCompletedAfterA = 0, lastCompletedAtRecord = 0;
+        for (int r = 0; r < kMaxRepeats && !observedInFlight; ++r)
+        {
+            ++repeats;
+            SceneSpec spec = base;
+            spec.keyBase = static_cast<std::uint32_t>(r + 1);
+            GpuScene scene(spec);
+            scene.Install(*v->ctx);
+            scene.Install(*v->ctxB);
 
-        // 3. B's very next frame resolves the slot (a lookup hit on A's mapping) and samples A's texture,
-        //    recorded straight after A's upload submit.
-        const std::uint64_t completedAtRecord = v->ctx->Graph().CompletedFence();
-        REQUIRE(scene.Render(*v->ctxB, *batchB) == Arcane::NriGraphContext::FrameOutcome::Presented);
-        // What this can and cannot show: it samples after A's upload SUBMIT with no wait of any kind between
-        // (submission order on the one graphics queue is the ordering). Whether A's upload had RETIRED on the
-        // GPU by the time B recorded depends on GPU speed; the fence reading is reported, not asserted.
-        INFO("A upload submit " << uploadSubmit << ", A completed fence when B recorded " << completedAtRecord);
-        if (completedAtRecord >= uploadSubmit)
-            WARN("A's upload had already retired when B recorded (a fast GPU); the case then proves the ordering "
-                 "only by submission order");
-        CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);   // the slot write needed no idle either
-        CHECK(v->ctxB->Textures()->ObjectCreateCount() == 0u);           // B never made a copy: it sampled A's
+            // 2. A queues and UPLOADS the texture in its frame (the texture is asked for before that frame is
+            //    declared, so the frame's snapshot carries it). No capture, no fence wait, no idle.
+            const std::uint64_t idleBefore = Arcane::NriDevice::DeviceWaitIdleCount();
+            REQUIRE(scene.Render(*v->ctx, *batchA) == Arcane::NriGraphContext::FrameOutcome::Presented);
+            const std::uint64_t uploadSubmit = v->ctx->Graph().DebugSubmitCount();
+            lastCompletedAfterA = v->ctx->Graph().CompletedFence();   // read IMMEDIATELY after A's render, before the resolve
+            //    ...then A maps the device-wide bindless slot with a plain resolve.
+            const std::uint32_t slot = v->ctx->ResolveMeshAlbedoSlot(scene.texIds[0]);
+            REQUIRE(slot != 0xFFFFFFFFu);
 
-        // 4. B's frame draws exactly the picture the blocking path draws.
-        const Arcane::PixelData picture = Capture(*v->ctxB);
-        std::uint32_t diff = 0;
-        CHECK(SamePicture(picture, reference, &diff));
-        INFO("two-context diffCount " << diff);
-        CHECK(v->ctx->UploadRingOverflowCount() == 0u);
-        CHECK(v->ctxB->UploadRingOverflowCount() == 0u);
-        CHECK(Arcane::RenderErrorCount() == errorsBefore);
+            // 3. B's very next frame resolves the slot (a lookup hit on A's mapping) and samples A's texture,
+            //    recorded straight after A's upload submit.
+            lastCompletedAtRecord = v->ctx->Graph().CompletedFence();
+            lastSubmit = uploadSubmit;
+            REQUIRE(scene.Render(*v->ctxB, *batchB) == Arcane::NriGraphContext::FrameOutcome::Presented);
+            observedInFlight = lastCompletedAtRecord < uploadSubmit;
+
+            CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);   // the slot write needed no idle either
+            CHECK(v->ctxB->Textures()->ObjectCreateCount() == 0u);           // B never made a copy: it sampled A's
+
+            // 4. B's frame draws exactly the picture the blocking path draws.
+            const Arcane::PixelData picture = Capture(*v->ctxB);
+            std::uint32_t diff = 0;
+            CHECK(SamePicture(picture, reference, &diff));
+            INFO("two-context repeat " << r << " diffCount " << diff);
+            CHECK(v->ctx->UploadRingOverflowCount() == 0u);
+            CHECK(v->ctxB->UploadRingOverflowCount() == 0u);
+            CHECK(Arcane::RenderErrorCount() == errorsBefore);
+        }
+
+        // Reported through the test log either way; a fast GPU can legitimately never show A in flight.
+        WARN("two-context: " << repeats << " repeat(s) ran; in-flight observed = " << (observedInFlight ? "yes" : "no")
+             << "; last repeat: A upload submit " << lastSubmit << ", A completed fence right after A's render "
+             << lastCompletedAfterA << ", when B recorded " << lastCompletedAtRecord
+             << (observedInFlight ? "" : " -- never observed in flight: on this GPU the upload retired before B recorded, "
+                                         "so the case proves ordering by submission order only"));
     }
 
     // ---- A MATERIAL WITH DECLARED TEXTURES: the first build holds, so first use needs no device idle ----
@@ -607,6 +628,117 @@ namespace
         CHECK(v->ctx->UploadRingOverflowCount() == 0u);
         CHECK(Arcane::RenderErrorCount() == errorsBefore);
     }
+
+    // ---- A POST CHAIN WITH A DECLARED TEXTURE: the first build holds, so first use needs no device idle ----
+    void CheckPostChainFirstUse(Arcane::GraphicsBackend backend)
+    {
+        const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
+        const Arcane::Guid detail = *Arcane::Guid::FromString("e6e6e6e6-0000-0000-0000-000000000001");
+        Arcane::PixelData pixels;
+        pixels.width = pixels.height = 640;   // 1.6 MB staging: one upload frame under the 2 MiB cap
+        pixels.rgba.resize(640u * 640u * 4u);
+        for (std::uint32_t y = 0; y < 640; ++y)
+            for (std::uint32_t x = 0; x < 640; ++x)
+            {
+                const std::size_t i = (static_cast<std::size_t>(y) * 640 + x) * 4;
+                pixels.rgba[i] = static_cast<unsigned char>(40 + x / 4); pixels.rgba[i + 1] = static_cast<unsigned char>(40 + y / 4);
+                pixels.rgba[i + 2] = 90; pixels.rgba[i + 3] = 255;
+            }
+        const auto supply = [&](const Arcane::Guid& id) -> const Arcane::PixelData* { return id == detail ? &pixels : nullptr; };
+
+        // The compile path is OverlayWitnessTest.cpp CheckPostDoesNotGradeOverlay's, with a declared texture.
+        Arcane::ShaderSourceProvider provider;
+        provider.AddRoot("data/shaders");
+        const auto templateText = provider.Get("materials/fullscreen_material.hlsl");
+        REQUIRE(templateText.has_value());
+        const char* shade =
+            "//@param texture Detail\n"
+            "float4 shade(Varyings v) { return InputTexture.Sample(MaterialSampler, v.uv) * Detail.Sample(MaterialSampler, v.uv); }\n";
+        const std::uint32_t sceneIn[] = { Arcane::kSceneInput };
+        const Arcane::MaterialChainPassDesc authored[] = { { shade, sceneIn } };
+        Arcane::MaterialChainBuildResult built = Arcane::BuildMaterialChainSource(
+            *templateText, authored, "upload_post_detail", {}, /*externalInput=*/true);
+        REQUIRE(built.Ok());
+
+        Arcane::ShaderCompiler compiler;
+        REQUIRE(compiler.InitializeWithDebounce(0.0));
+        const auto compileStage = [&](const char* entry, const char* profile)
+        {
+            Arcane::ShaderCompileRequest req;
+            req.debugName = "upload_post_detail.hlsl";
+            req.sourceUtf8 = built.hlsl[0];
+            req.entry = entry;
+            req.profile = profile;
+            const Arcane::ShaderCompileResult cr = compiler.CompileNow(req);
+            REQUIRE(cr.AllSucceeded());
+            const Arcane::ShaderTargetResult& target = backend == Arcane::GraphicsBackend::D3D12 ? cr.dxil : cr.spirv;
+            REQUIRE(target.succeeded);
+            return std::make_shared<const std::vector<std::uint8_t>>(target.bytecode);
+        };
+        auto templ = std::make_shared<Arcane::MaterialTemplate>(std::move(built.templ));
+        auto instance = std::make_shared<Arcane::MaterialInstance>(std::shared_ptr<const Arcane::MaterialTemplate>(templ));
+        REQUIRE(instance->SetTexture("Detail", detail));
+        Arcane::PostChainDesc chain;
+        chain.templ = templ;
+        chain.instance = instance;
+        chain.chainInputSlots = built.chainInputSlots;
+        Arcane::PostChainPassDesc pass;
+        pass.vsBytes = compileStage(Arcane::kVsEntry, Arcane::kVsProfile);
+        pass.psBytes = compileStage(Arcane::kPsEntry, Arcane::kPsProfile);
+        pass.inputs = built.passInputs[0];
+        chain.passes.push_back(std::move(pass));
+        compiler.Shutdown();
+
+        const auto draw = [&](Arcane::Batcher2D& batch) -> Arcane::NriGraphContext::FrameDesc
+        {
+            batch.Begin(kW, kH);
+            batch.SetLayer(0, 0);
+            batch.Rect(glm::vec2(4.0f, 4.0f), glm::vec2(30.0f, 12.0f), glm::vec4(0.1f, 0.8f, 0.2f, 1.0f));
+            batch.Rect(glm::vec2(50.0f, 20.0f), glm::vec2(80.0f, 50.0f), glm::vec4(0.9f, 0.9f, 0.3f, 1.0f));
+            Arcane::NriGraphContext::FrameDesc frame;
+            frame.batch = &batch;
+            frame.post = &chain;
+            frame.capture = true;
+            return frame;
+        };
+
+        Arcane::PixelData reference;
+        {
+            auto v = MakeGpuVehicle(backend);
+            v->ctx->SetPixelSupply(supply);
+            v->ctx->Textures()->SetUploadMode(Arcane::NriUploadMode::Immediate);
+            auto batch = Arcane::Batcher2D::Create();
+            REQUIRE(batch != nullptr);
+            REQUIRE(v->ctx->RenderFrameOffscreen(draw(*batch)) == Arcane::NriGraphContext::FrameOutcome::Presented);
+            reference = Capture(*v->ctx);
+        }
+
+        auto v = MakeGpuVehicle(backend);
+        v->nri->EnableDeviceWaitIdleCounting();
+        v->ctx->SetPixelSupply(supply);
+        auto batch = Arcane::Batcher2D::Create();
+        REQUIRE(batch != nullptr);
+        int firstDrawn = -1;
+        bool sawHeldFrame = false;
+        for (int frame = 0; frame < 10; ++frame)
+        {
+            const std::uint64_t idleBefore = Arcane::NriDevice::DeviceWaitIdleCount();
+            REQUIRE(v->ctx->RenderFrameOffscreen(draw(*batch)) == Arcane::NriGraphContext::FrameOutcome::Presented);
+            CHECK(Arcane::NriDevice::DeviceWaitIdleCount() == idleBefore);   // count 0 across first use
+            const Arcane::PixelData picture = Capture(*v->ctx);
+            const bool same = SamePicture(picture, reference);
+            if (same && firstDrawn < 0)
+                firstDrawn = frame;
+            sawHeldFrame = sawHeldFrame || !same;   // (no BatchPresent probe: the chain tints every pixel once built)
+            if (!v->ctx->HasPendingUploads() && frame > 0)
+                break;
+        }
+        INFO("post chain first drawn frame " << firstDrawn);
+        CHECK(sawHeldFrame);        // held (frames drawn without the chain) while the image was queued
+        CHECK(firstDrawn == 2);     // queue, upload, build + draw
+        CHECK(v->ctx->UploadRingOverflowCount() == 0u);
+        CHECK(Arcane::RenderErrorCount() == errorsBefore);
+    }
 }
 
 #define UPLOAD_GPU_CASE(Name, Fn, Backend, BackendTag)                                                      \
@@ -630,7 +762,9 @@ UPLOAD_GPU_CASE("a burst of sixteen payloads creates one texture each, no churn"
 UPLOAD_GPU_CASE("a burst of sixteen payloads creates one texture each, no churn", CheckBurst, Vulkan, "vulkan")
 UPLOAD_GPU_CASE("a textured mesh picks up its albedo slot once the texture has landed", CheckTexturedMesh, D3D12, "d3d12")
 UPLOAD_GPU_CASE("a textured mesh picks up its albedo slot once the texture has landed", CheckTexturedMesh, Vulkan, "vulkan")
-UPLOAD_GPU_CASE("a second context first-samples what the first uploaded while it is in flight", CheckTwoContexts, D3D12, "d3d12")
-UPLOAD_GPU_CASE("a second context first-samples what the first uploaded while it is in flight", CheckTwoContexts, Vulkan, "vulkan")
+UPLOAD_GPU_CASE("a second context samples a texture the first uploaded with no wait straight after the upload submit (in flight when the timing allows)", CheckTwoContexts, D3D12, "d3d12")
+UPLOAD_GPU_CASE("a second context samples a texture the first uploaded with no wait straight after the upload submit (in flight when the timing allows)", CheckTwoContexts, Vulkan, "vulkan")
 UPLOAD_GPU_CASE("a material with declared textures holds its first build and needs no device idle", CheckMaterialFirstUse, D3D12, "d3d12")
 UPLOAD_GPU_CASE("a material with declared textures holds its first build and needs no device idle", CheckMaterialFirstUse, Vulkan, "vulkan")
+UPLOAD_GPU_CASE("a post chain with a declared texture holds its first build and needs no device idle", CheckPostChainFirstUse, D3D12, "d3d12")
+UPLOAD_GPU_CASE("a post chain with a declared texture holds its first build and needs no device idle", CheckPostChainFirstUse, Vulkan, "vulkan")

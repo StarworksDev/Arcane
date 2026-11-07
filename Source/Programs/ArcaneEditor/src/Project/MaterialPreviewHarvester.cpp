@@ -1400,6 +1400,10 @@ namespace Arcane::Editor
         // (editor.thumbnail.maxRetries, default 3 = the upload frame, the first
         // drawing frame, and one spare). The stash SetMeshSupply serves from stays
         // alive across the loop; it is released only after the last frame.
+        // NOTE (review, fix round 3): no path where a slot flips with NOTHING pending has been constructed -- a texture
+        // becomes ready only through a committed upload, which leaves HasPendingUploads() true for one more frame, and
+        // the refresh before the first render already absorbs a flip that happened before this harvest. `changed` is
+        // therefore a DEFENSIVE condition (it keeps the never-publish-a-stale-slot invariant if that ever stops holding).
         // Render again while uploads are in flight, an albedo is still on its way, OR a slot changed since the
         // picture last rendered (that picture used the old slot and is stale).
         SlotState slots = refreshAlbedoSlots();

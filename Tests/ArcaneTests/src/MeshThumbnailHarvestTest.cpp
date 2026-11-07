@@ -826,6 +826,13 @@ TEST_CASE("pixel: a textured mesh-kind thumbnail whose albedo landed through ano
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         REQUIRE(offered >= 2u);   // BOTH stages of the sprite's compile landed while the mesh-kind material waits in `ready`
+        // THE PATH THIS CASE DEPENDS ON, asserted so a change in queue order fails loudly instead of passing
+        // on the normal path: both materials are waiting (sprite S and mesh-kind M), and S is harvested first.
+        REQUIRE(h.PendingCount() == 2u);
+        h.Pump(clock);
+        clock += 1.0 / 60.0;
+        REQUIRE(fs::exists(thumbs / (spriteId.ToString() + ".png")));      // S went first (its frames upload M's albedo)...
+        REQUIRE_FALSE(fs::exists(thumbs / (texturedId.ToString() + ".png")));   // ...and M has not been harvested yet
         for (int i = 0; i < 400 && h.PendingCount() != 0; ++i)
         {
             pumpCompiler(h, clock);
