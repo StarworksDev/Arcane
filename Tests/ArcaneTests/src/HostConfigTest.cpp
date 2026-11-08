@@ -68,6 +68,16 @@ TEST_CASE("HostConfig: every flag maps", "[host]") {
     REQUIRE(o.config->perf);
     REQUIRE(o.config->pluginPath == "Game.dll");
 }
+// --print-registry (modularization s6, registrar survival): boot the project,
+// print its registered components and systems as one JSON line, exit.
+TEST_CASE("HostConfig: --print-registry parses and defaults off", "[host]") {
+    const auto plain = Run({"--project", "P"});
+    REQUIRE(plain.config.has_value());
+    CHECK_FALSE(plain.config->printRegistry);
+    const auto on = Run({"--project", "P", "--print-registry"});
+    REQUIRE(on.config.has_value());
+    CHECK(on.config->printRegistry);
+}
 TEST_CASE("HostConfig: --help exits 0, no config", "[host]") {
     const auto o = Run({"--help"});
     REQUIRE_FALSE(o.config.has_value()); REQUIRE(o.exitCode == 0);
@@ -1284,3 +1294,31 @@ TEST_CASE("Dist refuses the remote flags at parse", "[host][dist]")
     }
 }
 #endif
+
+// --print-registry exits before any frame, so a loop-bound flag beside it
+// would be silently ignored with exit 0 -- refused at parse time (rule 3).
+TEST_CASE("host config: --print-registry refuses flags it would silently ignore", "[hostconfig]")
+{
+    struct Case { std::vector<std::string> extra; const char* named; };
+    std::vector<Case> cases = {
+        { { "--frames", "5" },                  "--frames" },
+        { { "--headless", "--report", "r.json" }, "--report" },
+        { { "--headless", "--probe", "census" }, "--probe" },
+        { { "--headless", "--settle", "3" },    "--settle" },
+#if !defined(ARC_BUILD_DIST)
+        { { "--remote" },                       "--remote" },
+#endif
+    };
+    for (const Case& c : cases)
+    {
+        INFO("with " << c.named);
+        std::vector<std::string> args = { "--project", "P", "--print-registry" };
+        args.insert(args.end(), c.extra.begin(), c.extra.end());
+        const auto o = RunCapturingStderr(std::move(args));
+        REQUIRE_FALSE(o.outcome.config.has_value());
+        CHECK(o.outcome.exitCode == 2);
+        REQUIRE(o.captured);
+        CHECK(o.err.find(std::string("--print-registry")) != std::string::npos);
+        CHECK(o.err.find(std::string(c.named) + " would be silently ignored") != std::string::npos);
+    }
+}

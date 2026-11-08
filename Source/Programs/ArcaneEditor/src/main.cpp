@@ -500,6 +500,15 @@ int main(int argc, char** argv)
         return 2;
     }
 #endif
+    // --print-registry: a RUNTIME flag (the registrar-survival check compares
+    // ArcaneRuntime with the packaged game); the editor has no such exit, so it
+    // refuses rather than open a session and ignore the request.
+    if (parsed.config->printRegistry)
+    {
+        std::fprintf(stderr, "error: --print-registry is a RUNTIME flag; use ArcaneRuntime.exe "
+                             "or the packaged game.\n");
+        return 2;
+    }
     // --perf: same reasoning and position as above (and its own #if is not
     // needed -- HostConfig::perf is NOT Dist-guarded, unlike pickProbe).
     // EditorApp holds a FramePerf m_perf and never calls

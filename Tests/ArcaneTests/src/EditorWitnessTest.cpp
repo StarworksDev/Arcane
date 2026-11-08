@@ -659,6 +659,25 @@ TEST_CASE("E10: a scripted launch with no project exits 2 and names the reason o
     CHECK(ReadAllBytes(run.stderrPath).find("no project selected") != std::string::npos);
 }
 
+// E10b (modularization s6, F7): --print-registry is a RUNTIME flag; the editor
+// refuses it with exit 2 at main.cpp's refusal table, ahead of EditorApp and
+// every window. (A bare --headless would be refused earlier, "requires --frames
+// N", so the flag stands alone.) Not [gpu]: it returns before any device exists.
+TEST_CASE("E10b: the editor refuses --print-registry with exit 2 before any window", "[witness][editor]")
+{
+    WitnessScratch scratch(StagedEditorDir(), "e10b-print-registry");
+    WitnessInvocation inv;
+    inv.exePath = scratch.Dir() / Arcane::Platform::ExecutableFileName("ArcaneEditor"); inv.workingDir = scratch.Dir();
+    inv.args = { "--print-registry" };
+    inv.hardCapMs = 30000;
+    WitnessRun run = RunWitness(inv);
+    INFO("host stderr: " << run.stderrPath.string());
+    REQUIRE_FALSE(run.timedOut);
+    CHECK(run.exitCode == 2);
+    CHECK_FALSE(run.reportFound);
+    CHECK(ReadAllBytes(run.stderrPath).find("--print-registry is a RUNTIME flag") != std::string::npos);
+}
+
 TEST_CASE("E11: editor.settings.openAtBoot=both opens Editor Preferences and Project Settings through the real editor", "[witness][gpu]")
 {
     WitnessScratch scratch(StagedEditorDir(), "e11-settings-windows");

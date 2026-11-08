@@ -283,7 +283,12 @@ jobs:
 
       # The one-executable ReferenceProject, staged and run where it lands: its
       # own libSDL3 and no Arcane module (ldd), then a windowed boot (Xvfb +
-      # lavapipe) with no SDK, no Binaries/ and a bare PATH.
+      # lavapipe) with no SDK, no Binaries/ and a bare PATH, then REGISTRAR
+      # SURVIVAL (the packaged game's --print-registry equals the modular
+      # runtime's and carries the ReferenceGame roster) and HOST ISOLATION
+      # (ArcaneServer imports no Client/Developer/Editor module). Registrar
+      # survival runs on this leg ONLY (Linux, GNU ld): MSVC and macOS have no
+      # such witness yet -- see the follow-up issue linked from PR #15.
       - name: Package (Linux)
         if: env.PACKAGE_LANE == 'true'
         run: scripts/ci/package.sh ${{ matrix.config }}
@@ -534,7 +539,9 @@ jobs:
         run: sh Tests/Fixtures/LinkProbe/run.sh "$RUNNER_TEMP/linkprobe"
 
       # The one-executable ReferenceProject, staged and run where it lands:
-      # a load check (--print-engine-info) plus an imports check.
+      # a load check (--print-engine-info), an imports check and HOST ISOLATION
+      # (ArcaneServer imports no Client/Developer/Editor module). No registrar
+      # survival here: Linux-only for now (see the Linux package step).
       - name: Package (Windows)
         if: env.PACKAGE_LANE == 'true' && runner.os == 'Windows'
         shell: pwsh

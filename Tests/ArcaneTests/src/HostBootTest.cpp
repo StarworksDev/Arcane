@@ -217,6 +217,43 @@ TEST_CASE("EngineInfoJson sources the ABI from the engine constant", "[host]")
     CHECK(j["engineAbi"].get<std::uint32_t>() == Arcane::kGamePluginABIVersion);
 }
 
+namespace RegistryJsonTest
+{
+    struct Zeta { int v = 0; };
+    struct Alpha { float v = 0.0f; };
+}
+
+// --print-registry's payload (modularization s6, registrar survival): one line,
+// every registered component and every system factory by name, each list
+// sorted so a modular host and a packaged exe compare equal (names and counts).
+TEST_CASE("RegistryJson lists components and systems sorted, on one line", "[host]")
+{
+    auto creg = std::make_shared<Astra::ComponentRegistry>();
+    creg->RegisterComponent<RegistryJsonTest::Zeta>();
+    creg->RegisterComponent<RegistryJsonTest::Alpha>();
+
+    Arcane::SystemFactoryTable systems;
+    const int owner = 0;   // stands in for the registering module image
+    systems.BeginOwner(&owner);
+    systems.Add({ .name = "ZSystem" });
+    systems.Add({ .name = "ASystem" });
+    systems.Add({ .name = "MSystem" });
+    systems.EndOwner();
+
+    const std::string s = Arcane::HostBoot::RegistryJson(*creg, systems.Entries());
+    CHECK(s.find('\n') == std::string::npos);
+    const nlohmann::json j = nlohmann::json::parse(s);
+
+    REQUIRE(j["components"].is_array());
+    const auto components = j["components"].get<std::vector<std::string>>();
+    CHECK(components.size() == 2u);
+    CHECK(std::is_sorted(components.begin(), components.end()));
+    CHECK(std::ranges::any_of(components, [](const std::string& n) { return n.find("Alpha") != std::string::npos; }));
+    CHECK(std::ranges::any_of(components, [](const std::string& n) { return n.find("Zeta") != std::string::npos; }));
+
+    CHECK(j["systems"].get<std::vector<std::string>>() == std::vector<std::string>{ "ASystem", "MSystem", "ZSystem" });
+}
+
 TEST_CASE("EngineInfoJson carries build + exe path and parses cleanly", "[host]")
 {
     // Fed BACKSLASHES on purpose: the previous fixture passed an
