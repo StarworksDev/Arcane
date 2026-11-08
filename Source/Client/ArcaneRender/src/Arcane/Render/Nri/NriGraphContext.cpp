@@ -22,6 +22,7 @@
 #include <Arcane/Render/RenderBudgetSettings.hpp>   // RenderPostSettings -- the device-less post clamp
 #include <Arcane/Render/RenderDeviceSettings.hpp>   // MakeRenderDeviceDesc -- render.debug.*, render.uploadRingBytesPerFrame, the graph formats
 #include <Arcane/Render/Nri/NriDiagnostics.hpp>     // the crash chain, armed by whichever device exists
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>   // the albedo memo hit stamps it
 #include <Arcane/Render/RenderErrorLatch.hpp>   // the tagged "nri-graph" error seam
 #include <Arcane/Render/PostChainCache.hpp>         // PostChainDesc -- the frame's post-chain shape
 #include <Arcane/Render/GpuInstrumentation.hpp>       // GpuDeviceLostObserved -- the device-lost teardown gate
@@ -79,6 +80,22 @@ namespace Arcane
             const RenderFramePacket*& packet;
             ~PacketBindingReset() { packet = nullptr; }
         };
+
+        // Closes a context's residency clock frames on every exit of a RenderFrame /
+        // RenderFrameOffscreen that did not reach the boundary drain. `done` is set on
+        // the path that did (the caches' own EndFrame already ran there).
+        template <class F>
+        struct ResidencyFrameGuard
+        {
+            F close;
+            bool done = false;
+            ~ResidencyFrameGuard()
+            {
+                if (!done)
+                    close();
+            }
+        };
+        template <class F> ResidencyFrameGuard(F) -> ResidencyFrameGuard<F>;
 
         // Where the offline shader artifacts live, relative to the
         // executable. Resolved through ShaderPaths::ResolveFlavorDir, so a
@@ -158,6 +175,10 @@ namespace Arcane
     // each).
     NriGraphContext::NriGraphContext()
         : m_uploadRingBytes(Settings<RenderSettings>().uploadRingBytesPerFrame)
+        // render.upload.frameBudgetPercent of the ring slot, latched with it (Restart); never zero.
+        , m_uploadBudgetBytes(std::max<std::uint64_t>(
+              1u, Settings<RenderSettings>().uploadRingBytesPerFrame
+                      * Settings<RenderUploadSettings>().frameBudgetPercent / 100u))
     {
         LatchFramesInFlight();
     }
@@ -443,6 +464,21 @@ namespace Arcane
         if (!m_textures)
             return false;   // already logged
 
+        // The drop path takes ImGui's per-texture entries with it (spec Revision 6): both HUD
+        // nodes are built below and may stay null, and a dropped texture is on this lane.
+        m_textures->SetDropHook([this](nri::Texture* texture, Graveyard& graves, std::uint64_t fence)
+        {
+            if (m_imguiHud)
+                (void)m_imguiHud->InvalidateUserTexture(texture, graves, fence);
+            if (m_imguiGame)
+                (void)m_imguiGame->InvalidateUserTexture(texture, graves, fence);
+        });
+
+        // Device-wide texture invalidation reaches THIS context's cache through
+        // this hook (NriDevice::InvalidateTexture); the dtor unregisters it.
+        m_device->RegisterContext(this, [this](const Guid& id) { InvalidateContentTexture(id); },
+                                  [this] { DrainResidency(); });
+
         m_meshBuffers = NriMeshBufferCache::Create(*m_device);
         if (!m_meshBuffers)
             return false;   // already logged
@@ -678,9 +714,21 @@ namespace Arcane
         if (!id.IsValid() || !m_mesh || !m_textures || !m_device)
             return BindlessTable::kInvalidSlot;
 
-        const auto cached = m_meshAlbedoSlots.find(id);
-        if (cached != m_meshAlbedoSlots.end())
-            return cached->second;
+        // THE DEVICE-WIDE MEMO, keyed by (Guid, ColorSpace): a mesh albedo is
+        // scene content, always Srgb. Every context on the device shares it, so
+        // the editor's viewport, preview graph and harvester resolve one slot.
+        BindlessTable* bindless = m_device->Bindless();
+        if (!bindless)
+            return BindlessTable::kInvalidSlot;
+        const std::uint32_t known = bindless->Lookup(id, BindlessTable::ColorSpace::Srgb);
+        if (known != BindlessTable::kInvalidSlot)
+        {
+            // Asked for means about to be drawn. Never a cache Resolve here: another context may
+            // own the mapped copy, and resolving would make this context upload its own.
+            if (ResidencyAccount* account = m_device->ResidencyIfCreated())
+                account->Stamp(id, ResidencySlice::Texture, NriTextureCache::ColorSpace::Srgb);
+            return known;
+        }
 
         // Srgb, the scene default (NriTextureCache::ColorSpace) -- a mesh
         // albedo is scene content like a sprite's own texture, never chrome.
@@ -690,9 +738,8 @@ namespace Arcane
                                                    // warned, once (its own one-shot latch)
 
         // A SEPARATE, INDEPENDENTLY-OWNED view over the SAME texture --
-        // deliberately NOT m_textures->View(id). AddMaterial's own
-        // OWNERSHIP contract (MeshNode.hpp) takes the descriptor it is
-        // handed and destroys it at BindlessTable::Release; NriTextureCache
+        // deliberately NOT m_textures->View(id). The table takes the descriptor
+        // it is handed and destroys it when the slot retires; NriTextureCache
         // ALREADY owns and destroys ITS OWN view of this texture (any
         // sprite/material param naming the same asset reads that one). Two
         // owners destroying the SAME nri::Descriptor* is a double-destroy
@@ -715,30 +762,86 @@ namespace Arcane
         if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, bindlessView)) || !bindlessView)
             return BindlessTable::kInvalidSlot;   // already logged (ARC_NRI_CHECK)
 
-        const std::uint32_t slot = m_mesh->AddMaterial(bindlessView);
+        const std::uint32_t slot = bindless->AddMapped(id, BindlessTable::ColorSpace::Srgb, bindlessView, this, texture);
         if (slot == BindlessTable::kInvalidSlot)
         {
-            // AddMaterial/BindlessTable refused (a null srv cannot happen
-            // here -- CreateTextureView succeeded above -- so this is "the
-            // table is already full", already warned once by BindlessTable
-            // itself). The view just minted is now ownerless: nothing will
-            // ever bury it via a graph teardown, because it was never
-            // handed to anything that tracks it. Safe to destroy directly,
-            // with no fence/graveyard involved: Add() refused BEFORE ever
-            // writing it into the bindless descriptor set (BindlessTable::
-            // Add's own contract -- a refusal consumes no slot), so no
-            // command buffer can ever have read it.
+            // The table refused (a null srv cannot happen here --
+            // CreateTextureView succeeded above -- so this is "the table is
+            // full", already warned once by BindlessTable itself). The view just
+            // minted is now ownerless: nothing will ever bury it via a graph
+            // teardown, because it was never handed to anything that tracks it.
+            // Safe to destroy directly, with no fence/graveyard involved: the
+            // table refused BEFORE ever writing it into a bindless descriptor
+            // set, so no command buffer can ever have read it.
             core.DestroyDescriptor(bindlessView);
             return BindlessTable::kInvalidSlot;
         }
 
-        // ONLY a successful resolve is memoized -- a miss (not yet resident,
-        // refused, or a full table) is NOT cached here, so a later frame's
-        // ask for the same Guid tries again for free (NriTextureCache's own
-        // memoization already makes a repeat Resolve() on a known-failed or
+        // ONLY a successful resolve is memoized (AddMapped did it) -- a miss (not
+        // yet resident, refused, or a full table) is NOT cached, so a later
+        // frame's ask for the same Guid tries again for free (NriTextureCache's
+        // own memoization already makes a repeat Resolve() on a known-failed or
         // still-PendingCook key an O(1) map lookup, not a re-decode).
-        m_meshAlbedoSlots.emplace(id, slot);
         return slot;
+    }
+
+    std::uint32_t NriGraphContext::AcquireMeshAlbedoSlot(const Guid& id)
+    {
+        const std::uint32_t slot = ResolveMeshAlbedoSlot(id);
+        if (slot != BindlessTable::kInvalidSlot && m_device)
+            if (BindlessTable* bindless = m_device->Bindless())
+                bindless->AcquireRef(id, BindlessTable::ColorSpace::Srgb);
+        return slot;
+    }
+
+    void NriGraphContext::ReleaseMeshAlbedoRef(const Guid& id)
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->Bindless())
+            bindless->Release(id, BindlessTable::ColorSpace::Srgb);
+    }
+
+    void NriGraphContext::InvalidateMeshAlbedoSlot(const Guid& id)
+    {
+        if (!m_device)
+            return;
+        BindlessTable* bindless = m_device->Bindless();
+        if (!bindless)
+            return;
+        // Both colour spaces, exactly as NriTextureCache::Invalidate sweeps them.
+        bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
+        bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
+    }
+
+    void NriGraphContext::InvalidateTextureOnDevice(const Guid& id)
+    {
+        if (m_device)
+            m_device->InvalidateTexture(id);
+    }
+
+    void NriGraphContext::FlushMeshAlbedoReleases()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            bindless->FlushZeroRefs();
+    }
+
+    void NriGraphContext::StampReferencedMeshAlbedos()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            bindless->StampReferenced();
+    }
+
+    void NriGraphContext::ReleaseAllMeshAlbedoSlots()
+    {
+        if (!m_device)
+            return;
+        if (BindlessTable* bindless = m_device->Bindless())
+            bindless->ReleaseEveryMapping();
     }
 
     NriGraphContext::~NriGraphContext()
@@ -780,8 +883,21 @@ namespace Arcane
         // outcomes cost the crash teardown time and one more entry on the error
         // latch and buy nothing. The healthy path is unchanged -- every
         // ordinary shutdown has GpuDeviceLostObserved() == false.
-        if (core.DeviceWaitIdle && !GpuDeviceLostObserved())
+        const bool deviceLost = GpuDeviceLostObserved();
+        if (core.DeviceWaitIdle && !deviceLost)
             (void)ARC_NRI_CHECK(core.DeviceWaitIdle(&m_device->Device()));
+
+        // The bindless views this context minted name textures in ITS cache, which
+        // are buried below. Release those slots now: the device is idle, so every
+        // context's last use of them has retired and they are destroyed at once
+        // (on a lost device they wait for ~NriDevice). This context's notes in the
+        // last-use record go too -- its timeline is about to disappear.
+        m_device->UnregisterContext(this);
+        if (BindlessTable* bindless = m_device->Bindless())
+        {
+            bindless->ReleaseOwnedBy(this, !deviceLost);
+            bindless->ForgetContext(this);
+        }
 
         // ONE fence value for every burial below, and it is the graph's own
         // last submitted value -- the same one RenderGraph::
@@ -1213,6 +1329,11 @@ namespace Arcane
         // format-keyed pipeline stays a cache HIT across every resize.
     }
 
+    bool NriGraphContext::DeclareUploadNodes(RenderGraph& graph)
+    {
+        return AddUploadNodes(graph, m_textures.get(), m_meshBuffers.get(), UploadBudget::WithCap(m_uploadBudgetBytes));
+    }
+
     bool NriGraphContext::EnsureCaptureBuffer()
     {
         const std::uint32_t width  = SurfaceWidth();
@@ -1308,6 +1429,14 @@ namespace Arcane
         // inside exec fns (record time). Batch2DNode does.
         // ---------------------------------------------------------------
         RgFrameHandles handles;
+
+        // THE UPLOAD NODE IS FIRST (Plan C Task 5): it records the copies for the
+        // snapshot of mesh/texture uploads queued BEFORE this declaration began, ahead
+        // of every node that could draw from them. Nothing is declared when nothing is
+        // queued. An entry queued by a Resolve further down this function waits for
+        // the next frame's upload node.
+        if (context)
+            (void)context->DeclareUploadNodes(graph);
 
         const auto addEmpty = [&](const char* name) {
             graph.AddNode(name, RenderGraph::NodeKind::Compute,
@@ -1866,6 +1995,14 @@ namespace Arcane
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrame(const FrameDesc& frame)
     {
         const PacketBindingReset packetReset{ m_packet };
+        // A frame that returns Skipped/Failed never reaches the boundary below; the
+        // resolver may already have opened this context's clock frame, which would pin
+        // every entry stamped since and freeze eviction device-wide. Closes it on every
+        // such exit (clock only, nothing is evicted).
+        ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };
+        // The same for the upload queues: a frame that never submitted puts its
+        // snapshot back (and hands back what the exec fn buried).
+        ResidencyFrameGuard uploadGuard{ [this] { CommitUploads(false); } };
 
         // HOST-WINDOW ONLY. An offscreen context has no swapchain, so every
         // line below would dereference null; the twin is RenderFrameOffscreen.
@@ -1994,6 +2131,11 @@ namespace Arcane
         if (!m_graph->Execute(desc, *compiled))
             return RenderErrorCount() > errorsBefore ? FrameOutcome::Failed : FrameOutcome::Skipped;
 
+        // The frame SUBMITTED: its upload snapshot is recorded, so those entries are now
+        // ready -- for the NEXT frame's declaration, never this one's.
+        uploadGuard.done = true;
+        CommitUploads(true);
+
         // BEFORE the advance, deliberately: this frame's Resolve calls stamped
         // lastDrawnFrame with m_frameIndex's CURRENT value, and SelectEvictions
         // protects entries carrying exactly it. Evicting with the advanced counter
@@ -2008,6 +2150,15 @@ namespace Arcane
         if (m_meshBuffers)
             m_meshBuffers->EvictToBudget(m_frameIndex, m_graves,
                                          m_graph ? m_graph->DebugSubmitCount() : 0);
+        // The same boundary for the texture cache: it carries out the evictions the
+        // device account queued for it, on this lane, and ends its frame.
+        if (m_textures)
+            m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
+        // Both caches ended their frames above; and the holders that did NOT tick (an idle
+        // preview) get their queued evictions carried out on their own lanes now, so an
+        // evicted copy does not stay in VRAM while the account counts it free.
+        residencyGuard.done = true;
+        m_device->DrainOtherContexts(this);
         // The GPU scene's retirements (a grown instance buffer, a grown slot
         // buffer), stamped at declaration with the value this submit just
         // signalled -- see NriGraphContext::CurrentFence for why they wait
@@ -2038,6 +2189,8 @@ namespace Arcane
     NriGraphContext::FrameOutcome NriGraphContext::RenderFrameOffscreen(const FrameDesc& frame)
     {
         const PacketBindingReset packetReset{ m_packet };
+        ResidencyFrameGuard residencyGuard{ [this] { CloseResidencyFrames(); } };   // see RenderFrame
+        ResidencyFrameGuard uploadGuard{ [this] { CommitUploads(false); } };         // see RenderFrame
 
         if (m_mode != Mode::Offscreen)
         {
@@ -2142,6 +2295,11 @@ namespace Arcane
         if (!m_graph->Execute(desc, *compiled))
             return RenderErrorCount() > errorsBefore ? FrameOutcome::Failed : FrameOutcome::Skipped;
 
+        // The frame SUBMITTED: its upload snapshot is recorded, so those entries are now
+        // ready -- for the NEXT frame's declaration, never this one's.
+        uploadGuard.done = true;
+        CommitUploads(true);
+
         // ...and the pacing stamp the present path gets from
         // NriSwapChain::Present: a submission carrying no command buffers and
         // ONE signal, which the queue's in-order semantics make "signal once
@@ -2168,6 +2326,15 @@ namespace Arcane
         if (m_meshBuffers)
             m_meshBuffers->EvictToBudget(m_frameIndex, m_graves,
                                          m_graph ? m_graph->DebugSubmitCount() : 0);
+        // The same boundary for the texture cache: it carries out the evictions the
+        // device account queued for it, on this lane, and ends its frame.
+        if (m_textures)
+            m_textures->EvictPending(m_graves, m_graph ? m_graph->DebugSubmitCount() : 0);
+        // Both caches ended their frames above; and the holders that did NOT tick (an idle
+        // preview) get their queued evictions carried out on their own lanes now, so an
+        // evicted copy does not stay in VRAM while the account counts it free.
+        residencyGuard.done = true;
+        m_device->DrainOtherContexts(this);
         if (m_scene)
             m_scene->FlushGraves(m_graves);   // same contract as RenderFrame() above
 #if !defined(ARC_BUILD_DIST)

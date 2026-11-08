@@ -152,13 +152,13 @@ VSOutput vs_main(VSInput input, uint instanceId : SV_InstanceID)
 // THE BINDLESS MATERIAL TABLE (Task 8/10). A FIXED-size array -- not an
 // unbounded/runtime one -- because BindlessTable's capacity is decided once
 // at MeshNode creation and never resized (BindlessTable.hpp's SLOT POLICY).
-// kMeshBindlessCapacity MUST EQUAL MeshNode.cpp's own kBindlessCapacity
-// literal EXACTLY: CreateBindings() there sizes the matching descriptor
-// range to it. There is no compiler that checks the two agree, so this
-// comment (and its mirror in MeshNode.cpp) is the whole of that contract.
+// kMeshBindlessCapacity comes from build/engine-constants.lua: the generated
+// bindless-capacity.hlsli (and Arcane/Render/Generated/BindlessCapacity.gen.hpp,
+// which MeshNode.hpp includes) are checked in, and a drift test fails if a
+// rerun of scripts/generate-engine-constants would change them.
 // t0 in space2, matching MeshNode.cpp's bindlessSetDesc (THE REGISTER-SPACE
 // RULE, this file's MeshFrameCB comment above).
-#define kMeshBindlessCapacity 256
+#include "bindless-capacity.hlsli"
 Texture2D<float4> g_BindlessTextures[kMeshBindlessCapacity] : register(t0, space2);
 
 // THE ONE IMMUTABLE SAMPLER (Task 10's slice-one sampler strategy): a ROOT/

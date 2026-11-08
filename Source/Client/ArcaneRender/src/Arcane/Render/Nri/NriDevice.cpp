@@ -16,7 +16,12 @@
 
 #include "NriDevice.hpp"
 
+#include <atomic>
+
 #include "NriCommon.hpp"
+#include "BindlessTable.hpp"
+#include "ResidencyAccount.hpp"
+#include <Arcane/Render/Generated/BindlessCapacity.gen.hpp>
 
 #include <Arcane/Base/ForeignModules.hpp>   // ForeignModules::Report -- the injected-overlay scan, once, after the native device exists
 #include <Arcane/Base/Log.hpp>
@@ -38,11 +43,40 @@ namespace Arcane { struct D3D12DeviceCreation {}; }
 // undefine it after the last header that could define it.
 #undef ERROR
 
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 
+namespace
+{
+    // EnableDeviceWaitIdleCounting's forwarder -- a plain function pointer table entry
+    // carries no user data, so the real entry and the count are process-wide.
+    std::atomic<std::uint64_t> g_deviceWaitIdleCount{ 0 };
+    nri::Result (NRI_CALL* g_realDeviceWaitIdle)(nri::Device*) = nullptr;
+
+    nri::Result NRI_CALL CountingDeviceWaitIdle(nri::Device* device)
+    {
+        g_deviceWaitIdleCount.fetch_add(1, std::memory_order_relaxed);
+        return g_realDeviceWaitIdle(device);
+    }
+}
+
 namespace Arcane
 {
+    void NriDevice::EnableDeviceWaitIdleCounting()
+    {
+        if (m_core.DeviceWaitIdle && m_core.DeviceWaitIdle != &CountingDeviceWaitIdle)
+        {
+            g_realDeviceWaitIdle = m_core.DeviceWaitIdle;
+            m_core.DeviceWaitIdle = &CountingDeviceWaitIdle;
+        }
+    }
+
+    std::uint64_t NriDevice::DeviceWaitIdleCount() noexcept
+    {
+        return g_deviceWaitIdleCount.load(std::memory_order_relaxed);
+    }
+
     namespace
     {
         // ---------------------------------------------------------------
@@ -480,6 +514,76 @@ namespace Arcane
         return wrapped;
     }
 
+    NriDevice::NriDevice() = default;
+
+    BindlessTable* NriDevice::Bindless()
+    {
+        if (!m_bindless)
+            m_bindless = BindlessTable::Create(*this, Arcane::kBindlessCapacity, m_life);
+        return m_bindless.get();
+    }
+
+    ResidencyAccount& NriDevice::Residency()
+    {
+        if (!m_residency)
+            m_residency = std::make_unique<ResidencyAccount>(ResidencyAccount::LatchCaps());
+        return *m_residency;
+    }
+
+    ResidencyAccount& NriDevice::ResidencyForTests(const ResidencyCaps& caps)
+    {
+        if (!m_residency)
+            m_residency = std::make_unique<ResidencyAccount>(caps);
+        return *m_residency;
+    }
+
+    void NriDevice::RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture,
+                                    ResidencyDrainFn drainResidency)
+    {
+        for (ContextHook& h : m_contexts)
+            if (h.owner == owner)
+            {
+                h.invalidate = std::move(invalidateTexture);
+                h.drain = std::move(drainResidency);
+                return;
+            }
+        m_contexts.push_back(ContextHook{ owner, std::move(invalidateTexture), std::move(drainResidency) });
+    }
+
+    void NriDevice::UnregisterContext(const void* owner)
+    {
+        m_contexts.erase(std::remove_if(m_contexts.begin(), m_contexts.end(),
+                                        [owner](const ContextHook& h) { return h.owner == owner; }),
+                         m_contexts.end());
+    }
+
+    void NriDevice::InvalidateTexture(const Guid& id)
+    {
+        // Mappings first: the slots go pending (or retire at once), so the cache
+        // drops below find the slots that view the textures and join their retire.
+        if (m_bindless)
+        {
+            m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Srgb);
+            m_bindless->ReleaseAll(id, BindlessTable::ColorSpace::Display);
+        }
+        // A hook must not (un)register contexts, and must not destroy a context;
+        // the copy only protects the iteration.
+        const std::vector<ContextHook> hooks = m_contexts;
+        for (const ContextHook& h : hooks)
+            if (h.invalidate)
+                h.invalidate(id);
+    }
+
+    void NriDevice::DrainOtherContexts(const void* admitting)
+    {
+        // Iterate a copy (a hook must not (un)register contexts); the sequential
+        // recording assumption is documented at the declaration.
+        const std::vector<ContextHook> hooks = m_contexts;
+        for (const ContextHook& h : hooks)
+            if (h.owner != admitting && h.drain)
+                h.drain();
+    }
+
     NriDevice::~NriDevice()
     {
         if (!m_device)
@@ -521,6 +625,18 @@ namespace Arcane
         // still do is burn wall-clock inside a crash teardown and feed the
         // error latch, neither of which is worth anything here.
         const bool deviceLost = GpuDeviceLostObserved();
+
+        // The bindless table's descriptors go before the graveyard and before the
+        // device: the contexts are gone, so nothing samples them, and the idle
+        // below (shared with the graveyard drain) is what makes that true.
+        if (m_bindless)
+        {
+            if (m_core.DeviceWaitIdle && !deviceLost)
+                (void)ARC_NRI_CHECK(m_core.DeviceWaitIdle(m_device));
+            m_bindless->DestroyAllNow(!lostD3D12);
+            m_bindless.reset();
+        }
+
         if (m_graveyard.Pending() != 0)
         {
             if (m_core.DeviceWaitIdle && !deviceLost)

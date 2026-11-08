@@ -16,7 +16,11 @@
 // reaches <windows.h> through spdlog, which #defines it away via wingdi.h.
 #include <Arcane/Render/Nri/NriCommon.hpp>
 #include <Arcane/Render/Nri/NriDevice.hpp>
+#include <Arcane/Render/Nri/BindlessTable.hpp>   // AdoptTextureBacking (Invalidate)
 #include <Arcane/Render/Nri/Graveyard.hpp>
+#include <Arcane/Render/Nri/NriUploadRing.hpp>
+#include <Arcane/Render/Nri/NriUploadStaging.hpp>
+#include <Arcane/Render/Nri/ResidencyAccount.hpp>
 
 #include <Arcane/Assets/ArtifactReader.hpp>   // LoadedClientArtifact -- the compiled-texture supply (Task 7)
 #include <Arcane/Assets/ImageIo.hpp>   // PixelData -- the device-free decode (Task 1)
@@ -28,7 +32,9 @@
 
 #include <Arcane/Render/Nri/AssetsCookSettings.hpp>   // assets.cook.pendingRepollInterval (the PendingCook throttle)
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <string>
 
 namespace Arcane
@@ -37,6 +43,7 @@ namespace Arcane
     {
         std::unique_ptr<NriTextureCache> cache(new NriTextureCache());
         cache->m_device = &device;
+        cache->m_account = &device.Residency();   // one account per device; created (and latched) by the first cache
 
         // Resolved ONCE, here, rather than per upload: nriGetInterface is a
         // table copy, and doing it inside Resolve would repeat it for every
@@ -53,6 +60,8 @@ namespace Arcane
 
     NriTextureCache::~NriTextureCache()
     {
+        if (m_account)
+            m_account->UnchargeOwner(this);
         bool anyPlaceholders = false;
         for (const Resident& ph : m_placeholders)
             anyPlaceholders = anyPlaceholders || ph.texture || ph.view;
@@ -95,6 +104,17 @@ namespace Arcane
                 graveyard.Bury(fence, [core, t = resident.texture] { core->DestroyTexture(t); });
         }
         m_textures.clear();
+        m_queue.clear();
+        m_inflight.clear();
+        m_settling = false;
+        if (m_account)
+            m_account->UnchargeOwner(this);
+
+        // Textures the exec fn parked (a retried upload's old object, a dedicated
+        // staging buffer) belong to no key any more: they go on this lane too.
+        for (std::function<void()>& thunk : m_parked)
+            graveyard.Bury(fence, std::move(thunk));
+        m_parked.clear();
 
         // The checkerboard placeholder(s) -- ONCE each, never once per
         // PendingCook key (which never owned the object; see
@@ -117,8 +137,6 @@ namespace Arcane
     {
         if (!m_device)
             return;
-        const nri::CoreInterface* core = &m_device->Core();
-
         // Both colour spaces -- content is always Srgb, but sweeping Display
         // too costs one extra unordered_map lookup (almost always a miss)
         // and keeps this method correct even if a future caller ever DID
@@ -127,16 +145,115 @@ namespace Arcane
         // texture/view are always null (ResolveArtifactKey's own contract),
         // so only a genuinely RESIDENT key's own object is ever buried here.
         for (const ColorSpace space : { ColorSpace::Srgb, ColorSpace::Display })
+            DropKey(id, space, graveyard, fence);
+    }
+
+    // THE ONE DROP PATH for a key (Invalidate calls it per space; an account
+    // eviction calls it for the one space).
+    void NriTextureCache::DropKey(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_device)
+            return;
+        const nri::CoreInterface* core = &m_device->Core();
+
+        const auto it = m_textures.find(Key{ id, space });
+        if (it == m_textures.end())
+            return;
+        if (m_account)
+            m_account->Uncharge(this, id, ResidencySlice::Texture, space);
+        // An eviction of a not-ready key cancels its queued upload: never upload into
+        // a texture the account already dropped.
+        CancelUpload(Key{ id, space });
+        // Whoever caches per raw texture pointer goes first, in this lane, ahead of the burial below.
+        if (m_dropHook && it->second.texture)
+            m_dropHook(it->second.texture, graveyard, fence);
+        // A bindless slot (mapped or pending) may still view this texture from
+        // ANOTHER context's in-flight submit. Its destruction then joins the
+        // slot's retire (spec 3.5: the descriptor and the texture wait on the
+        // last-use record together): descriptors first, then this cache's own
+        // view, then the texture -- never at this context's fence alone.
+        if (it->second.texture)
+            if (BindlessTable* bindless = m_device->BindlessIfCreated())
+            {
+                const nri::Texture* texture = it->second.texture;
+                if (bindless->AdoptTextureBacking(
+                        texture, fence,
+                        [core, d = it->second.view, t = it->second.texture]
+                        {
+                            if (d) core->DestroyDescriptor(d);
+                            core->DestroyTexture(t);
+                        }))
+                {
+                    m_textures.erase(it);
+                    return;
+                }
+            }
+        if (it->second.view)
+            graveyard.Bury(fence, [core, d = it->second.view] { core->DestroyDescriptor(d); });
+        if (it->second.texture)
+            graveyard.Bury(fence, [core, t = it->second.texture] { core->DestroyTexture(t); });
+        m_textures.erase(it);
+    }
+
+    void NriTextureCache::Evict(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence)
+    {
+        const auto resident = m_textures.find(Key{ id, space });
+        if (!m_device || resident == m_textures.end())
+            return;
+        // The mapping first, so the slot goes pending (or retires at once) and the
+        // drop below finds it and joins its retire. Per colour space, unconditional --
+        // EXCEPT when the mapped slot views a texture that is not THIS cache's copy:
+        // another holder re-created the mapping over its own fresh copy after this
+        // eviction was queued, and releasing it would only cost that holder a re-resolve.
+        if (BindlessTable* bindless = m_device->BindlessIfCreated())
         {
-            const auto it = m_textures.find(Key{ id, space });
-            if (it == m_textures.end())
-                continue;
-            if (it->second.view)
-                graveyard.Bury(fence, [core, d = it->second.view] { core->DestroyDescriptor(d); });
-            if (it->second.texture)
-                graveyard.Bury(fence, [core, t = it->second.texture] { core->DestroyTexture(t); });
-            m_textures.erase(it);
+            const BindlessTable::ColorSpace bspace = space == ColorSpace::Display ? BindlessTable::ColorSpace::Display
+                                                                                  : BindlessTable::ColorSpace::Srgb;
+            const nri::Texture* mapped = bindless->MappedTexture(id, bspace);
+            if (!mapped || mapped == resident->second.texture)
+                bindless->ReleaseAll(id, bspace);
         }
+        DropKey(id, space, graveyard, fence);
+    }
+
+    void NriTextureCache::DrainPending(Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_account)
+            return;
+        for (const ResidencyEviction& ev : m_account->TakePending(this))
+            if (ev.slice == ResidencySlice::Texture)
+                Evict(ev.id, ev.space, graveyard, fence);
+    }
+
+    void NriTextureCache::EvictPending(Graveyard& graveyard, std::uint64_t fence)
+    {
+        if (!m_account)
+            return;
+        DrainPending(graveyard, fence);
+        m_account->EndFrame(this);
+    }
+
+    void NriTextureCache::CloseFrame()
+    {
+        if (m_account)
+            m_account->EndFrame(this);
+    }
+
+    void NriTextureCache::ChargeResident(const Key& key, const Resident& resident)
+    {
+        if (!m_account || resident.bytes == 0)
+            return;
+        (void)m_account->Charge(this, ResidencyEntry{ key.id, ResidencySlice::Texture, key.space, resident.bytes, 0 });
+    }
+
+    // A draw on the device clock; a key the account no longer holds for this cache
+    // (queued for eviction, drop not run yet) is charged again -- it was just drawn.
+    void NriTextureCache::NoteDraw(const Key& key, const Resident& resident)
+    {
+        if (!m_account || resident.bytes == 0)
+            return;
+        if (!m_account->Touch(this, key.id, ResidencySlice::Texture, key.space))
+            ChargeResident(key, resident);
     }
 
     std::size_t NriTextureCache::ResidentCount() const noexcept
@@ -182,6 +299,17 @@ namespace Arcane
         return found->second.view;
     }
 
+    std::uint64_t NriTextureCache::ViewSerial(const Guid& id, ColorSpace space) const noexcept
+    {
+        const auto found = m_textures.find(Key{ id, space });
+        if (found == m_textures.end())
+            return 0;
+        // The same answer View() gives: a PendingCook key shows the shared checkerboard.
+        if (found->second.state == ResidentState::PendingCook)
+            return m_placeholders[static_cast<std::size_t>(space)].viewSerial;
+        return found->second.view ? found->second.viewSerial : 0;
+    }
+
     nri::Texture* NriTextureCache::Resolve(const Guid& id, ColorSpace space)
     {
         // The ordinary untextured case -- every Rect, Line, Circle, glyph and
@@ -221,8 +349,10 @@ namespace Arcane
                 // Either the throttle window has not elapsed yet, or the
                 // supply was pulled mid-run (a vehicle teardown in progress,
                 // say) -- either way, keep serving the placeholder rather
-                // than silently going to nothing or polling early.
-                return m_placeholders[static_cast<std::size_t>(space)].texture;
+                // than silently going to nothing or polling early. A placeholder whose
+                // own upload has not landed yet is not bindable: null (the white texel).
+                const Resident& placeholder = m_placeholders[static_cast<std::size_t>(space)];
+                return placeholder.view ? placeholder.texture : nullptr;
             }
 
             // THE VIEW, NOT THE TEXTURE, IS WHAT "RESIDENT" MEANS (whole-branch
@@ -236,6 +366,11 @@ namespace Arcane
             // what the hit is gated on. The texture object itself stays owned
             // and is destroyed by Release()/ClearImmediate like any other, so
             // this leaks nothing; it just stops lying about what is resident.
+            // A QUEUED key is asked for every frame it waits: stamp it like a hit (touch the account) so
+            // it is not another Charge's victim before it ever draws (Plan C Task 5 review I4), then
+            // answer null below (no view yet).
+            if (cached->second.view || cached->second.pending)
+                NoteDraw(key, cached->second);
             return cached->second.view ? cached->second.texture : nullptr;
         }
 
@@ -286,8 +421,6 @@ namespace Arcane
             return nullptr;
         }
 
-        const nri::CoreInterface& core = m_device->Core();
-
         nri::TextureDesc textureDesc = {};
         textureDesc.type      = nri::TextureType::TEXTURE_2D;
         textureDesc.usage     = nri::TextureUsageBits::SHADER_RESOURCE;
@@ -307,58 +440,34 @@ namespace Arcane
         textureDesc.mipNum    = 1;   // mip 0 only
         textureDesc.layerNum  = 1;
         textureDesc.sampleNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateCommittedTexture(m_device->Device(), nri::MemoryLocation::DEVICE,
-                                                        0.0f, textureDesc, resident.texture))
-            || !resident.texture)
+        // The pixels are COPIED: the supply only promises its pointer for the duration
+        // of this call, and the upload node records the copy frames later.
+        auto pending = std::make_unique<PendingUpload>();
+        pending->desc      = textureDesc;
+        pending->debugName = "asset " + id.ToString() + (space == ColorSpace::Display ? " (display)" : "");
+        pending->payload   = pixels->rgba;
+        pending->mips.push_back(PendingUpload::Mip{ 0, pixels->width * 4, pixels->width * pixels->height * 4 });
+        if (!CreateTextureObject(resident, *pending))
         {
             reportMiss("CreateCommittedTexture failed");
-            resident.texture = nullptr;
             return nullptr;
         }
-        core.SetDebugName(resident.texture,
-                          ("asset " + id.ToString()
-                           + (space == ColorSpace::Display ? " (display)" : "")).c_str());
 
-        // Through NRI's OWN helper: UploadData submits and waits internally,
-        // which is why every caller must reach this at DECLARATION time and
-        // never from inside a node's open command buffer. It is also what keeps
-        // this file free of any CmdBarrier at all, so the graph's
-        // no-hand-barriers rule reads the same from outside as it does inside.
-        nri::TextureSubresourceUploadDesc subresource = {};
-        subresource.slices     = pixels->rgba.data();
-        subresource.sliceNum   = 1;
-        subresource.rowPitch   = pixels->width * 4;
-        subresource.slicePitch = pixels->width * pixels->height * 4;
-
-        nri::TextureUploadDesc upload = {};
-        upload.subresources = &subresource;
-        upload.texture      = resident.texture;
-        upload.after        = { nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE,
-                                nri::StageBits::FRAGMENT_SHADER };
-        upload.planes       = nri::PlaneBits::ALL;
-        if (!ARC_NRI_CHECK(m_helper.UploadData(*m_device->GraphicsQueue(), &upload, 1, nullptr, 0)))
+        resident.bytes = static_cast<std::uint64_t>(pixels->width) * pixels->height * 4u;   // mip 0, RGBA8
+        if (!FinishCreate(key, resident, std::move(pending)))
         {
-            reportMiss("the texture upload failed");
+            reportMiss("the texture upload failed, or its shader-resource view could not be created");
             return nullptr;
         }
 
-        nri::TextureViewDesc viewDesc = {};
-        viewDesc.texture  = resident.texture;
-        viewDesc.type     = nri::TextureView::TEXTURE;
-        viewDesc.format   = textureDesc.format;
-        viewDesc.mipNum   = 1;
-        viewDesc.layerNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, resident.view)) || !resident.view)
-        {
-            reportMiss("the shader-resource view could not be created");
-            resident.view = nullptr;
-            return nullptr;
-        }
-
-        ARC_DEBUG("[nri-graph] NriTextureCache: image {} ({}x{}, {}) is resident on the graph device",
+        ARC_DEBUG("[nri-graph] NriTextureCache: image {} ({}x{}, {}) {} on the graph device",
                   id.ToString(), pixels->width, pixels->height,
-                  space == ColorSpace::Display ? "display-referred" : "sRGB");
-        return resident.texture;
+                  space == ColorSpace::Display ? "display-referred" : "sRGB",
+                  m_mode == NriUploadMode::Immediate ? "is resident" : "is queued for upload");
+        ChargeResident(key, resident);
+        // DEFERRED: created and charged, not uploaded -- null until CommitUploads gives
+        // the key its view (the same null every not-ready key answers).
+        return resident.view ? resident.texture : nullptr;
     }
 
     // =====================================================================
@@ -411,8 +520,6 @@ namespace Arcane
             }
         }
 
-        const nri::CoreInterface& core = m_device->Core();
-
         nri::TextureDesc textureDesc = {};
         textureDesc.type      = nri::TextureType::TEXTURE_2D;
         textureDesc.usage     = nri::TextureUsageBits::SHADER_RESOURCE;
@@ -427,52 +534,28 @@ namespace Arcane
         textureDesc.mipNum    = 1;
         textureDesc.layerNum  = 1;
         textureDesc.sampleNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateCommittedTexture(m_device->Device(), nri::MemoryLocation::DEVICE,
-                                                        0.0f, textureDesc, placeholder.texture))
-            || !placeholder.texture)
+
+        // The placeholder goes through the SAME queue as any other payload, under the
+        // nil-Guid key (a real key can never be nil: Resolve refuses it first). Until
+        // its upload commits its view stays null, and a PendingCook key serves null
+        // (the white texel) rather than a checkerboard nobody has uploaded.
+        auto pending = std::make_unique<PendingUpload>();
+        pending->desc      = textureDesc;
+        pending->debugName = space == ColorSpace::Display ? "pending-cook placeholder (display)"
+                                                          : "pending-cook placeholder";
+        pending->payload   = std::move(pixels);
+        pending->mips.push_back(PendingUpload::Mip{ 0, kSize * 4, kSize * kSize * 4 });
+        if (!CreateTextureObject(placeholder, *pending))
         {
             ReportIssue("the pending-cook checkerboard placeholder could not be created");
-            placeholder.texture = nullptr;
             return placeholder;
         }
-        core.SetDebugName(placeholder.texture,
-                          space == ColorSpace::Display ? "pending-cook placeholder (display)"
-                                                        : "pending-cook placeholder");
-
-        nri::TextureSubresourceUploadDesc subresource = {};
-        subresource.slices     = pixels.data();
-        subresource.sliceNum   = 1;
-        subresource.rowPitch   = kSize * 4;
-        subresource.slicePitch = kSize * kSize * 4;
-
-        nri::TextureUploadDesc upload = {};
-        upload.subresources = &subresource;
-        upload.texture      = placeholder.texture;
-        upload.after        = { nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE,
-                                nri::StageBits::FRAGMENT_SHADER };
-        upload.planes       = nri::PlaneBits::ALL;
-        if (!ARC_NRI_CHECK(m_helper.UploadData(*m_device->GraphicsQueue(), &upload, 1, nullptr, 0)))
-        {
+        if (!FinishCreate(Key{ Guid::Nil(), space }, placeholder, std::move(pending)))
             ReportIssue("the pending-cook checkerboard placeholder failed to upload");
-            return placeholder;   // texture stays (see UploadArtifact's own note on why);
-                                    // view stays null, so this placeholder is never handed out
-        }
-
-        nri::TextureViewDesc viewDesc = {};
-        viewDesc.texture  = placeholder.texture;
-        viewDesc.type     = nri::TextureView::TEXTURE;
-        viewDesc.format   = textureDesc.format;
-        viewDesc.mipNum   = 1;
-        viewDesc.layerNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, placeholder.view)) || !placeholder.view)
-        {
-            ReportIssue("the pending-cook checkerboard placeholder's view could not be created");
-            placeholder.view = nullptr;
-        }
         return placeholder;
     }
 
-    bool NriTextureCache::UploadArtifact(const LoadedClientArtifact& artifact, Resident& resident)
+    bool NriTextureCache::UploadArtifact(const Key& key, const LoadedClientArtifact& artifact, Resident& resident)
     {
         if (artifact.mips.empty())
         {
@@ -512,8 +595,6 @@ namespace Arcane
             return false;
         }
 
-        const nri::CoreInterface& core = m_device->Core();
-
         nri::TextureDesc textureDesc = {};
         textureDesc.type      = nri::TextureType::TEXTURE_2D;
         textureDesc.usage     = nri::TextureUsageBits::SHADER_RESOURCE;
@@ -524,24 +605,17 @@ namespace Arcane
         textureDesc.mipNum    = (nri::Dim_t)artifact.mips.size();
         textureDesc.layerNum  = 1;
         textureDesc.sampleNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateCommittedTexture(m_device->Device(), nri::MemoryLocation::DEVICE,
-                                                        0.0f, textureDesc, resident.texture))
-            || !resident.texture)
-        {
-            ReportIssue("CreateCommittedTexture failed for a content artifact");
-            resident.texture = nullptr;
-            return false;
-        }
-        core.SetDebugName(resident.texture, "content artifact");
 
-        // One TextureSubresourceUploadDesc per mip, in mip order -- layerNum
-        // is 1 here (texture importer v1 is 2D-only), so subresource index ==
-        // mip index with no layer-stride ambiguity. BC7's rows are BLOCKS
-        // (Bc7RowPitch/Bc7SlicePitch), RGBA8's a straight width*4 passthrough
-        // -- see this cache's own doc comment on Bc7RowPitch for the NPOT
-        // reasoning (5->2->1 never rounds a row count down to zero: ceil, not
-        // floor).
-        std::vector<nri::TextureSubresourceUploadDesc> subresources(artifact.mips.size());
+        // One mip entry per level, in mip order -- layerNum is 1 here (texture
+        // importer v1 is 2D-only), so subresource index == mip index. BC7's rows are
+        // BLOCKS (Bc7RowPitch/Bc7SlicePitch), RGBA8's a straight width*4 passthrough
+        // -- see this cache's own doc comment on Bc7RowPitch for the NPOT reasoning
+        // (5->2->1 never rounds a row count down to zero: ceil, not floor). The mip
+        // bytes are COPIED out of the artifact (the supply only promises its pointer
+        // for the duration of the call), compactly, in mip order.
+        auto pending = std::make_unique<PendingUpload>();
+        pending->desc      = textureDesc;
+        pending->debugName = "content artifact";
         for (std::size_t i = 0; i < artifact.mips.size(); ++i)
         {
             const MipView& mip = artifact.mips[i];
@@ -550,58 +624,51 @@ namespace Arcane
                 ReportIssue("a content artifact's mip table overruns its own payload");
                 return false;
             }
-            nri::TextureSubresourceUploadDesc& sub = subresources[i];
-            sub.slices   = artifact.payload.data() + mip.offset;
-            sub.sliceNum = 1;
+            PendingUpload::Mip entry;
+            entry.offset = pending->payload.size();
             if (artifact.format == ArtifactPixelFormatValue::BC7)
             {
-                sub.rowPitch   = Bc7RowPitch(mip.width);
-                sub.slicePitch = Bc7SlicePitch(mip.width, mip.height);
+                entry.rowPitch   = Bc7RowPitch(mip.width);
+                entry.slicePitch = Bc7SlicePitch(mip.width, mip.height);
             }
             else
             {
-                sub.rowPitch   = mip.width * 4u;
-                sub.slicePitch = mip.width * mip.height * 4u;
+                entry.rowPitch   = mip.width * 4u;
+                entry.slicePitch = mip.width * mip.height * 4u;
             }
+            pending->mips.push_back(entry);
+            const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(artifact.payload.data()) + mip.offset;
+            pending->payload.insert(pending->payload.end(), src, src + mip.size);
         }
 
-        // Through NRI's OWN helper, exactly like the legacy path -- submits
-        // and waits internally, so this must run at DECLARATION time (see the
-        // header's NO BARRIERS note). A downstream failure here deliberately
-        // does NOT null `resident.texture`: the object was already created,
-        // and leaving it in place is what lets Release()/the destructor still
-        // find and destroy it -- the same reasoning the legacy path's own
-        // upload/view failures already rely on (see Resolve's HIT-check
-        // comment above).
-        nri::TextureUploadDesc upload = {};
-        upload.subresources = subresources.data();
-        upload.texture      = resident.texture;
-        upload.after        = { nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE,
-                                nri::StageBits::FRAGMENT_SHADER };
-        upload.planes       = nri::PlaneBits::ALL;
-        if (!ARC_NRI_CHECK(m_helper.UploadData(*m_device->GraphicsQueue(), &upload, 1, nullptr, 0)))
+        if (!CreateTextureObject(resident, *pending))
         {
-            ReportIssue("a content artifact's texture upload failed");
+            ReportIssue("CreateCommittedTexture failed for a content artifact");
             return false;
         }
 
-        nri::TextureViewDesc viewDesc = {};
-        viewDesc.texture  = resident.texture;
-        viewDesc.type     = nri::TextureView::TEXTURE;
-        viewDesc.format   = format;
-        viewDesc.mipNum   = (nri::Dim_t)artifact.mips.size();
-        viewDesc.layerNum = 1;
-        if (!ARC_NRI_CHECK(core.CreateTextureView(viewDesc, resident.view)) || !resident.view)
+        // What this key costs the device account: every mip, BC7 by blocks, RGBA8 by texels.
+        resident.bytes = 0;
+        for (const MipView& mip : artifact.mips)
+            resident.bytes += artifact.format == ArtifactPixelFormatValue::BC7
+                ? static_cast<std::uint64_t>(Bc7SlicePitch(mip.width, mip.height))
+                : static_cast<std::uint64_t>(mip.width) * mip.height * 4u;
+
+        // A downstream failure deliberately does NOT null `resident.texture`: the
+        // object was already created, and leaving it in place is what lets
+        // Release()/the destructor still find and destroy it.
+        if (!FinishCreate(key, resident, std::move(pending)))
         {
-            ReportIssue("a content artifact's shader-resource view could not be created");
-            resident.view = nullptr;
+            ReportIssue("a content artifact's texture upload failed, or its shader-resource view "
+                        "could not be created");
             return false;
         }
 
-        ARC_DEBUG("[nri-graph] NriTextureCache: content artifact ({}x{}, {} mip(s), {}) is resident "
-                  "on the graph device",
+        ARC_DEBUG("[nri-graph] NriTextureCache: content artifact ({}x{}, {} mip(s), {}) {} on the "
+                  "graph device",
                   artifact.info.width, artifact.info.height, artifact.mips.size(),
-                  artifact.format == ArtifactPixelFormatValue::BC7 ? "BC7" : "RGBA8");
+                  artifact.format == ArtifactPixelFormatValue::BC7 ? "BC7" : "RGBA8",
+                  m_mode == NriUploadMode::Immediate ? "is resident" : "is queued for upload");
         return true;
     }
 
@@ -644,7 +711,7 @@ namespace Arcane
             resident.texture = nullptr;
             resident.view    = nullptr;
             resident.state   = ResidentState::PendingCook;
-            return placeholder.texture;
+            return placeholder.view ? placeholder.texture : nullptr;   // not bindable until its upload lands
         }
 
         // A real artifact answered -- build from it. `resident` starts this
@@ -652,8 +719,331 @@ namespace Arcane
         // must not inherit a previous, unrelated attempt's partial state).
         resident.texture = nullptr;
         resident.view    = nullptr;
-        const bool ok = UploadArtifact(*artifact, resident);
+        resident.bytes = 0;
+        const bool ok = UploadArtifact(key, *artifact, resident);
         resident.state = ok ? ResidentState::Resident : ResidentState::Refused;
+        if (ok)
+            ChargeResident(key, resident);
         return resident.view ? resident.texture : nullptr;
+    }
+
+    // =====================================================================
+    // PLAN C TASK 5 -- THE DEFERRED UPLOAD QUEUE
+    // =====================================================================
+
+    bool NriTextureCache::CreateTextureObject(Resident& resident, const PendingUpload& pending)
+    {
+        const nri::CoreInterface& core = m_device->Core();
+        resident.texture = nullptr;
+        if (!ARC_NRI_CHECK(core.CreateCommittedTexture(m_device->Device(), nri::MemoryLocation::DEVICE,
+                                                        0.0f, pending.desc, resident.texture))
+            || !resident.texture)
+        {
+            resident.texture = nullptr;
+            return false;
+        }
+        core.SetDebugName(resident.texture, pending.debugName.c_str());
+        ++m_objectCreates;
+        return true;
+    }
+
+    std::uint64_t NriTextureCache::StagingBytes(const PendingUpload& pending) const
+    {
+        const nri::DeviceDesc& deviceDesc = m_device->Core().GetDeviceDesc(m_device->Device());
+        std::uint64_t total = 0;
+        for (const PendingUpload::Mip& mip : pending.mips)
+            total += UploadMipFootprint(mip.rowPitch, mip.slicePitch, 1u,
+                                        deviceDesc.memoryAlignment.uploadBufferTextureRow,
+                                        deviceDesc.memoryAlignment.uploadBufferTextureSlice).bytes;
+        return total;
+    }
+
+    bool NriTextureCache::CreateViewFor(Resident& resident, const nri::TextureDesc& desc)
+    {
+        nri::TextureViewDesc viewDesc = {};
+        viewDesc.texture  = resident.texture;
+        viewDesc.type     = nri::TextureView::TEXTURE;
+        viewDesc.format   = desc.format;
+        viewDesc.mipNum   = desc.mipNum;
+        viewDesc.layerNum = 1;
+        if (!ARC_NRI_CHECK(m_device->Core().CreateTextureView(viewDesc, resident.view)) || !resident.view)
+        {
+            resident.view = nullptr;
+            return false;
+        }
+        resident.viewSerial = ++m_viewSerials;
+        return true;
+    }
+
+    // THE OLD BLOCKING PATH (NriUploadMode::Immediate, tests only). Through NRI's
+    // own helper: UploadData submits and waits internally.
+    bool NriTextureCache::UploadPendingNow(Resident& resident)
+    {
+        const PendingUpload& pending = *resident.pending;
+        std::vector<nri::TextureSubresourceUploadDesc> subresources(pending.mips.size());
+        for (std::size_t i = 0; i < pending.mips.size(); ++i)
+        {
+            subresources[i].slices     = pending.payload.data() + pending.mips[i].offset;
+            subresources[i].sliceNum   = 1;
+            subresources[i].rowPitch   = pending.mips[i].rowPitch;
+            subresources[i].slicePitch = pending.mips[i].slicePitch;
+        }
+        nri::TextureUploadDesc upload = {};
+        upload.subresources = subresources.data();
+        upload.texture      = resident.texture;
+        upload.after        = { nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE,
+                                nri::StageBits::FRAGMENT_SHADER };
+        upload.planes       = nri::PlaneBits::ALL;
+        if (!ARC_NRI_CHECK(m_helper.UploadData(*m_device->GraphicsQueue(), &upload, 1, nullptr, 0)))
+            return false;
+        return CreateViewFor(resident, pending.desc);
+    }
+
+    bool NriTextureCache::FinishCreate(const Key& key, Resident& resident, std::unique_ptr<PendingUpload> pending)
+    {
+        resident.pending = std::move(pending);
+        if (m_mode == NriUploadMode::Immediate)
+        {
+            const bool ok = UploadPendingNow(resident);
+            resident.pending.reset();
+            return ok;
+        }
+        m_queue.push_back(key);
+        return true;
+    }
+
+    void NriTextureCache::CancelUpload(const Key& key)
+    {
+        m_queue.erase(std::remove(m_queue.begin(), m_queue.end(), key), m_queue.end());
+        m_inflight.erase(std::remove(m_inflight.begin(), m_inflight.end(), key), m_inflight.end());
+    }
+
+    void NriTextureCache::ParkTexture(nri::Texture* texture)
+    {
+        if (!texture)
+            return;
+        const nri::CoreInterface* core = &m_device->Core();
+        m_parked.push_back([core, texture] { core->DestroyTexture(texture); });
+    }
+
+    bool NriTextureCache::HasPendingUploads() const noexcept
+    {
+        return !m_queue.empty() || !m_inflight.empty() || m_settling;
+    }
+
+    bool NriTextureCache::UploadQueued(const Guid& id, ColorSpace space) const noexcept
+    {
+        const auto it = m_textures.find(Key{ id, space });
+        if (it == m_textures.end())
+            return false;
+        if (it->second.pending != nullptr)
+            return true;
+        // A PendingCook key shows the shared checkerboard: not bindable until THAT
+        // upload lands either.
+        return it->second.state == ResidentState::PendingCook
+            && m_placeholders[static_cast<std::size_t>(space)].pending != nullptr;
+    }
+
+    std::vector<NriTextureCache::UploadJob> NriTextureCache::BeginUploadFrame(UploadBudget& budget)
+    {
+        std::vector<UploadJob> jobs;
+        std::size_t consumed = 0;   // queue prefix leaving the queue: admitted or dead
+        for (; consumed < m_queue.size(); ++consumed)
+        {
+            const Key key = m_queue[consumed];
+            // The placeholder (nil Guid) lives outside m_textures.
+            const Resident* r = nullptr;
+            if (key.id.IsNil())
+                r = &m_placeholders[static_cast<std::size_t>(key.space)];
+            else if (const auto it = m_textures.find(key); it != m_textures.end())
+                r = &it->second;
+            if (!r || !r->pending || !r->texture)
+                continue;   // cancelled or refused since: dropped from the queue
+            if (!budget.Admit(StagingBytes(*r->pending)))
+                break;   // FIFO: it waits, and nothing behind it overtakes it
+            jobs.push_back(UploadJob{ key.id, key.space, r->texture });
+            m_inflight.push_back(key);
+        }
+        m_queue.erase(m_queue.begin(), m_queue.begin() + static_cast<std::ptrdiff_t>(consumed));
+        return jobs;
+    }
+
+    void NriTextureCache::RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                                       std::uint64_t budgetCap)
+    {
+        const Key key{ job.id, job.space };
+        Resident* r = nullptr;
+        if (key.id.IsNil())
+            r = &m_placeholders[static_cast<std::size_t>(key.space)];
+        else if (const auto it = m_textures.find(key); it != m_textures.end())
+            r = &it->second;
+        if (!r || !r->pending || r->texture != job.texture)
+            return;   // evicted (or replaced) since the snapshot: the upload was cancelled
+        if (std::find(m_inflight.begin(), m_inflight.end(), key) == m_inflight.end())
+            return;
+
+        const nri::CoreInterface& core = m_device->Core();
+        PendingUpload& pending = *r->pending;
+        const nri::DeviceDesc& deviceDesc = core.GetDeviceDesc(m_device->Device());
+        const std::uint32_t rowAlign   = deviceDesc.memoryAlignment.uploadBufferTextureRow;
+        const std::uint32_t sliceAlign = deviceDesc.memoryAlignment.uploadBufferTextureSlice;
+
+        // Footprint of every mip in the staging buffer, laid out exactly as NRI's own
+        // helper lays them out (NriUploadStaging.hpp pins the arithmetic).
+        std::vector<MipFootprint> footprints(pending.mips.size());
+        std::vector<std::uint64_t> offsets(pending.mips.size());
+        std::uint64_t total = 0;
+        for (std::size_t i = 0; i < pending.mips.size(); ++i)
+        {
+            footprints[i] = UploadMipFootprint(pending.mips[i].rowPitch, pending.mips[i].slicePitch, 1u,
+                                               rowAlign, sliceAlign);
+            offsets[i] = total;
+            total += footprints[i].bytes;
+        }
+
+        // CLASSIFIED HERE, after ring.BeginFrame (the setup fn only declared).
+        Staging cls = ClassifyBudgeted(ring.Fits(total, sliceAlign), ring.SlotCapacity(), budgetCap, total);
+        if (cls == Staging::Ring && m_debugForceRetry > 0)
+        {
+            --m_debugForceRetry;
+            cls = Staging::Retry;   // test injection: the guard branch below
+        }
+
+        // CPU write: for slice k=0 and row l, rowPitch bytes from the source row to the
+        // aligned destination row; one CmdUploadBufferToTexture per mip. The buffer
+        // offset is the aligned position; the next mip starts alignedSlicePitch*sliceNum on.
+        const auto writeAndCopy = [&](nri::Buffer& buffer, std::uint8_t* cpuBase, std::uint64_t bufferBase)
+        {
+            for (std::size_t i = 0; i < pending.mips.size(); ++i)
+            {
+                const PendingUpload::Mip& mip = pending.mips[i];
+                const MipFootprint& f = footprints[i];
+                const std::uint8_t* src = pending.payload.data() + mip.offset;
+                std::uint8_t* dst = cpuBase + offsets[i];
+                for (std::uint32_t row = 0; row < f.sliceRowNum; ++row)
+                    std::memcpy(dst + static_cast<std::size_t>(row) * f.alignedRowPitch,
+                                src + static_cast<std::size_t>(row) * mip.rowPitch, mip.rowPitch);
+
+                nri::TextureDataLayoutDesc srcLayout = {};
+                srcLayout.offset     = bufferBase + offsets[i];
+                srcLayout.rowPitch   = f.alignedRowPitch;
+                srcLayout.slicePitch = f.alignedSlicePitch;
+
+                nri::TextureRegionDesc dstRegion = {};
+                dstRegion.mipOffset = static_cast<nri::Dim_t>(i);
+
+                core.CmdUploadBufferToTexture(cmd, *r->texture, dstRegion, buffer, srcLayout);
+            }
+        };
+
+        if (cls == Staging::Ring)
+        {
+            const NriUploadRing::Alloc a = ring.Allocate(total, sliceAlign);
+            if (a.buffer && a.cpu)
+            {
+                writeAndCopy(*a.buffer, static_cast<std::uint8_t*>(a.cpu), a.offset);
+                return;   // stays in the snapshot: CommitUploads makes it ready
+            }
+            // Fits said yes and Allocate disagreed (an uninitialised ring): retry below.
+        }
+
+        if (cls == Staging::Dedicated)
+        {
+            // Over the budget's cap or larger than a whole ring slot: one committed HOST_UPLOAD
+            // buffer, uploaded THIS frame (not a retry; the ring's overflow count never moves).
+            // The staging buffer is not a graph resource; it is buried after the submit.
+            nri::BufferDesc desc = {};
+            desc.size  = total;
+            desc.usage = nri::BufferUsageBits::NONE;
+            nri::Buffer* staging = nullptr;
+            void* mapped = nullptr;
+            bool ok = ARC_NRI_CHECK(core.CreateCommittedBuffer(m_device->Device(), nri::MemoryLocation::HOST_UPLOAD,
+                                                               0.0f, desc, staging)) && staging;
+            if (ok)
+            {
+                core.SetDebugName(staging, "texture upload staging");
+                mapped = core.MapBuffer(*staging, 0, nri::WHOLE_SIZE);
+                ok = mapped != nullptr;
+            }
+            if (ok)
+            {
+                writeAndCopy(*staging, static_cast<std::uint8_t*>(mapped), 0);
+                core.UnmapBuffer(*staging);
+                m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
+                return;
+            }
+            if (staging)
+                m_parked.push_back([c = &core, staging] { c->DestroyBuffer(staging); });
+            // A burst can fail where this payload alone would not (spec Revision 6), so a failure
+            // takes the retry branch below, a bounded number of times, before it is memoized.
+            if (++pending.stagingTries >= kMaxStagingTries)
+            {
+                ReportIssue("the dedicated staging buffer for a texture upload could not be created or mapped "
+                            "-- the upload is refused");
+                // Memoized refusal: the key keeps its (now empty) entry; nothing retries it.
+                ParkTexture(r->texture);
+                r->texture = nullptr;
+                r->pending.reset();
+                r->bytes = 0;
+                r->state = ResidentState::Refused;
+                if (m_account && !key.id.IsNil())
+                    m_account->Uncharge(this, key.id, ResidencySlice::Texture, key.space);
+                CancelUpload(key);
+                return;
+            }
+        }
+
+        // RETRY: the payload fits an empty slot but not what is left of this one, or its
+        // dedicated staging failed above. Bury the device-local texture (this command buffer references it only through the
+        // upload entry barrier, so it waits for this submit's fence) and queue a fresh
+        // one for the next frame, whose cursor starts at 0. Allocate was not called, so
+        // the overflow count did not move.
+        ParkTexture(r->texture);
+        r->texture = nullptr;
+        m_inflight.erase(std::remove(m_inflight.begin(), m_inflight.end(), key), m_inflight.end());
+        if (!CreateTextureObject(*r, pending))
+        {
+            ReportIssue("a texture could not be recreated for its retried upload -- refused");
+            r->pending.reset();
+            r->bytes = 0;
+            r->state = ResidentState::Refused;
+            if (m_account && !key.id.IsNil())
+                m_account->Uncharge(this, key.id, ResidencySlice::Texture, key.space);
+            return;
+        }
+        m_queue.push_back(key);
+    }
+
+    void NriTextureCache::CommitUploads(bool submitted, Graveyard& graveyard, std::uint64_t fence)
+    {
+        for (std::function<void()>& thunk : m_parked)
+            graveyard.Bury(fence, std::move(thunk));
+        m_parked.clear();
+
+        std::size_t readied = 0;
+        for (const Key& key : m_inflight)
+        {
+            Resident* r = nullptr;
+            if (key.id.IsNil())
+                r = &m_placeholders[static_cast<std::size_t>(key.space)];
+            else if (const auto it = m_textures.find(key); it != m_textures.end())
+                r = &it->second;
+            if (!r || !r->pending)
+                continue;   // dropped mid-frame
+            if (!submitted)
+            {
+                m_queue.push_back(key);   // the frame never ran: try again next frame
+                continue;
+            }
+            // Ready == has a view. A view that cannot be created leaves the memoized
+            // "texture, no view" failure the pre-Task-5 path left.
+            if (!CreateViewFor(*r, r->pending->desc))
+                ReportIssue("the shader-resource view of an uploaded texture could not be created");
+            r->pending.reset();
+            ++readied;
+        }
+        m_inflight.clear();
+        if (submitted)
+            m_settling = readied > 0;
     }
 }

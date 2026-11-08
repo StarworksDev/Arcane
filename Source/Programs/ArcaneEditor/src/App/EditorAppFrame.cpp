@@ -679,7 +679,14 @@ namespace Arcane::Editor
             DrawViewportPanelPhase(fs);
             HandleViewportPick(fs);
             DrawSelectionPanels();
-            if (!PresentFrame())
+            const bool presented = PresentFrame();
+            // Plan C N1: the device-side texture drops the UI phase raised
+            // (InvalidateAssetCaches), run HERE and on every outcome: the
+            // chrome ImGui frame is discharged (RenderToDrawData), so no draw
+            // list that named one of these textures by raw pointer can be
+            // recorded again, and the next frame's renders have not begun.
+            m_textureDrops.Drain();
+            if (!presented)
             {
                 continue;
             }
@@ -2031,7 +2038,10 @@ namespace Arcane::Editor
         };
         rc.producersIdle      = [](void* user) -> bool {
             auto* app = static_cast<EditorApp*>(user);
-            const bool shaderIdle       = app->m_shaderCompiler ? app->m_shaderCompiler->IsIdle() : true;
+            // Deferred mesh/texture uploads (Plan C Task 5) widen the shader conjunct: the
+            // upload frame renders byte-identical to the frame that queued it.
+            const bool shaderIdle       = (app->m_shaderCompiler ? app->m_shaderCompiler->IsIdle() : true)
+                                          && !app->GraphUploadsPending();
             const bool cookPending      = app->m_cookQueue && app->m_cookQueue->CookPending();
             const bool harvesterPending = app->m_materialThumbs && app->m_materialThumbs->PendingCount() != 0;
             return Arcane::SettleProducersIdle(shaderIdle, app->m_cookQueueSettling, cookPending, harvesterPending);
@@ -2854,10 +2864,12 @@ namespace Arcane::Editor
         const Arcane::Editor::PlayLaunchMode publishedPlayMode =
             Arcane::Settings<Arcane::Editor::EditorPlaySettings>().launchMode;
         Arcane::Editor::PlayLaunchMode playMode = publishedPlayMode;
+        const std::uint64_t logoTex = ToolbarLogoTextureId();   // the ask first: it may (re)queue the mark
+        stripStatus.logoPending = (logoTex == 0) && ToolbarLogoPending();
         const Arcane::Editor::ToolbarResult toolbar =
             Arcane::Editor::DrawSimTimeToolbar(m_play, m_runtime->Core(),
                                                m_plugin ? &*m_plugin : nullptr, playMode,
-                                               ToolbarLogoTextureId(), stripStatus,
+                                               logoTex, stripStatus,
                                                [this]() { BeforePlayStart(); });   // T1-B14's beforePlay (s3.3b)
         if (playMode != publishedPlayMode)
             Arcane::Editor::SetPlayLaunchMode(playMode);
@@ -4879,7 +4891,11 @@ namespace Arcane::Editor
             const bool byteEqual = m_previousCaptureValid &&
                                     w == m_previousCaptureWidth && h == m_previousCaptureHeight &&
                                     actual == m_previousCaptureRgba;
-            const bool shaderIdle = m_shaderCompiler ? m_shaderCompiler->IsIdle() : true;
+            // Plus deferred mesh/texture uploads (Plan C Task 5): the upload frame renders
+            // byte-identical to the frame that queued it, so byte-equal frames alone would
+            // converge before the asset appears.
+            const bool shaderIdle = (m_shaderCompiler ? m_shaderCompiler->IsIdle() : true)
+                                    && !GraphUploadsPending();
             // Task 12a fix (task12-rca-report.md, root cause H3): byte-equal
             // + shader-idle proves the RENDER is quiescent, not that the
             // async cook/import-reconciliation pipeline feeding the Asset

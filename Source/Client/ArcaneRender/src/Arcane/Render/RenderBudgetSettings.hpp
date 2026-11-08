@@ -1,7 +1,8 @@
 #pragma once
 
-// Render budgets (settings arc S6-18; inventory Part 2 "Render graph context
-// and budgets", "Batch2D", "Mesh pass", "Post chain", "ImGui NRI backend").
+// Render budgets (settings arc S6-18; 3D-readiness Plan C Task 3; inventory Part 2
+// "Render graph context and budgets", "Batch2D", "Mesh pass", "Post chain",
+// "ImGui NRI backend", "Texture and mesh caches").
 // Every field sizes a pool, a ring, a buffer or a budget that is fixed when
 // its owner is created, so every one is Restart: the owner LATCHES its caps
 // once, at creation, and a value published later never resizes a live pool.
@@ -16,13 +17,17 @@
 //                       (a hard cap: ad-hoc instances past it are dropped).
 // - render.mesh.*       RenderMeshSettings: NriMeshBufferCache's residency
 //                       budget (the eviction threshold).
+// - render.texture.*    RenderTextureSettings: the texture slice of the device
+//                       residency account (latched at account creation).
+// - render.residency.*  RenderResidencySettings: the reservation percent each
+//                       slice keeps from the other.
 // - render.post.*       RenderPostSettings: PostChainNode's passes, declared
 //                       textures and material CB region size.
 // - render.imgui.*      RenderImguiSettings: ImGuiNri's descriptor-pool chain.
 //
-// Every field is Game Dev, Project, Restart, except the two a content author
-// can plausibly outgrow: render.batch2d.maxSpriteTextures and
-// render.mesh.residencyBudgetBytes (Game).
+// Every field is Game Dev, Project, Restart, except the three a content author
+// can plausibly outgrow: render.batch2d.maxSpriteTextures,
+// render.mesh.residencyBudgetBytes and render.texture.residencyBudgetBytes (Game).
 
 #include <Arcane/Config/Settings.hpp>
 #include <Arcane/Render/RenderDeviceSettings.hpp>   // RenderSettings (render.uploadRingBytesPerFrame)
@@ -93,6 +98,48 @@ namespace Arcane
             ARC_REFLECT_ATTR(Range, 67108864.0, 17179869184.0)
             ARC_REFLECT_ATTR(Tooltip, "Memory budget, in bytes, for resident meshes (CPU copy plus GPU buffers). Past it the "
                                       "least recently drawn meshes are evicted and re-upload when next drawn.")
+    ARC_END_REFLECT_TYPE()
+
+    struct RenderTextureSettings
+    {
+        std::uint64_t residencyBudgetBytes = 512ull << 20;
+    };
+
+    ARC_REFLECT_TYPE(RenderTextureSettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.texture", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_FIELD(RenderTextureSettings, residencyBudgetBytes)
+            ARC_REFLECT_ATTR(Range, 67108864.0, 17179869184.0)
+            ARC_REFLECT_ATTR(Tooltip, "Texture slice of the device residency account, in bytes, latched at account creation.")
+    ARC_END_REFLECT_TYPE()
+
+    struct RenderResidencySettings
+    {
+        std::uint32_t reservationPercent = 50;
+    };
+
+    ARC_REFLECT_TYPE(RenderResidencySettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.residency", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_TYPE_ATTR(Flags, CVarFlags::Dev)
+        ARC_REFLECT_FIELD(RenderResidencySettings, reservationPercent)
+            ARC_REFLECT_ATTR(Range, 0.0, 100.0)
+            ARC_REFLECT_ATTR(Tooltip, "Percent of each slice's own cap that the other slice may not borrow.")
+    ARC_END_REFLECT_TYPE()
+
+    // Plan C Task 5: the share of one upload-ring slot the `upload` node may spend per frame.
+    struct RenderUploadSettings
+    {
+        std::uint32_t frameBudgetPercent = 50;
+    };
+
+    ARC_REFLECT_TYPE(RenderUploadSettings)
+        ARC_REFLECT_TYPE_ATTR(Settings, "render.upload", SettingScope::Project, ApplyMode::Restart, Audience::Game)
+        ARC_REFLECT_TYPE_ATTR(Flags, CVarFlags::Dev)
+        ARC_REFLECT_FIELD(RenderUploadSettings, frameBudgetPercent)
+            ARC_REFLECT_ATTR(Range, 10.0, 100.0)
+            ARC_REFLECT_ATTR(Tooltip, "Percent of each frame's upload ring (render.uploadRingBytesPerFrame) that first-use mesh "
+                                      "and texture uploads may take, so a burst of new assets cannot starve the frame's own "
+                                      "sprite, overlay and scene data. Payloads over the cap upload through a one-off staging "
+                                      "buffer; the rest of a burst waits a frame. Latched with the ring size.")
     ARC_END_REFLECT_TYPE()
 
     struct RenderPostSettings

@@ -26,6 +26,16 @@ namespace Arcane
         Services services;
         std::unordered_map<Guid, ResolvedMeshMaterial> table;
         std::unordered_set<Guid> failed;
+        // Materials whose slot the device released: Request re-resolves their
+        // albedo (until it lands) without re-reading the asset.
+        std::unordered_set<Guid> reresolve;
+
+        // A resolved material holding a slot gives its reference back.
+        void ReleaseRef(const ResolvedMeshMaterial& r) const
+        {
+            if (r.materialSlot != 0xFFFFFFFFu && r.albedo.IsValid() && services.releaseAlbedoSlot)
+                services.releaseAlbedoSlot(r.albedo);
+        }
     };
 
     namespace
@@ -102,8 +112,28 @@ namespace Arcane
     void MeshMaterialCache::Request(const Guid& id)
     {
         Impl& im = *m_impl;
-        if (!id.IsValid() || im.table.contains(id) || im.failed.contains(id))
+        if (!id.IsValid() || im.failed.contains(id))
             return;
+        if (const auto known = im.table.find(id); known != im.table.end())
+        {
+            // Known. The only work left: a slot the device released is re-resolved
+            // (the texture may be resident by now), once it lands the flag clears.
+            if (!im.reresolve.empty() && im.reresolve.contains(id))
+            {
+                ResolvedMeshMaterial& r = known->second;
+                if (r.albedo.IsValid() && im.services.resolveAlbedoSlot)
+                {
+                    r.materialSlot = im.services.resolveAlbedoSlot(r.albedo);
+                    if (r.materialSlot != 0xFFFFFFFFu)
+                        im.reresolve.erase(id);
+                }
+                else
+                {
+                    im.reresolve.erase(id);
+                }
+            }
+            return;
+        }
 
         // Same shape as SpriteMaterialCache::Request's fail() -- WARN once,
         // memoize into `failed` so the guard above turns back every later
@@ -195,21 +225,47 @@ namespace Arcane
         // installed (every CPU test, and a host before its graph context
         // exists), leaves the default materialSlot -- kInvalidSlot's value,
         // mesh.hlsl's flat baseColor path.
+        bool needsReresolve = false;
         if (resolved.albedo.IsValid() && im.services.resolveAlbedoSlot)
+        {
             resolved.materialSlot = im.services.resolveAlbedoSlot(resolved.albedo);
+            // A table at capacity (or a texture not resident yet) answers invalid;
+            // that must NOT be stored flat for the life of the entry -- queue the
+            // material so a later Request re-resolves it once a slot frees.
+            needsReresolve = resolved.materialSlot == 0xFFFFFFFFu;
+        }
 
         im.table.emplace(id, resolved);
+        if (needsReresolve)
+            im.reresolve.insert(id);
     }
 
     void MeshMaterialCache::Invalidate(const Guid& id)
     {
+        if (const auto it = m_impl->table.find(id); it != m_impl->table.end())
+            m_impl->ReleaseRef(it->second);
         m_impl->table.erase(id);
         m_impl->failed.erase(id);
+        m_impl->reresolve.erase(id);
     }
 
     void MeshMaterialCache::Clear()
     {
+        for (const auto& kv : m_impl->table)
+            m_impl->ReleaseRef(kv.second);
         m_impl->table.clear();
         m_impl->failed.clear();
+        m_impl->reresolve.clear();
+    }
+
+    void MeshMaterialCache::ResetAlbedoSlot(std::uint32_t slot)
+    {
+        for (auto& kv : m_impl->table)
+        {
+            if (kv.second.materialSlot != slot)
+                continue;
+            kv.second.materialSlot = 0xFFFFFFFFu;
+            m_impl->reresolve.insert(kv.first);
+        }
     }
 }

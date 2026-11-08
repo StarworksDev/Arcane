@@ -1787,6 +1787,11 @@ namespace Arcane::Editor
         }
     }
 
+    bool ShaderEditorDocument::PreviewUploadsPending() const noexcept
+    {
+        return m_graphPreview && m_graphPreview->HasPendingUploads();
+    }
+
     ShaderEditorDocument::MeshPreviewParams ShaderEditorDocument::MeshPreviewInputs() const
     {
         // The same two names MeshMaterialCache resolves off disk (and the

@@ -29,14 +29,31 @@
 // fires only on a Resolve that MISSES -- a frame full of colored quads (every
 // span carrying a nil Guid) says nothing at all.
 //
-// NO BARRIERS, and none needed. Uploads go through NRI's own
-// HelperInterface::UploadData, which submits and waits internally and leaves
-// the texture in SHADER_RESOURCE -- so these textures are NOT graph resources
-// (they are persistent, never written by a node, and their state never
-// changes), which is why nothing about them appears in a compiled frame. They
-// must therefore be resolved at DECLARATION time, never from inside a node's
-// exec fn: UploadData submitting while the frame's command buffer is open is
-// exactly the shape the graph's no-hand-barriers rule exists to prevent.
+// UPLOADS ARE DEFERRED (Plan C Task 5, user ruling 2026-11-06). Resolve of an image
+// with no bytes on the GPU creates the texture (charged to the device account at
+// once), COPIES the pixels, QUEUES the upload and answers NOT-READY (null, the same
+// "bind the white texel" answer every other not-ready key gives) -- so no consumer
+// ever binds or samples a not-ready texture. The graph's `upload` node
+// (nodes/UploadNode.hpp), declared first in the frame, takes a SNAPSHOT of the queue
+// (BeginUploadFrame), records the copies in its exec fn (RecordUpload -- ring / retry
+// / dedicated staging, classified AFTER ring.BeginFrame), imports the texture at the
+// unknown state and leaves it in its ShaderRead exit state. The vehicle calls
+// CommitUploads once the frame submitted: only then does the key get its view and
+// become ready, so its first consumer is a LATER frame's declaration. Timeline:
+// frame N queues, N+1 uploads, N+2 draws.
+//
+// A KEY CAN GO AWAY. The device residency account evicts cold keys and a cook invalidates
+// them, and the texture dies at this cache's fence. So whoever holds what this cache
+// handed out -- a descriptor set baked over View(), a raw nri::Texture* -- asks Resolve on
+// every frame it draws, before any memo of its own: the ask is the only thing that tells
+// the account it is drawn. And it compares ViewSerial, so it knows when what it baked is
+// gone (spec Revision 6). While a key is queued again it behaves as on first use.
+//
+// Textures stay NOT graph resources for SAMPLING (persistent, never written by a
+// node after their upload frame, state never changes), which is why nothing about
+// them appears in an ordinary compiled frame. Resolve is still a DECLARATION-time
+// call, never an exec-fn one. The pre-Task-5 blocking path (UploadData inside
+// Resolve) survives as NriUploadMode::Immediate, for tests only.
 //
 // Include order: NRI headers first, ALWAYS -- see NriCommon.hpp
 // (Extensions/NRIDeviceCreation.h declares nri::Message::ERROR and
@@ -46,6 +63,7 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Guid.hpp>
+#include <Arcane/Render/Nri/NriUploadMode.hpp>
 
 #include <array>
 #include <cstddef>
@@ -54,11 +72,14 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Arcane
 {
     class Graveyard;
     class NriDevice;
+    class NriUploadRing;
+    class ResidencyAccount;
     struct PixelData;
     struct LoadedClientArtifact;
 
@@ -161,6 +182,57 @@ namespace Arcane
         using CookPendingOracle = std::function<bool(const Guid&)>;
         void SetCookPendingOracle(CookPendingOracle oracle) { m_cookPendingOracle = std::move(oracle); }
 
+        // Production is Deferred. Immediate is the old blocking path, TEST ONLY.
+        void SetUploadMode(NriUploadMode mode) noexcept { m_mode = mode; }
+
+        // ---- the upload node's seams (Plan C Task 5) --------------------------
+
+        // One entry of an `upload` node's snapshot.
+        struct UploadJob
+        {
+            Guid                 id;
+            ColorSpace           space   = ColorSpace::Srgb;
+            nri::Texture*        texture = nullptr;
+        };
+
+        // True from the Resolve that queued an upload until one frame AFTER the key
+        // became ready (the first frame that could sample it has then been recorded).
+        // The one-shot renderers' "is this picture final" question.
+        [[nodiscard]] bool HasPendingUploads() const noexcept;
+        // Keys queued and not yet in a snapshot.
+        [[nodiscard]] std::size_t QueuedUploadCount() const noexcept { return m_queue.size(); }
+        // Whether (id, space) was created and is waiting for its upload (queued or in
+        // the current snapshot) -- how a caller tells "not yet" from "refused".
+        [[nodiscard]] bool UploadQueued(const Guid& id, ColorSpace space = ColorSpace::Srgb) const noexcept;
+        // The upload node's setup: moves the queue into the frame's snapshot. Keys
+        // queued AFTER this call wait for the next frame.
+        // `budget`: the context's per-frame budget, shared with the mesh cache -- FIFO admission while
+        // the keys' staging bytes fit; the first that does not fit stops the snapshot and stays queued
+        // with its texture (nothing destroyed or recreated); one payload over the cap is admitted per
+        // frame at no ring cost (dedicated staging), and the next one over it waits (UploadBudget).
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame(UploadBudget& budget);
+        [[nodiscard]] std::vector<UploadJob> BeginUploadFrame()
+        {
+            UploadBudget unlimited;
+            return BeginUploadFrame(unlimited);
+        }
+        // The upload node's exec fn, after ring.BeginFrame: classifies the payload
+        // (ring / retry / dedicated) and records one upload per mip. No CmdBarrier.
+        // A dedicated staging buffer that cannot be created or mapped takes the retry
+        // branch for up to kMaxStagingTries tries, then the key is memoized as refused.
+        // `budgetCap`: the budget's cap -- a payload over it takes dedicated staging, never the ring.
+        void RecordUpload(const UploadJob& job, nri::CommandBuffer& cmd, NriUploadRing& ring,
+                          std::uint64_t budgetCap = ~0ull);
+        // TEST INSTRUMENTS: force the next `count` ring-class payloads down the retry branch, and read how
+        // many device textures were ever created for uploads.
+        void DebugForceRetry(std::uint32_t count) noexcept { m_debugForceRetry = count; }
+        [[nodiscard]] std::uint64_t ObjectCreateCount() const noexcept { return m_objectCreates; }
+        // After the frame: `submitted` gives every snapshot key that is still queued
+        // its view and makes it ready; false (Execute failed or the frame never ran)
+        // puts them back in the queue. Buffers/textures the exec fn buried go to
+        // `graveyard` at `fence` (this context's lane). Call once per frame attempt.
+        void CommitUploads(bool submitted, Graveyard& graveyard, std::uint64_t fence);
+
         // The texture for `id` on this device, uploading it on first sight.
         //
         // THREE OUTCOMES on the artifact-shaped path (Srgb, ArtifactSupplyFn
@@ -217,6 +289,25 @@ namespace Arcane
         [[nodiscard]] nri::Descriptor* View(const Guid& id,
                                             ColorSpace space = ColorSpace::Srgb) const;
 
+        // WHICH view View() would answer with, as a value never reused on this cache: 0
+        // when there is none. A BAKED CONSUMER (a descriptor set) stores this next to what
+        // it baked and compares it every frame (spec Revision 6: evictions and cooks drop
+        // textures, and only the cache knows). Not the pointer: NRI does not ref-count, so
+        // a replacement view may land on the address the dead one vacated, and a consumer
+        // that was off screen meanwhile would see an equal pointer naming another object.
+        [[nodiscard]] std::uint64_t ViewSerial(const Guid& id,
+                                               ColorSpace space = ColorSpace::Srgb) const noexcept;
+
+        // Told about every texture leaving through the one drop path (eviction, Invalidate),
+        // BEFORE this cache buries it, with the lane and fence it is about to be buried at. So
+        // something that caches per raw nri::Texture* -- ImGuiNri, whose entries key on the
+        // pointer -- can bury its own view in the same lane, ahead of the texture. Installed
+        // once, by the vehicle. A key whose texture a bindless slot views dies through the
+        // slot's retire instead (AdoptTextureBacking), which no ImGui entry shares: ImGui draws
+        // Display textures and a bindless albedo is always Srgb.
+        using TextureDropFn = std::function<void(nri::Texture*, Graveyard&, std::uint64_t)>;
+        void SetDropHook(TextureDropFn hook) { m_dropHook = std::move(hook); }
+
         // Buries every NRI object this cache owns at `fence` and empties it --
         // views before the textures they view, so the graveyard's in-order
         // reaping can never destroy a texture a live descriptor still names.
@@ -244,6 +335,30 @@ namespace Arcane
         // is never invalidated out from under it. A no-op for a guid this
         // cache has never resolved.
         void Invalidate(const Guid& id, Graveyard& graveyard, std::uint64_t fence);
+
+        // An ACCOUNT EVICTION of ONE (id, space) entry (Plan C Task 4): releases that
+        // space's bindless mappings unconditionally (BindlessTable::ReleaseAll -- an
+        // eviction ends residency regardless of holders, so never the refcount
+        // Release), then drops ONLY that key through the same drop path Invalidate
+        // uses (a texture a bindless slot views is destroyed through the slot
+        // backing, never directly). The other space's entry, slot and texture stay.
+        // A no-op when this cache does not hold the key.
+        void Evict(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence);
+
+        // The frame-boundary half of the device residency account for THIS cache:
+        // carries out the evictions the account queued for it (Evict, on this cache's
+        // own lane and fence) and ends its frame on the device clock. The vehicle
+        // calls it where it calls NriMeshBufferCache::EvictToBudget.
+        void EvictPending(Graveyard& graveyard, std::uint64_t fence);
+
+        // Just the queue half of EvictPending (no EndFrame): what another context's
+        // boundary runs for THIS cache through NriDevice::DrainOtherContexts, on this
+        // cache's own graveyard at its own last-submitted fence.
+        void DrainPending(Graveyard& graveyard, std::uint64_t fence);
+
+        // Just the clock half: closes this cache's open frame on the device clock without
+        // evicting anything. The context's scope guard calls it on a Skipped/Failed frame.
+        void CloseFrame();
 
         // How many images are actually RESIDENT (uploaded and viewable) --
         // i.e. in the Resident state. PendingCook keys (a real, viewable
@@ -304,6 +419,24 @@ namespace Arcane
                            // legacy path's own failures already use), memoized.
         };
 
+        // The bytes and shape of an upload that has not been recorded yet. Owned by the
+        // Resident while the key is queued; copied out of the supply because the supply
+        // only promises its pointer for the duration of the call.
+        struct PendingUpload
+        {
+            struct Mip
+            {
+                std::uint64_t offset = 0;      // into `payload`
+                std::uint32_t rowPitch = 0;    // source pitches, as the cache has always written them
+                std::uint32_t slicePitch = 0;
+            };
+            nri::TextureDesc          desc{};      // what the texture was (and, on a retry, is re-)created with
+            std::vector<Mip>          mips;
+            std::vector<std::uint8_t> payload;
+            std::string               debugName;
+            std::uint32_t             stagingTries = 0;   // dedicated staging failures so far (kMaxStagingTries)
+        };
+
         // One image made resident here. A FAILED load is kept with null
         // members: attempted once, not once per frame -- EXCEPT PendingCook,
         // which is deliberately retried, THROTTLED (see ResidentState and
@@ -312,12 +445,19 @@ namespace Arcane
         {
             nri::Texture*    texture = nullptr;
             nri::Descriptor* view    = nullptr;
+            std::uint64_t    viewSerial = 0;   // see ViewSerial; set with `view`
             ResidentState    state   = ResidentState::Resident;
             // PendingCook ONLY: Resolve asks absorbed since the last actual
             // poll of the artifact supply. Reset to 0 every time a poll
             // happens (whether it lands on PendingCook again or promotes/
             // refuses); meaningless -- and untouched -- in every other state.
             std::uint32_t    pendingAsksSincePoll = 0;
+            // The GPU bytes this key charges the device residency account (Resident
+            // state only; 0 for PendingCook / Refused, which hold no object of their own).
+            std::uint64_t    bytes = 0;
+            // Non-null from creation until the upload is committed: the key is created and
+            // charged but NOT ready (view stays null, so Resolve/View answer null).
+            std::unique_ptr<PendingUpload> pending;
         };
 
         // (asset, colour space) -- see ColorSpace. The SPACE is part of the
@@ -352,6 +492,13 @@ namespace Arcane
         // resolved exactly once.
         nri::Texture* ResolveArtifactKey(const Key& key, Resident& resident);
 
+        // The one drop path for a resident key: a slot-backed destroy when a bindless
+        // slot views the texture, otherwise the graveyard; uncharges the account.
+        void DropKey(const Guid& id, ColorSpace space, Graveyard& graveyard, std::uint64_t fence);
+        // Charge the account for a freshly resident key / note a draw of a hit.
+        void ChargeResident(const Key& key, const Resident& resident);
+        void NoteDraw(const Key& key, const Resident& resident);
+
         // The upload half of ResolveArtifactKey's Resident/Refused branch:
         // format+srgb -> nri::Format, textureDesc sized to the artifact's OWN
         // mip table, one TextureSubresourceUploadDesc per mip (BC7's via
@@ -362,7 +509,19 @@ namespace Arcane
         // so Release()/the destructor still finds it and destroys it -- this
         // function never leaks the object it created even when it fails
         // partway through). Returns whether `resident.view` ended up non-null.
-        bool UploadArtifact(const LoadedClientArtifact& artifact, Resident& resident);
+        bool UploadArtifact(const Key& key, const LoadedClientArtifact& artifact, Resident& resident);
+
+        // Creates `resident.texture` from `pending.desc`, ready for the upload node.
+        bool CreateTextureObject(Resident& resident, const PendingUpload& pending);
+        // The key's upload leaves the queue: Deferred queues it, Immediate (tests only)
+        // uploads it now through UploadData and creates the view.
+        bool FinishCreate(const Key& key, Resident& resident, std::unique_ptr<PendingUpload> pending);
+        bool UploadPendingNow(Resident& resident);
+        bool CreateViewFor(Resident& resident, const nri::TextureDesc& desc);
+        void CancelUpload(const Key& key);
+        // Aligned staging bytes of every mip of `pending` on this device (the ring cost of its upload).
+        [[nodiscard]] std::uint64_t StagingBytes(const PendingUpload& pending) const;
+        void ParkTexture(nri::Texture* texture);
 
         // The shared 8x8 checkerboard for `space` -- created on the FIRST
         // PendingCook resolve in that space, reused (never recreated) by
@@ -379,6 +538,7 @@ namespace Arcane
         void ReportIssue(const std::string& why);
 
         NriDevice*          m_device = nullptr;
+        ResidencyAccount*   m_account = nullptr;   // the device's account (NriDevice::Residency()); not owned
         nri::HelperInterface m_helper{};
         PixelSupplyFn       m_supply;
         ArtifactSupplyFn    m_artifactSupply;
@@ -394,5 +554,17 @@ namespace Arcane
         // existing legacy contract already extended to more reasons, not a
         // new latch per reason.
         bool m_warnedMiss = false;
+
+        NriUploadMode     m_mode = NriUploadMode::Deferred;
+        std::vector<Key>  m_queue;      // created, charged, waiting for an upload node
+        std::vector<Key>  m_inflight;   // the current frame's snapshot, not yet committed
+        // Destroy thunks the exec fn parked (retry-buried textures, dedicated staging
+        // buffers): they wait for CommitUploads, which knows this lane's fence.
+        std::vector<std::function<void()>> m_parked;
+        bool              m_settling = false;   // a key became ready last frame
+        TextureDropFn     m_dropHook;
+        std::uint64_t     m_viewSerials = 0;    // the last ViewSerial handed out
+        std::uint32_t     m_debugForceRetry = 0;
+        std::uint64_t     m_objectCreates = 0;
     };
 }

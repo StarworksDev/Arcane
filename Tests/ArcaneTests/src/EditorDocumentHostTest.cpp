@@ -25,6 +25,7 @@ namespace
         std::string title;
         Arcane::Guid guid;
         bool dirty = false;
+        bool previewUploads = false;
         bool saveSucceeds = true;
         int  saveCalls = 0;
         int  reopened = 0;
@@ -35,6 +36,7 @@ namespace
         const std::string& Title() const override { return title; }
         Arcane::Guid AssetGuid() const override { return guid; }
         bool Dirty() const override { return dirty; }
+        bool PreviewUploadsPending() const noexcept override { return previewUploads; }
         bool Save() override
         {
             ++saveCalls;
@@ -358,4 +360,23 @@ TEST_CASE("document.close on a dirty document parks the normal save prompt", "[e
     CHECK(host.HasPendingConfirm());
     CHECK(host.PendingConfirmDoc() == d);
     CHECK(host.Count() == 1);
+}
+
+TEST_CASE("DocumentHost::AnyPreviewUploadsPending is true while any open document's preview has an upload in flight",
+          "[editor][upload]")
+{
+    // The settle conjunct (Plan C Task 5): a document preview context renders into the chrome, and the frame
+    // that queues its mesh looks identical to the one that uploads it, so settled captures must wait.
+    DocumentHost host;
+    CHECK_FALSE(host.AnyPreviewUploadsPending());   // no documents
+    auto* a = static_cast<FakeDoc*>(host.Add(std::make_unique<FakeDoc>("a", Arcane::Guid::Generate(), false)));
+    auto* b = static_cast<FakeDoc*>(host.Add(std::make_unique<FakeDoc>("b", Arcane::Guid::Generate(), false)));
+    CHECK_FALSE(host.AnyPreviewUploadsPending());
+    b->previewUploads = true;                        // one document's preview is mid-upload
+    CHECK(host.AnyPreviewUploadsPending());
+    a->previewUploads = true;
+    b->previewUploads = false;
+    CHECK(host.AnyPreviewUploadsPending());          // whichever it is
+    a->previewUploads = false;
+    CHECK_FALSE(host.AnyPreviewUploadsPending());    // settled
 }

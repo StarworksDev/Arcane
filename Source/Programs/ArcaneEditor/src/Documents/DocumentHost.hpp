@@ -67,6 +67,8 @@ namespace Arcane::Editor
         void CloseForAssetRemoval(EditorDocument* doc);
         std::size_t Count() const { return m_docs.size(); }
         bool AnyDirty() const;
+        // Whether any open document's preview context has an upload in flight (settle conjunct).
+        bool AnyPreviewUploadsPending() const noexcept;
         // Save every dirty document in place. Every document has a real path
         // (they are only born from files via OpenPath), so no dialog is ever
         // needed here -- unlike the scene. Returns how many saves FAILED

@@ -129,6 +129,7 @@
 // <windows.h> #defines ERROR via wingdi.h).
 #include <NRI.h>
 #include <Arcane/Core/Constant.hpp>
+#include <Arcane/Render/Generated/BindlessCapacity.gen.hpp>   // Arcane::kBindlessCapacity (build/engine-constants.lua)
 #include <Extensions/NRIDeviceCreation.h>   // explicitly: GpuSceneTypes.hpp below reaches <windows.h> (GpuScene.hpp explains)
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
@@ -446,16 +447,15 @@ namespace Arcane
 
         // Buries every NRI object this node owns at `fence` and empties it.
         // Idempotent. The caller picks the fence for the same reason
-        // NriPipelineCache::Clear does. Buries the bindless table's own
-        // descriptors too (BindlessTable::Release), so an SRV a caller Added
-        // via AddMaterial is discharged the same way everything else here
-        // is -- the caller still owns the TEXTURE that view names (see
-        // AddMaterial's own comment) and must release that separately.
+        // NriPipelineCache::Clear does. Withdraws this node's bindless
+        // set from the device table; the table and the SRVs a caller Added via
+        // AddMaterial are the DEVICE's (NriGraphContext::Release discharges the
+        // ones this context minted, BindlessTable::ReleaseOwnedBy).
         void Release(Graveyard& graveyard, std::uint64_t fence);
 
-        // Registers `srv` in this node's BindlessTable and writes it into
-        // the bindless descriptor set at the slot BindlessTable::Add
-        // returns -- `kInvalidSlot` on refusal (null `srv`, the table is at
+        // Registers `srv` in the DEVICE's BindlessTable and writes it into
+        // the bindless descriptor set of every context on this device at the
+        // slot BindlessTable::Add returns -- `kInvalidSlot` on refusal (null `srv`, the table is at
         // capacity, or Create() never built one). The returned slot is what
         // a MeshInstance::materialSlot names to select `srv` at draw time.
         //
@@ -485,12 +485,12 @@ namespace Arcane
         //
         // Resolves the PIPELINE **and** this frame's mesh residency. The residency half
         // is here for the same reason the pipeline half is: NriMeshBufferCache::Resolve
-        // uploads through HelperInterface::UploadData, which SUBMITS AND WAITS
-        // INTERNALLY -- doing that inside an open command buffer is exactly the shape
-        // the graph's no-hand-barriers rule exists to prevent (NriTextureCache.hpp's NO
-        // BARRIERS section states it for images; geometry is the same hazard with a
-        // bigger payload). Record() therefore only ever LOOKS UP what Prepare made
-        // resident, and never resolves.
+        // creates the device buffers and queues their upload for a later frame's
+        // upload node (UploadNode.hpp; only the tests' Immediate mode still uploads
+        // through HelperInterface::UploadData, which SUBMITS AND WAITS), and creating
+        // device objects and charging the residency account belong to declaration,
+        // not to an open command buffer. Record() therefore only ever LOOKS UP what
+        // Prepare made resident, and never resolves.
         //
         // Safe to skip entirely -- Record() then reports the missing pipeline
         // once and draws nothing. Device-less [nri] frame-shape cases pass a
@@ -595,14 +595,13 @@ namespace Arcane
         // chosen well above what any scene in this arc names (the four-cube
         // proof uses four slots) and above the spec's cited eventual high-
         // water mark (T3's 144-entry box-projected cubemap array, spec
-        // section 6). MUST EQUAL mesh.hlsl's own kMeshBindlessCapacity
-        // literal EXACTLY: CreateBindings() sizes the t0/space2 descriptor
-        // range to this number, and the shader declares its Texture2D array
-        // with the matching literal -- HLSL cannot include this header, so
-        // that one comparison has no compiler behind it; this comment (and
-        // its mirror in mesh.hlsl) is the whole of that contract.
-        ARC_CONSTANT("shader contract: must equal kMeshBindlessCapacity in data/shaders/mesh.hlsl")
-        static constexpr std::uint32_t kBindlessCapacity = 256;
+        // section 6). The value is Arcane::kBindlessCapacity, generated from
+        // build/engine-constants.lua (the same lua field generates mesh.hlsl's
+        // kMeshBindlessCapacity, data/shaders/bindless-capacity.hlsli). The
+        // generated files are checked in; a drift test fails if a rerun would
+        // change them. This alias keeps the MeshNode:: spelling compiling.
+        ARC_CONSTANT("alias of the generated Arcane::kBindlessCapacity (build/engine-constants.lua)")
+        static constexpr std::uint32_t kBindlessCapacity = Arcane::kBindlessCapacity;
 
         // The arena's region stride on a device whose
         // deviceDesc.memoryAlignment.constantBufferOffset is
@@ -717,7 +716,12 @@ namespace Arcane
         // and never again). Null/kInvalidLayout-shaped until CreateBindless/
         // CreateSets succeed; Create() refuses the whole node rather than
         // leave either half-built (Init()'s `&&` chain).
-        std::unique_ptr<BindlessTable> m_bindless;
+        // The DEVICE's table (NriDevice::Bindless()), shared by every context on
+        // the device -- borrowed, never owned. This node owns only its descriptor
+        // SET, which it registers with the table so a slot written by any context
+        // lands in this context's set too.
+        BindlessTable*                 m_bindless = nullptr;
+        NriGraphContext*               m_context  = nullptr;   // the sampling-context identity the last-use record keys on
         nri::DescriptorSet*            m_bindlessSet = nullptr;
         // Descriptor indexing does not imply Vulkan's granular sampled-image
         // update-after-bind feature. False selects AddMaterial's idle fallback.

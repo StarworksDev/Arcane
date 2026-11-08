@@ -826,22 +826,16 @@ namespace Arcane::Editor
                                 m_materialThumbs->InvalidateMesh(*companion);
                         }
                 }
-                if (m_viewportTargets.graph)
-                {
-                    m_viewportTargets.graph->InvalidateContentTexture(guid);
-                    m_viewportTargets.graph->InvalidateMeshAlbedoSlot(guid);
-                }
-                // I2 fix (final-review wave, 2026-09-04): the chrome thumbnails
-                // (EditorApp.cpp's `resolveAssetThumb` service) read through
-                // ChromeGraph()'s OWN texture cache in Display colour space -- a SEPARATE
-                // NriGraphContext from m_viewportTargets.graph above -- so invalidating
-                // only the viewport left a (guid, Display) memo in the chrome cache stuck
-                // until app exit even after a fresh cook landed: the preview never
-                // updated. NriTextureCache::Invalidate already sweeps BOTH colour spaces
-                // for a guid, so one more call here closes exactly the entry the preview
-                // reads.
-                if (Arcane::NriGraphContext* chrome = ChromeGraph())
-                    chrome->InvalidateContentTexture(guid);
+                // ONE device-wide invalidation (NriDevice::InvalidateTexture): the
+                // bindless mappings are released first, then the guid leaves EVERY
+                // context's texture cache -- viewport, chrome (its Display-space
+                // thumbnails, I2 fix 2026-09-04), shader preview and the thumbnail
+                // harvester. A per-graph pair left the others' caches stale, and the
+                // device-wide memo would publish a stale view to all.
+                if (Arcane::NriGraphContext* g0 = m_viewportTargets.graph ? m_viewportTargets.graph.get() : ChromeGraph())
+                    g0->InvalidateTextureOnDevice(guid);
+                // (The chrome context's Display-space thumbnail cache is one of the
+                // registered contexts, so the call above already drops it.)
                 // A guid that just cooked successfully is fixed now, even if
                 // it previously had a refusal/failure row (a `.meta` edit
                 // that corrects a bad setting, or a source re-saved after a
@@ -2199,6 +2193,13 @@ namespace Arcane::Editor
         m_documents.CloseAll();
         if (m_resolver)
             m_resolver->Clear();
+        // The device's bindless mappings go with the outgoing project: every slot
+        // is released (rows that held an index are re-dirtied through the
+        // resolver's observer), so the incoming project resolves from an empty
+        // map. Beside the resolver clear and BEFORE ClearSceneReferences, so it
+        // also runs on that call's refusal path.
+        if (m_viewportTargets.graph)
+            m_viewportTargets.graph->ReleaseAllMeshAlbedoSlots();
         m_consoleDiag.store.ClearAll();
         // SwitchProject stops Play BEFORE this teardown (a Stop that fails refuses the
         // switch with the session untouched), so Play is never running here and the

@@ -578,3 +578,27 @@ The 2026-10-17 second re-review (NEEDS REVISION, one critical and one test error
 - **Oversized test value.** `capacity + 1` is not attainable. Mesh regions are multiples of 16 and texture footprints are multiples of the slice alignment, and `4ull << 20` is a multiple of both. The device-less choice test uses the smallest attainable aligned size above capacity: a mesh of `capacity + 16` (vertex region `capacity`, index region 16) and a texture of `capacity + 512` under injected alignments 256 and 512. Both classify as dedicated. Section 3.6 Done.
 
 - Revision 4 (controller, re-review 3): ring capacity is a byte range with no step, so the fit test is `Align(cursor, alignment) + alignedBytes <= capacity` via one helper shared with `Allocate`, pinned by a non-aligned-capacity test (section 3.6).
+
+### Revision 4 (user ruling, 2026-11-06): first-use upload is deferred
+
+Section 3.7 assumed a payload resolved mid-frame could upload ahead of its first consumer in the same frame. It cannot: `Resolve` runs inside later nodes' declaration, after the `upload` node must be declared, and cached texture views are baked into descriptor sets at declaration. Option A, chosen by the user, replaces the same-frame claim: `Resolve` creates the object, queues the upload and returns not-ready; the next frame's first node uploads it; a later frame draws it. No consumer binds or samples a not-ready entry, so a miss draws nothing rather than undefined memory. Wherever 3.7, its Done list and the migration table say "the same frame" or "this frame's picture includes the new bytes", read "the frame the upload is recorded" for the copy and "the first frame after it" for the picture. The first-use `[gpu]` readback compares the first drawn frame. One-shot offscreen renders do not capture while uploads are pending. Ring classes, footprints and the no-`DeviceWaitIdle` requirement are unchanged.
+
+### Revision 5 (Task 5 review rulings, 2026-11-06)
+
+Three amendments to section 3.7, on top of Revision 4.
+
+**A per-frame upload budget.** Uploads run first in the frame, so an unbudgeted upload can fill the slot and starve Batch2D, overlays, the GPU scene and picking of the same slot. `render.upload.frameBudgetPercent` (default 50, range 10..100, latched) caps the ring bytes one frame's uploads may take. Entries are admitted FIFO at the snapshot and the rest wait, with no objects destroyed. A payload above the cap but within the slot uses dedicated staging. The retry class stays as a guard.
+
+**The two-context gate has no explicit queue wait.** An entry becomes ready only after its uploading frame submitted, and there is one graphics queue, so B records after A in submission order and A's exit barrier has already been issued. The two-context `[gpu]` case stays, with A still in flight and no idle.
+
+**First use has no idle on material paths.** A material or post chain holds its first build until its declared images are ready or refused. An eviction re-upload or a cook promotion may rebuild behind the existing idle, as a content change.
+
+### Revision 6 (final review rulings, 2026-11-07)
+
+**A consumer that holds a texture says so every frame.** Section 3.6 assumed a drawn texture calls `Resolve`, so eviction could trust the stamp. Baked consumers (Batch2D sprite sets and material variants, declared params, post chains, ImGui entries) did not, so a drawn texture looked cold and eviction destroyed a view they still bound. Every baked consumer now declares use each frame and detects a changed view. Eviction never leaves a consumer holding a dead view.
+
+**Visible bindless albedos are protected at admission.** Mapped slots with references are stamped before the Refresh sweep, so section 3.6's "the frame renders intact" holds when the visible set exceeds the allowance.
+
+**The table reclaims unreferenced mappings at capacity,** so unreferenced preview mappings cannot starve the viewport from the device-wide table.
+
+**The per-frame budget in Revision 5 also paces dedicated staging.** At most one over-cap payload is admitted per frame, and the rest wait FIFO. A staging failure requeues for a bounded number of tries before it is memoized as refused, because a burst can fail where a single payload would not.

@@ -122,9 +122,9 @@ namespace Arcane::Editor
             // THE CHROME VEHICLE, LOOKED UP LIVE. This object is constructed
             // during Init (before CreateGraphVehicles has made a device at
             // all) and outlives any one project, so every device-adjacent
-            // thing it needs -- the shared NriDevice, the NriTextureCache the
-            // thumbnails are uploaded into, and the ImGuiNriNode owed an
-            // InvalidateUserTextureNow on a re-harvest -- is reached through
+            // thing it needs -- the shared NriDevice and the NriTextureCache the
+            // thumbnails are uploaded into (whose drop path takes the ImGuiNri
+            // entry with it on a re-harvest) -- is reached through
             // this callback at CALL time. Same `[this]`-capture idiom
             // EditorApp::Init already uses for resolveAssetThumb. Null (or a null return) is a hard no-op.
             std::function<Arcane::NriGraphContext*()> chromeGraph;

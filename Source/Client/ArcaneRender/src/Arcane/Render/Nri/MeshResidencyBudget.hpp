@@ -25,18 +25,19 @@
 // disk read" still holds exactly: the first draw after an eviction costs one table
 // lookup plus one upload, never an artifact read.
 //
-// THE BUDGET IS render.mesh.residencyBudgetBytes (RenderBudgetSettings.hpp; 512 MiB
-// by default, Restart): NriMeshBufferCache::Create latches it, and
-// EvictToBudget without an explicit budget evicts against that.
+// THE MESH CAP IS render.mesh.residencyBudgetBytes (RenderBudgetSettings.hpp; 512 MiB
+// by default, Restart), latched when the device account is created; the texture
+// cap and the reservation percent are the account's other two settings.
 //
-// PER VEHICLE, NOT PER PROCESS (final-review I3). Every NriGraphContext creates its
-// own NriMeshBufferCache (NriGraphContext.cpp's Create), so the editor's viewport
-// vehicle, its thumbnail-harvester vehicle and one vehicle per open Mesh/Shader
-// document EACH get the full budget -- N x 512 MiB worst case, not 512 MiB
-// shared. That mirrors NriTextureCache's own per-vehicle shape (which has no byte
-// budget at all), so it is not a new divergence, but it IS the real shape a
-// process-wide pool inherits: it needs a shared allocator above these caches, not
-// a smaller setting here.
+// THE BUDGET IS THE DEVICE ACCOUNT, NOT A PER-VEHICLE NUMBER (3D-readiness Plan C
+// Task 4, superseding final-review I3's "per vehicle" note). Every NriGraphContext
+// still creates its own NriMeshBufferCache and NriTextureCache, but all of them
+// charge ONE ResidencyAccount owned by the NriDevice (ResidencyAccount.hpp): the
+// editor's viewport, its thumbnail harvester and every open Mesh/Shader document
+// share the mesh cap and the texture cap, instead of each getting a full 512 MiB.
+// The caches call Admit (the device-less policy there) and the account decides
+// who is evicted; SelectEvictions below remains the single-cache rule that tests
+// reach through the explicit-budget EvictToBudget overload.
 //
 // A DEDICATED MESH BUDGET HAS FIRST-CLASS UE PRECEDENT, and the earlier reading of
 // Decision 7 understated it: alongside r.Streaming.PoolSize

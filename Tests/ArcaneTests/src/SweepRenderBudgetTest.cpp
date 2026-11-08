@@ -155,6 +155,7 @@ TEST_CASE("sweep: the ImGui pool chain and the mesh cache latch their budgets at
         REQUIRE(backend.Init(*device, pipelines, vsBytes, psBytes));
         auto cache = NriMeshBufferCache::Create(*device);
         REQUIRE(cache != nullptr);
+        cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
         // The published values, not the defaults.
         if (poolRow)

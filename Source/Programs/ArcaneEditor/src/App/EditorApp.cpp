@@ -58,6 +58,7 @@
 #include <Arcane/Config/Settings.hpp>   // Settings<EditorUiStyleSettings>: the boot style metrics (settings S6-28)
 #include "Settings/AssetBrowserSettings.hpp"     // EditorOpenOptions: editor.assets.mountDiagnostics (settings S6-38)
 #include "Settings/EditorPlaySettings.hpp"       // ReadPlayModeIniLine: the old [EditorPlayMode] section (settings S6-32)
+#include "Settings/EditorThumbnailSettings.hpp"   // maxRetries: the cover capture's upload-settle budget (Plan C Task 5)
 #include "Settings/EditorViewportSettings.hpp"   // EditorGizmoSettings: the session's starting gizmo tool (settings S6-31)
 #include "Settings/GraphCanvasSettings.hpp"        // CaptureGraphNodePaddingAtBoot: editor.graph.nodePadding (Restart; S6-44)
 #include <Arcane/Platform/Paths.hpp>   // Arcane::Paths -- Saved/, Diagnostics and the layouts dir resolve through it (settings spec s11.0)
@@ -71,6 +72,7 @@
 #include <Arcane/Render/RenderErrorLatch.hpp>  // RenderErrorCount (the graph latch fold)
 #include <Arcane/Render/GpuInstrumentation.hpp>   // Arcane::GpuDeviceLostObserved (Run()'s exit-code tail)
 #include <Arcane/Render/Nri/NriCommon.hpp>   // ARC_NRI_CHECK (TeardownGraphForSwitch's idle)
+#include <Arcane/Render/Nri/BindlessTable.hpp>   // the device table the resolver's slot observer registers on
 #include <Arcane/Sprite/SpriteAsset.hpp>  // Save/LoadSpriteAsset (SpriteDocument factory + peek)
 #include <Arcane/Scene/Components.hpp>    // Identity (--select-name boot seed)
 
@@ -1014,7 +1016,32 @@ namespace Arcane::Editor
             rs.resolveMeshAlbedoSlot = [this](const Arcane::Guid& g) -> std::uint32_t
             {
                 Arcane::NriGraphContext* graph = m_viewportTargets.graph.get();
-                return graph ? graph->ResolveMeshAlbedoSlot(g) : 0xFFFFFFFFu;
+                // Acquire: a resolved MATERIAL holds one reference on the device slot
+                // (MeshMaterialCache gives it back through releaseMeshAlbedoRef).
+                return graph ? graph->AcquireMeshAlbedoSlot(g) : 0xFFFFFFFFu;
+            };
+            rs.releaseMeshAlbedoRef = [this](const Arcane::Guid& g)
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->ReleaseMeshAlbedoRef(g);
+            };
+            // The device's bindless table tells the resolver when a slot goes, so
+            // resolved materials and GPU rows holding it fall back and re-stage.
+            rs.ensureAlbedoSlotObserver = [this](const void* key, const std::function<void(std::uint32_t)>& fn)
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    if (Arcane::BindlessTable* table = graph->Device().Bindless())
+                        table->SetObserver(key, fn);
+            };
+            rs.flushMeshAlbedoReleases = [this]()
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->FlushMeshAlbedoReleases();
+            };
+            rs.stampReferencedAlbedoSlots = [this]()
+            {
+                if (Arcane::NriGraphContext* graph = m_viewportTargets.graph.get())
+                    graph->StampReferencedMeshAlbedos();
             };
             rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
             {
@@ -1024,6 +1051,15 @@ namespace Arcane::Editor
             m_resolver =
                 std::make_unique<Arcane::SceneRenderResolver>(std::move(rs));
         }
+
+        // Plan C N1: the drop InvalidateAssetCaches raises and MainLoop drains
+        // after PresentFrame. Same [this]-capture idiom as the services above:
+        // the contexts are looked up when it runs, not now.
+        m_textureDrops.SetDrop([this](const Arcane::Guid& g)
+        {
+            if (Arcane::NriGraphContext* g0 = m_viewportTargets.graph ? m_viewportTargets.graph.get() : ChromeGraph())
+                g0->InvalidateTextureOnDevice(g);
+        });
 
         // Spec 2026-09-30 s4.2: the asset-reference cell's services, built
         // ONCE. Every callable reads app state at CALL time (a project switch,
@@ -1189,6 +1225,31 @@ namespace Arcane::Editor
         if (!refs || refs->empty())
             return Arcane::Guid{};
         return (*refs)[0].target;
+    }
+
+    std::uint64_t EditorApp::ToolbarLogoTextureId() const noexcept
+    {
+        // ASKED EVERY DRAW, never memoized (spec Revision 6): the ask is what tells the device
+        // account the mark is drawn, and an id kept across frames would dangle after an eviction.
+        if (m_graphLogoId.IsValid())
+            if (Arcane::NriGraphContext* chrome = ChromeGraph())
+                if (Arcane::NriTextureCache* cache = chrome->Textures())
+                    if (nri::Texture* logo = cache->Resolve(
+                            m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display))
+                        return (std::uint64_t)(std::intptr_t)logo;
+        return 0;
+    }
+
+    bool EditorApp::ToolbarLogoPending() const noexcept
+    {
+        // The first frames of every run: the mark is queued, not yet drawable. Without this the
+        // strip is shorter until it lands, and a seed-less run builds its default dock layout
+        // on frame 1 against the taller dockspace (CI 42436409532, E6: SizeRef 653, not 647).
+        if (m_graphLogoId.IsValid())
+            if (Arcane::NriGraphContext* chrome = ChromeGraph())
+                if (Arcane::NriTextureCache* cache = chrome->Textures())
+                    return cache->UploadQueued(m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display);
+        return false;
     }
 
     bool EditorApp::StagePluginLoad(Arcane::HostBoot::BootContext&)
@@ -2064,40 +2125,63 @@ namespace Arcane::Editor
         if (!graph)
             return false;
 
-        // The SAME submission phase 10 makes, through the same function, so
-        // the cover cannot drift from what the viewport shows. Re-Begin is
-        // safe at either call site: phase 10's own frame already drained this
-        // batcher, and the next frame's phase 10 re-Begins it again.
-        Arcane::Batcher2D& b = m_gpu->Batch();
-        b.Begin(graph->SurfaceWidth(), graph->SurfaceHeight());
-        SubmitSceneToBatcher(b);
+        // ONE SUBMISSION PER ATTEMPT (Plan C Task 5). A mesh or texture the scene
+        // resolves for the first time is only QUEUED by the frame that resolved it,
+        // uploaded by the next and drawn by the one after, so a cover taken from the
+        // first frame would miss it. The same frame is therefore submitted again while
+        // the vehicle reports uploads in flight -- bounded on PROGRESS by the thumbnail
+        // retry budget (UploadSettleBound, editor.thumbnail.maxRetries, default 3 frames
+        // without the upload queue reaching a new low), because the per-frame budget paces
+        // a large scene over many frames. Giving up is today's failure path: no cover is
+        // written, rather than one with holes in it.
+        Arcane::UploadSettleBound settle;
+        settle.maxStalled = Arcane::Settings<Arcane::Editor::EditorThumbnailSettings>().maxRetries;
+        Arcane::NriGraphContext::FrameOutcome outcome = Arcane::NriGraphContext::FrameOutcome::Failed;
+        for (std::int32_t attempt = 0;; ++attempt)
+        {
+            // The SAME submission phase 10 makes, through the same function, so
+            // the cover cannot drift from what the viewport shows. Re-Begin is
+            // safe at either call site: phase 10's own frame already drained this
+            // batcher, and the next frame's phase 10 re-Begins it again.
+            Arcane::Batcher2D& b = m_gpu->Batch();
+            b.Begin(graph->SurfaceWidth(), graph->SurfaceHeight());
+            SubmitSceneToBatcher(b);
 
-        // A SECOND FRAME BUILDER, so it extracts too (F5 plan 1 Task 5): the
-        // sprite sweep runs only inside ExtractFrame, so without it this
-        // batcher would drain empty and the cover would lose its sprites. The
-        // same request builder as the viewport frame, minus the gizmo the
-        // cover has never drawn.
-        Arcane::ExtractRequest req = BuildExtractRequest(graph->SurfaceWidth(), graph->SurfaceHeight());
-        req.gizmoPrims.Clear();
-        const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(m_runtime->Registry(), req, m_packetRing);
+            // A SECOND FRAME BUILDER, so it extracts too (F5 plan 1 Task 5): the
+            // sprite sweep runs only inside ExtractFrame, so without it this
+            // batcher would drain empty and the cover would lose its sprites. The
+            // same request builder as the viewport frame, minus the gizmo the
+            // cover has never drawn.
+            Arcane::ExtractRequest req = BuildExtractRequest(graph->SurfaceWidth(), graph->SurfaceHeight());
+            req.gizmoPrims.Clear();
+            const Arcane::RenderFramePacket& packet = Arcane::ExtractFrame(m_runtime->Registry(), req, m_packetRing);
 
-        const Arcane::GlobalParams globals =
-            m_resolver ? m_resolver->Globals() : Arcane::GlobalParams{};
+            const Arcane::GlobalParams globals =
+                m_resolver ? m_resolver->Globals() : Arcane::GlobalParams{};
 
-        Arcane::NriGraphContext::FrameDesc vp;
-        vp.batch   = &b;
-        vp.post    = m_resolver ? m_resolver->PostDesc() : nullptr;
-        vp.globals = &globals;
-        vp.capture = true;
-        graph->BindPacket(&packet);   // the vehicle unbinds it before RenderFrameOffscreen returns
-        const Arcane::NriGraphContext::FrameOutcome outcome = graph->RenderFrameOffscreen(vp);
-        // The cover's extract synced the mirror and vp.mesh stays unset, so
-        // no mesh pass uploaded that stage. Invalidate on every outcome,
-        // before the non-Presented return, so the next viewport sync is a
-        // full rebuild (ruling R-F).
-        Arcane::GpuSceneInvalidate(m_runtime->Registry());
+            Arcane::NriGraphContext::FrameDesc vp;
+            vp.batch   = &b;
+            vp.post    = m_resolver ? m_resolver->PostDesc() : nullptr;
+            vp.globals = &globals;
+            vp.capture = true;
+            graph->BindPacket(&packet);   // the vehicle unbinds it before RenderFrameOffscreen returns
+            outcome = graph->RenderFrameOffscreen(vp);
+            // The cover's extract synced the mirror and vp.mesh stays unset, so
+            // no mesh pass uploaded that stage. Invalidate on every outcome,
+            // before the non-Presented return, so the next viewport sync is a
+            // full rebuild (ruling R-F).
+            Arcane::GpuSceneInvalidate(m_runtime->Registry());
+            if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented || !graph->HasPendingUploads())
+                break;
+            if (attempt == 0)
+                settle.lowestQueued = graph->QueuedUploadCount();
+            if (!settle.AllowAnotherFrame(graph->QueuedUploadCount()))
+                break;
+        }
         if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
             return false;   // Skipped (collapsed panel) or Failed (already latched + logged)
+        if (graph->HasPendingUploads())
+            return false;   // uploads never settled inside the budget: no half-drawn cover
 
         std::uint32_t w = 0, h = 0;
         std::vector<unsigned char> rgba;
@@ -2363,6 +2447,14 @@ namespace Arcane::Editor
     // See the declaration: one place resolves the live chrome context, so no
     // call site branches on --headless to find it. Exactly one member is ever
     // non-null; both null before CreateGraphVehicles and after ShutdownGraphPath.
+    bool EditorApp::GraphUploadsPending() const noexcept
+    {
+        const Arcane::NriGraphContext* chrome = ChromeGraph();
+        const Arcane::NriGraphContext* viewport = m_viewportTargets.graph.get();
+        return (chrome && chrome->HasPendingUploads()) || (viewport && viewport->HasPendingUploads())
+            || m_documents.AnyPreviewUploadsPending();   // MeshDocument / ShaderEditorDocument preview contexts
+    }
+
     Arcane::NriGraphContext* EditorApp::ChromeGraph() const noexcept
     {
         return m_offscreenChrome ? &m_offscreenChrome->Graph() : m_graphChrome.get();
@@ -2596,13 +2688,9 @@ namespace Arcane::Editor
                         return thumb;
                 return m_runtime ? m_runtime->AssetsFacade().PixelsFor(id) : nullptr;
             });
-        if (m_graphLogoId.IsValid())
-            if (Arcane::NriTextureCache* cache = ChromeGraph()->Textures())
-                if (nri::Texture* logo = cache->Resolve(
-                        m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display))
-                {
-                    m_graphLogoTexture = (std::uint64_t)(std::intptr_t)logo;
-                }
+        // Creates the mark's texture and queues its upload; the id is handed out by
+        // ToolbarLogoTextureId once a later frame has uploaded it (Plan C Task 5).
+        (void)ToolbarLogoTextureId();
 
         // THE VIEWPORT, at the boot extent -- 0/0 asks for the default that
         // function names (1280x720; see BuildGraphViewportContext's own
@@ -2896,11 +2984,12 @@ namespace Arcane::Editor
     //     slot with no owner identity -- tearing this context down mid-session
     //     would disarm it and rebuild it, for nothing;
     //   * its ImGuiNri serves the EDITOR ImGui context, which survives;
-    //   * its NriTextureCache has exactly ONE possible tenant: the toolbar
-    //     logo, keyed by a synthetic per-run Guid answered by a pixel supply
-    //     that returns null for every other id. No project asset can enter it.
-    //     (The VIEWPORT context is the one that gets the project's resolver +
-    //     Assets pixel supply -- BuildGraphViewportContext, and only there.)
+    //   * its NriTextureCache serves the editor's own pictures, not the
+    //     scene: the toolbar logo and the thumbnail harvester's captures
+    //     (synthetic per-run Guids), and the Browser's texture thumbnails
+    //     (Assets PixelsFor, Display space). (The VIEWPORT context is the one
+    //     that gets the project's resolver and its scene content --
+    //     BuildGraphViewportContext, and only there.)
     // Destroying it would mean destroying and re-creating a graphics device
     // and a flip-model swapchain on a live HWND mid-session, taking every
     // borrower (the viewport context, every document preview) with it, in
@@ -2909,26 +2998,24 @@ namespace Arcane::Editor
     // TORN DOWN -- m_viewportTargets.graph, the offscreen viewport context.
     // Its SIZE is panel-scoped (so the replacement is created at the outgoing
     // one's extent, below, and the panel does not snap back to 1280x720), but
-    // its CONTENT is project-scoped through and through, and -- this is the
-    // part that decides it -- the content lives in caches that HAVE NO
-    // INVALIDATION HOOK BY DESIGN:
+    // its CONTENT is project-scoped through and through:
     //   * NriTextureCache holds nri::Textures uploaded from the OUTGOING
     //     project's asset pixels, keyed by asset Guid. Two projects can carry
     //     the same Guid (copying a project copies its asset ids), so a kept
     //     cache does not merely leak VRAM -- it can serve project A's pixels
-    //     for project B's asset. It does have Release(graves, fence)...
-    //   * ...but Batch2DNode::EnsureSpriteSet caches a DESCRIPTOR SET per
-    //     sprite Guid naming that cache's view, written ONCE and never
-    //     rewritten -- the discipline that keeps ResetDescriptorPool and its
-    //     fence rules out of that file. Flushing the texture cache under it
-    //     would leave those sets naming destroyed views, which is a fault
-    //     rather than a stale pixel. Same shape for the material sets and for
-    //     PostChainNode's declared-param views.
-    // So a "flush the content, keep the object" switch would have to re-open a
-    // deliberately-closed discipline in three nodes. Rebuilding the context
-    // achieves the same state by construction -- new pool, new sets, new cache
-    // -- with no new invalidation surface, and it is what this arc's two
-    // contract blocks (NriGraphContext.hpp's TWO CONTEXTS, TWO LANES item (2);
+    //     for project B's asset.
+    //   * The cache DOES have per-key invalidation (a cook's and an asset
+    //     op's InvalidateTextureOnDevice, an eviction), and since 3D-readiness
+    //     Plan C its baked consumers survive one: Batch2DNode's sprite sets
+    //     and material variants, the material sets and PostChainNode's
+    //     declared-param views ask the cache on every frame they draw and
+    //     rebuild on a changed ViewSerial, and the drop hook takes ImGui's
+    //     per-texture entries. A "flush the content, keep the object" switch
+    //     would still be a sweep over every key of caches (textures, meshes,
+    //     the GPU scene) whose every key is stale.
+    // Rebuilding the context reaches the same state by construction -- new
+    // pool, new sets, new caches -- and it is what this arc's two contract
+    // blocks (NriGraphContext.hpp's TWO CONTEXTS, TWO LANES item (2);
     // ImGuiNri.hpp's caller list) already named as the switch's shape.
     //
     // KEPT, AND IT MUST BE -- m_gameImgui. The viewport context's game
@@ -3134,7 +3221,7 @@ namespace Arcane::Editor
         // handed to ImGui (it is only ever ReadCapture'd), and the THUMBNAIL
         // textures live in the CHROME context's own cache, which is the same
         // context whose ImGuiNri caches them -- the same-context case
-        // ~NriGraphContext's ordering already covers (m_graphLogoTexture's own
+        // ~NriGraphContext's ordering already covers (m_graphLogoId's own
         // declaration states this distinction in full).
         if (m_materialThumbs)
             m_materialThumbs->Shutdown();

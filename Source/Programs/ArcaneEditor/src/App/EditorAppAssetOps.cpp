@@ -208,8 +208,15 @@ namespace Arcane::Editor
         {
             m_runtime->AssetsFacade().InvalidateArtifact(g);
             m_runtime->AssetsFacade().InvalidateMeshArtifact(g);
-            if (m_viewportTargets.graph) { m_viewportTargets.graph->InvalidateContentTexture(g); m_viewportTargets.graph->InvalidateMeshAlbedoSlot(g); }
-            if (Arcane::NriGraphContext* chrome = ChromeGraph()) chrome->InvalidateContentTexture(g);
+            // ONE device-wide invalidation: the bindless mappings (both colour
+            // spaces) are released first, then the guid is dropped from EVERY
+            // context's texture cache on the device (viewport, chrome, shader
+            // preview, thumbnail harvester) -- see NriDevice::InvalidateTexture.
+            // RAISED, not run (Plan C N1): this runs inside the UI phase (a
+            // Delete confirm, an Edit-menu undo/redo of an asset op), after a
+            // Browser row may have put this texture into the frame's draw list
+            // by raw pointer. MainLoop runs it after PresentFrame.
+            m_textureDrops.Raise(g);
         }
         // s7.12 "sprites deriving from a removed texture": the replayed steps carry no
         // plan.derived, so the texture's inbound sprites drop here (forward, redo and

@@ -12,7 +12,7 @@ bad() { echo "FAIL $1" >&2; fails=$((fails + 1)); }
 # stub <path> <name>: records "<name> <args>" in $CALLS. premake exits
 # $FAIL_PREMAKE when set; make exits $FAIL_CODE (default 3) when its
 # arguments contain the word $FAIL_MAKE_ON; the digest tool exits $FAIL_ABI
-# when set.
+# when set; the constants generator exits $FAIL_CONSTANTS when set.
 stub() {
     cat > "$1" <<EOF
 #!/bin/sh
@@ -22,6 +22,7 @@ if [ "$2" = make ] && [ -n "\${FAIL_MAKE_ON:-}" ]; then
 fi
 if [ "$2" = premake ] && [ -n "\${FAIL_PREMAKE:-}" ]; then exit "\$FAIL_PREMAKE"; fi
 if [ "$2" = abi ] && [ -n "\${FAIL_ABI:-}" ]; then exit "\$FAIL_ABI"; fi
+if [ "$2" = constants ] && [ -n "\${FAIL_CONSTANTS:-}" ]; then exit "\$FAIL_CONSTANTS"; fi
 exit 0
 EOF
     chmod +x "$1"
@@ -34,6 +35,7 @@ fixture() {
     mkdir -p "$d/scripts/ci" "$d/ThirdParty/premake5" "$d/ReferenceProject/Binaries" "$d/fakebin"
     cp "$REPO/scripts/ci/build.sh" "$d/scripts/ci/build.sh"
     cp "$REPO/scripts/arcane-bin-dir.sh" "$d/scripts/arcane-bin-dir.sh"
+    stub "$d/scripts/generate-engine-constants.sh" constants
     chmod +x "$d/scripts/ci/build.sh" "$d/scripts/arcane-bin-dir.sh"
     if [ "${1:-}" != --no-premake ]; then stub "$d/ThirdParty/premake5/premake5" premake; fi
     stub "$d/fakebin/make" make
@@ -59,20 +61,22 @@ run() {
     set -e
 }
 first_call() { head -n 1 "$1/calls.txt"; }
+premake_call() { grep '^premake' "$1/calls.txt" | head -n 1; }
 
 d=$(fixture); run "$d" CC=gcc-14 scripts/ci/build.sh Debug -j 4
-expected="premake --cc=gcc gmake
+expected="constants --check
+premake --cc=gcc gmake
 make -k -j4 config=debug ArcaneCore ArcaneAssetPipeline arccook arcbuild ArcaneClient ArcanePhysics2D arcane-abi-digest
 abi --check --root $d
 arcbuild build --project ReferenceProject --config Debug --sdk $d
 make -k -j4 config=debug ArcaneServer ArcaneRuntime ArcaneEditor ArcaneTests"
 [ "$RC" -eq 0 ] && [ "$(cat "$d/calls.txt")" = "$expected" ] && ok "steps, order and flags" \
     || bad "steps, order and flags (rc $RC): $(cat "$d/calls.txt" "$d/out.txt")"
-all=1; for l in generate engine abi referencegame tests; do [ -f "$d/logs/build-$l.log" ] || all=0; done
-[ "$all" -eq 1 ] && ok "five step logs" || bad "five step logs: $(ls "$d/logs" 2>&1)"
+all=1; for l in constants generate engine abi referencegame tests; do [ -f "$d/logs/build-$l.log" ] || all=0; done
+[ "$all" -eq 1 ] && ok "six step logs" || bad "six step logs: $(ls "$d/logs" 2>&1)"
 
 d=$(fixture); run "$d" CC=clang-19 scripts/ci/build.sh Release
-[ "$(first_call "$d")" = "premake --cc=clang gmake" ] && ok "clang from CC" || bad "clang from CC: $(first_call "$d")"
+[ "$(premake_call "$d")" = "premake --cc=clang gmake" ] && ok "clang from CC" || bad "clang from CC: $(premake_call "$d")"
 grep -q "config=release" "$d/calls.txt" && ok "config lower-cased for make" || bad "config lower-cased for make"
 
 d=$(fixture); run "$d" MAKE_JOBS=5 scripts/ci/build.sh Dist
@@ -83,7 +87,7 @@ grep -q -- "-j7 config=debug" "$d/calls.txt" && ok "-jN beats MAKE_JOBS" || bad 
 
 if [ "$(uname -s)" = Linux ]; then
     d=$(fixture); run "$d" scripts/ci/build.sh Debug
-    [ "$(first_call "$d")" = "premake --cc=gcc gmake" ] && ok "no CC on Linux -> gcc" || bad "no CC on Linux -> gcc"
+    [ "$(premake_call "$d")" = "premake --cc=gcc gmake" ] && ok "no CC on Linux -> gcc" || bad "no CC on Linux -> gcc: $(premake_call "$d")"
 fi
 
 d=$(fixture); run "$d" FAIL_MAKE_ON=ArcaneCore FAIL_CODE=3 scripts/ci/build.sh Debug
@@ -95,7 +99,10 @@ d=$(fixture); run "$d" FAIL_ABI=5 scripts/ci/build.sh Debug
     && ok "abi digest mismatch stops the build before the game" || bad "abi digest mismatch stops the build (rc $RC): $(cat "$d/calls.txt")"
 
 d=$(fixture); run "$d" FAIL_PREMAKE=4 scripts/ci/build.sh Debug
-[ "$RC" -eq 4 ] && [ "$(wc -l < "$d/calls.txt" | tr -d ' ')" = 1 ] && ok "generate failure stops the build" || bad "generate failure stops the build (rc $RC)"
+[ "$RC" -eq 4 ] && [ "$(wc -l < "$d/calls.txt" | tr -d ' ')" = 2 ] && ok "generate failure stops the build" || bad "generate failure stops the build (rc $RC)"
+
+d=$(fixture); run "$d" FAIL_CONSTANTS=6 scripts/ci/build.sh Debug
+[ "$RC" -eq 6 ] && [ "$(cat "$d/calls.txt")" = "constants --check" ] && ! grep -q '^premake' "$d/calls.txt"     && grep -q "\[constants\] FAILED" "$d/out.txt"     && ok "constants drift stops the build before generate" || bad "constants drift stops the build before generate (rc $RC): $(cat "$d/calls.txt")"
 
 d=$(fixture); mkdir -p "$d/logs"; echo stale > "$d/logs/build-tests.log"
 run "$d" FAIL_PREMAKE=4 scripts/ci/build.sh Debug
@@ -124,7 +131,7 @@ d=$(fixture --no-premake); run "$d" scripts/ci/build.sh Debug
 
 # Portability lints (comment lines ignored): bash 3.2 has no associative
 # arrays, case-modifying expansions, mapfile/readarray, namerefs, |&, coproc.
-LINTED="$REPO/scripts/ci/build.sh $REPO/scripts/ci/container-leg.sh"
+LINTED="$REPO/scripts/ci/build.sh $REPO/scripts/ci/container-leg.sh $REPO/scripts/generate-engine-constants.sh $REPO/scripts/generate.sh"
 hits=$(grep -nE 'declare -A|typeset -A|mapfile|readarray|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^)|local -n|\|&|coproc' $LINTED | grep -vE '^([^:]*:)?[0-9]+:[[:space:]]*#' || true)
 [ -z "$hits" ] && ok "bash 3.2 lint" || bad "bash 3.2 lint: $hits"
 gits=$(grep -nE '(^|[^A-Za-z0-9_./-])git([[:space:]]|$)' "$REPO/scripts/ci/build.sh" | grep -vE '^[0-9]+:[[:space:]]*#' || true)

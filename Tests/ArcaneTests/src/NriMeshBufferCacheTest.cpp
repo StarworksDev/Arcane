@@ -43,6 +43,7 @@ namespace
     {
         auto cache = NriMeshBufferCache::Create(device);
         REQUIRE(cache != nullptr);
+        cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
         return cache;
     }
 }
@@ -160,6 +161,7 @@ TEST_CASE("pixel: a mesh uploads once and stays resident across frames",
     auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     MeshData cube = Arcane::BuildCube(1.0f);
     int asks = 0;
@@ -286,6 +288,7 @@ TEST_CASE("pixel: EvictToBudget drops the least-recently-drawn mesh and re-uploa
     auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     MeshData cube = Arcane::BuildCube(1.0f);
     int asks = 0;
@@ -331,6 +334,7 @@ TEST_CASE("pixel: Release buries everything and is idempotent", "[gpu][meshcache
     auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     MeshData cube = Arcane::BuildCube(1.0f);
     cache->SetMeshSupply([&](const Guid&) {
@@ -353,6 +357,7 @@ TEST_CASE("pixel: a mesh with no indices or no vertices is refused, not uploaded
     auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     MeshData empty;
     int asks = 0;
@@ -384,6 +389,7 @@ TEST_CASE("pixel: DebugFailNextUpload forces Upload's abandon() arm for real, "
     auto v = MakeGpuVehicle(Arcane::Test::kNativeBackend);
     auto cache = NriMeshBufferCache::Create(*v.nri);
     REQUIRE(cache != nullptr);
+    cache->SetUploadMode(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5: the deferred path is UploadStagingTest's)
 
     MeshData cube = Arcane::BuildCube(1.0f);
     int asks = 0;
@@ -444,6 +450,7 @@ TEST_CASE("pixel: the vehicle owns one mesh buffer cache, released on teardown",
     cfg.headless = true;
     auto v = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(v != nullptr);
+    v->Graph().SetUploadModeForTests(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5)
     REQUIRE(v->Graph().MeshBuffers() != nullptr);
 
     MeshData cube = Arcane::BuildCube(1.0f);
@@ -471,6 +478,7 @@ TEST_CASE("pixel: ResizeOffscreen does NOT release resident mesh buffers",
     cfg.headless = true;
     auto v = Arcane::OffscreenVehicle::Create(cfg, 256, 128);
     REQUIRE(v != nullptr);
+    v->Graph().SetUploadModeForTests(Arcane::NriUploadMode::Immediate);   // these cases assert on a resident entry straight after Resolve (Plan C Task 5)
 
     MeshData cube = Arcane::BuildCube(1.0f);
     v->Graph().SetMeshSupply([&](const Guid&) {

@@ -150,7 +150,12 @@ namespace Arcane
     {
         ColorWrite, DepthWrite, ShaderRead, ShaderWriteCs, // (UAV, compute)
         CopySrc, CopyDst, Present, ReadbackHost,
-        IndirectArgs   // an indirect-draw argument buffer (buffers only) -- F3 plan 1 T6
+        IndirectArgs,  // an indirect-draw argument buffer (buffers only) -- F3 plan 1 T6
+        // Input-assembly reads of a buffer (buffers only; Plan C Task 5): the state a
+        // resident mesh's vertex / index buffer is left in after the upload node's
+        // CopyDst write, so the draws that bind it in later frames need no barrier.
+        VertexBuffer,
+        IndexBuffer
     };
 
     // Handed to a node's Setup function. A thin wrapper over its owning
@@ -767,6 +772,20 @@ namespace Arcane
         // signalled on its own fence, and the fence value every burial is
         // keyed to.
         [[nodiscard]] std::uint64_t DebugSubmitCount() const noexcept { return m_submitValue; }
+
+        // The highest value this graph's own submission fence has COMPLETED
+        // (0 before the first Execute, and always 0 on the NONE backend). The
+        // device-wide bindless last-use record asks this, per context, whether the
+        // submit that sampled a slot has retired: a value on one graph's timeline
+        // means nothing on another's.
+        [[nodiscard]] std::uint64_t CompletedFence() const noexcept;
+
+        // Reaps THIS graph's graveyard lane against THIS graph's own completed fence
+        // (CompletedFence()): the exact pairing Execute() runs at its top, shared so a
+        // context that is NOT executing (an idle holder another context's boundary just
+        // drained evictions into) can free them without waiting for its next frame. A
+        // no-op before the first Execute (no lane latched, nothing buried).
+        void ReapCompleted();
 
         // THIS GRAPH'S GRAVEYARD LANE -- RgExecuteDesc::graves, latched at the
         // first Execute(). Null before it, which is exactly the state in which

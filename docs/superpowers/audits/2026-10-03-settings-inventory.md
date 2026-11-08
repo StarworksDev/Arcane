@@ -12,9 +12,9 @@
 | Part | SETTING | CONSTANT | DERIVED | OTHER-STORE |
 |---|---|---|---|---|
 | Part 1: ArcaneCore and the vendored library configs | 92 | 101 | 28 | 1 |
-| Part 2: ArcaneClient, ArcaneRuntime, ArcaneServer, ArcaneCrashReporter | 148 | 104 | 32 | 0 |
+| Part 2: ArcaneClient, ArcaneRuntime, ArcaneServer, ArcaneCrashReporter | 151 | 104 | 32 | 0 |
 | Part 3: ArcaneEditor and ArcaneHub | 221 | 40 | 100 | 14 |
-| **Total** | **461** | **245** | **160** | **15** |
+| **Total** | **464** | **245** | **160** | **15** |
 
 (SETTING rows were 82 / 126 / 207 = 415 at the freeze; the post-freeze amendments below split rows and add the names the sweeps registered.)
 
@@ -206,6 +206,9 @@ The freeze binds names, audiences, scopes and apply modes. These rows changed af
 | (none) | `remote.server.frameBudgetMs` | milliseconds of remote commands a host drains per tick (the remote dispatcher, Dispatcher.cpp; Dev; spec s4.3) | Servitor P0 task 8, 2026-10-14 |
 | (none) | `remote.server.queueDepth` | remote requests a host queues before it answers host.busy queue-full (Dispatcher.cpp; Dev; ruling B-1) | Servitor P0 task 8, 2026-10-14 |
 | (none) | `editor.remote.enable` | whether the editor serves the remote-control surface on 127.0.0.1 (EditorAppFrame.cpp; Dev; spec 0.4(b)). Inventoried as an "Existing cvars (e)" row beside `editor.automation.windowedFrameCapture`, not as a frozen name: ArcaneTests does not compile EditorAppFrame.cpp, and the forward sweep-coverage case requires every frozen name to be registered in the test process (Task 11 controller ruling A) | Servitor P0 task 11, 2026-10-14 |
+| (none) | `render.texture.residencyBudgetBytes` | the texture slice of the device residency account, latched at account creation (RenderBudgetSettings.hpp; Game; Restart; 64 MiB..16 GiB; default 512 MiB) | 3D-readiness Plan C Task 3, 2026-10-25 |
+| (none) | `render.residency.reservationPercent` | percent of each slice's own cap the other slice may not borrow (RenderBudgetSettings.hpp; Game Dev; Restart; 0..100; default 50) | 3D-readiness Plan C Task 3, 2026-10-25 |
+| (none) | `render.upload.frameBudgetPercent` | percent of the upload ring slot one frame's first-use uploads may take, latched with render.uploadRingBytesPerFrame; a payload over the cap takes dedicated staging, at most one per frame (RenderBudgetSettings.hpp; Game Dev; Restart; 10..100; default 50) | 3D-readiness Plan C Task 5 fix round 1, 2026-11-06 |
 
 Frozen names S6-45 registered in code (no inventory change): `editor.camera.floor` (S6-30 spelled it `speedFloor`), `editor.preview.light.colour` (was `.color`), `editor.shader.previewCheckerLight` / `previewCheckerSpriteScale` (were `editor.preview.checkerLight` / `checkerExtent`), `editor.graph.nodePreviewMinPx` / `dragSpeed` / `rangeDragSpeed` (were under `editor.shader.*`), `editor.mesh.primitiveRanges.*` (were `editor.mesh.subdivMax` ...; the minima are now settings too, each floored at ValidateMeshAsset's rule), and the rows no sweep had converted: `astra.snapshot.compression`, `editor.gizmo.color.*`, `editor.graph.const*Width` / `paramNameFieldWidth` / `passNameFieldWidth` / `swizzleFieldWidth`, `editor.shader.chainLayout.*`, `editor.shader.passThumbPx`, `editor.crash.initialSize` (a Vec2) / `textRows`, `editor.ui.toolbar.logoScale` / `brandScale`, `editor.viewport.grid.fadeInPx` / `fadeFullPx`.
 
@@ -786,6 +789,9 @@ Creation sites:
 ### Texture and mesh caches
 | file:line | symbol | value (unit) | verdict | proposed cvar name | struct | audience | scope | apply | range | det | why |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| Source/Client/ArcaneRender/src/Arcane/Render/RenderBudgetSettings.hpp:105 | texture residency budget | 512 MiB | SETTING | render.texture.residencyBudgetBytes | RenderTextureSettings | Game | Project | Restart | 64 MiB..16 GiB | N | Texture slice of the device residency account, latched at account creation (3D-readiness Plan C Task 3) |
+| Source/Client/ArcaneRender/src/Arcane/Render/RenderBudgetSettings.hpp:117 | residency reservation percent | 50 (%) | SETTING | render.residency.reservationPercent | RenderResidencySettings | Game Dev | Project | Restart | 0..100 | N | Percent of each slice's own cap the other slice may not borrow (3D-readiness Plan C Task 3) |
+| Source/Client/ArcaneRender/src/Arcane/Render/RenderBudgetSettings.hpp:131 | upload frame budget percent | 50 (%) | SETTING | render.upload.frameBudgetPercent | RenderUploadSettings | Game Dev | Project | Restart | 10..100 | N | Share of one upload-ring slot the `upload` node may spend per frame; a payload over it takes dedicated staging, at most one per frame (3D-readiness Plan C Task 5 fix round 1, spec Revision 6) |
 | ArcaneClient/src/Arcane/Render/Nri/NriTextureCache.hpp:302 | kPendingCookRepollInterval | 32 (resolves) | SETTING | assets.cook.pendingRepollInterval | AssetsCookSettings | Game Dev | Project | Live | 1..1024 | N | Repoll cadence for textures still being cooked |
 | NriTextureCache.cpp:386-397 | pending-cook placeholder, checker colour | magenta | SETTING | render.debug.pendingCookChecker | RenderDebugSettings | Game Dev | Pref-P | Restart | rgba | N | Debug convention; must never look like the "refused" white texel (S6-45 amendment): the pair split, one name per value |
 | NriTextureCache.cpp:386-397 | pending-cook placeholder, alternate colour | (16,16,16) | SETTING | render.debug.pendingCookCheckerAlt | RenderDebugSettings | Game Dev | Pref-P | Restart | rgba | N | as render.debug.pendingCookChecker (S6-45 amendment) (S6-16) |

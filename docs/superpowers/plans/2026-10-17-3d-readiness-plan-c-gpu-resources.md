@@ -2,50 +2,71 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Execution gates (re-vet 2026-10-19).** Task 2 waits for fix-round Task 7, and Task 6 waits for fix-round Tasks 11-12, in addition to this plan's own gate (Plans A and B merged). Run each plan's Servitor sequence once on an unmodified base build first.
+**Execution gates (re-vet 2026-10-25, Rev 4).** Every gate this plan names is met on `main` `164eb836`: review fix round 1 merged as PR #19 (`5ead1703`, fix Tasks 7, 11 and 12 included), and Plans A and B merged as PR #20 (`164eb836`). The controller session holds one more, external gate: no build or test runs until the Astra storage session's Task 42 is complete (`D:/dev/starworks/arcane-sessions/astra-storage.status.md`) or the user says to start. Before Task 1, run the base-tree baseline (Global Constraints, "Baselines") on an unmodified build of `164eb836`.
 
 **Goal:** Give bindless slots and resident meshes and textures one device-wide lifetime, one generated capacity, and one residency account, and record the fix #11 completion check that says whether the arc is finished.
 
-**Architecture:** Task 1 checks in `bindlessCapacity = 256` through a generator both build scripts run before project generation and before shader compile. Task 2 replaces the add-only per-context table with one free list per device, recycled only after every sampling context's fence has retired. Task 3 measures resident bytes and only then changes a provisional default. Task 4 is the account (slices, borrowing, admission). Task 5 is the upload node (`CopyDst`, then the consumer's read). Task 6 is the hidden fix #11 check plus the last golden gate. This plan does not implement fix #11.
+**Architecture:** Task 1 checks in `bindlessCapacity = 256` through a generator both build scripts run before project generation and before shader compile. Task 2 replaces the add-only per-context table with one free list per device, recycled only after every sampling context's fence has retired. Task 3 measures resident bytes and only then changes a provisional default. Task 4 is the account (slices, borrowing, admission). Task 5 is the upload node (`CopyDst`, then the consumer's read). Task 6 is the fix #11 completion check (fix #11 landed in fix round 1, so the check runs visible and passes) plus the last golden gate. This plan does not implement fix #11.
 
 **Tech Stack:** C++23, HLSL via DXC, NRI (D3D12 + Vulkan), premake5, Catch2 v3, PowerShell. The NONE backend's upload alignments are 1 and 1; the footprint test injects 256 and 512 and does not read that pair.
 
-**Spec:** `D:/dev/starworks/arcane-readiness/2026-10-17-3d-readiness-arc-design.md`, sections 3.5, 3.6, 4 steps 0, 2, 7, and 8, Revision 2, Revision 3, and the Revision 4 line. Revision 3 overrides Revision 2's "round slicePitch to 16" and "`capacity + 1`". Revision 4 overrides any raw-`remaining` fit test: capacity is a byte range with no step, and the fit is `Align(cursor, alignment) + alignedBytes <= capacity` through one helper shared with `Allocate`.
+**Spec:** `docs/superpowers/specs/2026-10-17-3d-readiness-arc-design.md` (the in-repo copy; Plans A and B amended sections 3.1 and 3.4 only, so 3.5 and 3.6 read as approved), sections 3.5, 3.6, 4 steps 0, 2, 7, and 8, Revision 2, Revision 3, and the Revision 4 line. Revision 3 overrides Revision 2's "round slicePitch to 16" and "`capacity + 1`". Revision 4 overrides any raw-`remaining` fit test: capacity is a byte range with no step, and the fit is `Align(cursor, alignment) + alignedBytes <= capacity` through one helper shared with `Allocate`.
 
 **Prerequisite gate:** Plans A and B are merged. `build/abi-digest.txt` exists. `kGamePluginABIDigest` is checked at load. Do not bump `kGamePluginABIVersion` in this plan. `RenderTextureSettings` and `RenderResidencySettings` go in `RenderBudgetSettings.hpp`, which is **not** one of the 21 `kGameFacingHeaders`. Do not add that header to the manifest list. `build/abi-digest.txt` stays put. If a review forces the header onto the game-facing list, update the digest in that same commit and still do not bump the epoch.
 
-Fix #11 (one `JobSystem` on `ProcessContext`, destructor order `JobSystem.cpp:119-126`) is not a prerequisite of Tasks 1–5. Fix #11 is fix-round Tasks 11-12. Run Task 6 after both are on `main`. It then takes the accessor branch and passes without `[.]`. The arc is not complete until that test is green without the `[.]` hide.
+Met on `164eb836`. The 21 headers are `ArcaneSpellingGuardTest.cpp:34-56`; none is a render header. The digest is now three groups (`AbiManifestEngine.hpp`, `AbiManifestInput.hpp`, `AbiManifestClient.hpp`, commit `89982109`). The Client group hashes `ClientRuntime` and `RuntimePresentation` only, and no group names `NriDevice`, `BindlessTable`, `NriTextureCache`, `RenderGraph`, `MeshNode` or the residency types. `scripts/ci/build.ps1:42` and `build.sh:91` run `arcane-abi-digest --check` after the engine build, so a green desk build is the digest check. If that step fails during this plan, stop and report it. Do not run `--write` to make it pass.
+
+Fix #11 landed in fix round 1 (PR #19). `ProcessContext::AcquireJobSystem(workerCount)` (`ProcessContext.hpp:65`) hands every `Runtime` the same `shared_ptr<JobSystem>` and keeps only a `weak_ptr` (`:75`), so the pool lives as long as the last `Runtime`. `Runtime::Impl::jobs` is that pointer (`Runtime.cpp:198`, acquired at `:237`). `~JobSystem` now drains first: `WaitforAllAndShutdown`, then the adapter's executor is nulled, then the adapter and the executor drop (`JobSystem.cpp:119-134`). `RuntimeTest.cpp:456` (`two Runtimes share one JobSystem and the survivor can Submit`) already pins `&a.Jobs() == &b.Jobs()`. Task 6 therefore takes the accessor branch and passes without `[.]`.
 
 ## Global Constraints
 
-- **Worktree:** `D:\dev\starworks\Arcane-3dr`, branch cut from `main` `a12f33e6`. `Arcane-f5` is the old F5 branch at `309aa06e`; never build or test there. Never push, never force-push, never merge to `main`.
-- **One heavy build at a time.** Do not start `build.ps1`, `msbuild`, or `cl.exe` while another worktree on this machine is already compiling. The same cap applies to `[gpu]` runs: one GPU suite at a time. Desk build, from the repo root. Windows PowerShell 5.1 `Start-Process` has no `-Priority`. `-PassThru` returns the process; `PriorityClass` is how 5.1 lowers it. `ExitCode` is the build's code.
+- **Worktree:** `D:\dev\starworks\Arcane-3drc`, branch `feat/3d-readiness-c`, cut from `main` `164eb836`. `D:\dev\starworks\Arcane-3dr` is the merged Plans A/B worktree, and the user may have an editor open from it: never build, test, or drive a host there. `Arcane-f5` is the old F5 branch at `309aa06e`; never build or test there. Never push, never force-push, never merge to `main` without the user's go-ahead in the controller terminal.
+- **Roles.** Sonnet implements each task. Opus reviews each task. The controller arms a Monitor and a 15-minute CronCreate watchdog after every dispatch.
+- **One heavy build at a time; the desk is shared** with the texteditor session (`D:\dev\starworks\Arcane-texted`). Do not start `build.ps1`, `msbuild`, or `cl.exe` while another worktree on this machine is compiling (`Get-Process cl, link -ErrorAction SilentlyContinue` is empty; idle `MSBuild` nodes alone are not a build), and never while an Astra benchmark runs (`Get-Process AstraBenchmark* -ErrorAction SilentlyContinue` is empty). The same cap applies to `[gpu]` runs: one GPU suite at a time. Never set `CI` or `ARCANE_BUILD_MACHINE`. D: had about 75 GB free on 2026-10-25. Do not edit `build/arcane.lua` (the distribution session owns it); ask the user first. Desk build, from the repo root, at BelowNormal with two compiler processes and two msbuild nodes. Windows PowerShell 5.1 `Start-Process` has no `-Priority`. `-PassThru` returns the process; `PriorityClass` is how 5.1 lowers it. `ExitCode` is the build's code.
 
 ```powershell
 Remove-Item Env:CI -ErrorAction SilentlyContinue
 Remove-Item Env:ARCANE_BUILD_MACHINE -ErrorAction SilentlyContinue
-$env:_CL_ = '/MP4'
+$env:_CL_ = '/MP2'
 $build = Start-Process -FilePath powershell.exe -ArgumentList @(
     '-NoProfile','-ExecutionPolicy','Bypass','-File',
-    'D:\dev\starworks\Arcane-3dr\scripts\ci\build.ps1','Debug','-Jobs','4'
-) -WorkingDirectory 'D:\dev\starworks\Arcane-3dr' -PassThru -NoNewWindow
+    'D:\dev\starworks\Arcane-3drc\scripts\ci\build.ps1','Debug','-Jobs','2'
+) -WorkingDirectory 'D:\dev\starworks\Arcane-3drc' -PassThru -NoNewWindow
 if (-not $build.HasExited) { $build.PriorityClass = 'BelowNormal' }
 $build.WaitForExit()
 if ($build.ExitCode -ne 0) { throw "desk build failed: exit $($build.ExitCode)" }
 ```
 
-`build.ps1` always regenerates (`scripts/ci/build.ps1:39-43`). A new `.cpp` is globbed by premake (`premake5.lua:1316`) and is not in the vcxproj until that generate.
-- **Tests** run from the exe directory. Record the seed. New cases use `--rng-seed 1`. After any `Set-Location` into that directory, every script path is root-qualified (`D:\dev\starworks\Arcane-3dr\scripts\...`). Suite gate:
+`build.ps1` always regenerates (`scripts/ci/build.ps1:40`, `Step 'generate'`), then builds the engine (`:41`), checks the ABI digest (`:42`), builds ReferenceProject (`:44`), and builds the hosts and tests (`:46`). New engine `.cpp` files are globbed through each module's `src/**` and new test files through `premake5.lua:1494` (`ArcaneTests`); neither is in a vcxproj until that generate.
+- **Baselines.** Before Task 1, build the unmodified `164eb836` in this worktree and record three results in the controller's notes: `run-tests.ps1 Debug` (exit code and the seed), the golden gate's per-lane `diffCount`, and the Servitor sequence below with every exit code. The `runtime-scene` golden is stale on this machine: `main` fails it with `diffPixels` 13912, and only the user re-blesses it, through the staged slot. A later result that equals the baseline is not a regression from this plan. A result that differs from it is.
+- **Tests** run from the exe directory. Record the seed. New cases use `--rng-seed 1`. After any `Set-Location` into that directory, every script path is root-qualified (`D:\dev\starworks\Arcane-3drc\scripts\...`). Suite gate:
 
 ```powershell
-Set-Location D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\ArcaneTests
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\run-tests.ps1 Debug
+Set-Location D:\dev\starworks\Arcane-3drc\Binaries\Debug-windows-x86_64-md\ArcaneTests
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\run-tests.ps1 Debug
 ```
 
 `run-tests.ps1` is `~[gpu]`. `[gpu]` cases are run by name, on D3D12 and on Vulkan, and assert `RenderErrorCount() == 0`. D3D12 cases skip through `ARC_REQUIRE_BACKEND` (`Helpers/GpuCapability.hpp:57`). `test_main.cpp` forces `ForceD3D12DebugLayerForProcess` (PR #16); leave it, and do not set `ARCANE_TESTS_NO_D3D12_DEBUG`. Its listener fails any case whose `RenderErrorTotal()` rose. `ResetRenderErrorCount()` does not hide that rise. A case that trips the latch on purpose is tagged `[expects-render-errors]`, and no case in this plan should need the tag.
 - **Red steps.** After writing a new test `.cpp`, run the desk build before `ArcaneTests.exe`. **Compile error:** the build's `ExitCode` is non-zero and the log names the missing declaration. Do not run the previous exe. **Assertion:** the build's `ExitCode` is 0, then the new exe fails a named `CHECK`. A test body that is only a comment compiles and passes; that is not a red.
-- **No golden re-bless.** Run the golden gate after Task 1, after Task 2, and after Task 5, and once more in Task 6. The invocation is `powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\golden-gate.ps1`, including after a `Set-Location` into the exe directory. Delete `imgui.ini` in `Binaries\Debug-windows-x86_64-md\ArcaneRuntime` and `ArcaneEditor` before each run. Expected every time: 14 lanes, every `diffCount` 0 (`golden-gate.ps1:326`).
-- **Servitor** after Tasks 1, 2, 3, 4, and 5. Task 6 records a hidden in-process observation and does not change host-visible behaviour, so it has no Servitor step. Binary `Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe` from this tree. Own `--headless` runtime. Do not pass `--client` to `launch` or `status`. Main refuses it with exit 2. Fix-round Task 21 makes them accept it. The commands below work either way. Client name `plan-c`. Never drive an editor the user has open. Never `--bless`. Quit what you launched, including when a later command fails. Record every exit code. Exit 0 is the pass. Exit 8 is a pixel miss (`compare.failed`). Exit 7 means the host died.
+- **No golden re-bless.** Run the golden gate after Task 1, after Task 2, and after Task 5, and once more in Task 6. The invocation is `powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\golden-gate.ps1`, including after a `Set-Location` into the exe directory. Delete `imgui.ini` in `Binaries\Debug-windows-x86_64-md\ArcaneRuntime` and `ArcaneEditor` before each run. Expected every time: 14 lanes (`golden-gate.ps1:326`), and every lane's `diffCount` equal to the baseline run's. Lanes at 0 stay 0. The stale `runtime-scene` lanes keep the baseline's count. Read a non-zero lane's diff artifact before calling it unchanged.
+- **Servitor** after Tasks 1, 2, 3, 4, and 5. Task 6 records an in-process observation and does not change host-visible behaviour, so it has no Servitor step. Binary `Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe` from this tree (`.claude\skills\arcane-servitor\SKILL.md`). Own `--headless` runtime. Pass `--client readiness-c-<run id>` on EVERY call, `launch`, `status` and `quit` included (PR #19 made `launch` and `status` accept it); use one run id per task, for example `readiness-c-t1`. Never drive, quit or kill an editor the user has open, including the one from `Arcane-3dr`. Never `--bless`. Read the host pid from `launch`'s json envelope (`host.pid`) and `quit --pid` it in a `finally`, including when a later command fails. A `launch` that exits 8 left the host running: `wait ready --pid N`, then `quit --pid N`. Record every exit code. Exit 0 is the pass. Exit 8 is a check miss (`compare.failed`). Exit 7 means the host died. A `compare runtime-scene` exit 8 that the baseline also had is the stale golden, not this task's regression. The canonical sequence, which every task's Servitor step means unless it lists its own middle commands:
+
+```powershell
+$S = 'D:\dev\starworks\Arcane-3drc\Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe'
+$c = @('--project', 'ReferenceProject', '--client', 'readiness-c-t1')   # one run id per task
+$launch = (& $S @c --json launch runtime --headless -- --fixed-time 0) -join "`n" | ConvertFrom-Json
+$code = $LASTEXITCODE; "launch exit $code"
+$hostPid = $launch.host.pid   # set on 0 and on 8
+if ($code -eq 8) { & $S @c --pid $hostPid wait ready | Out-Null; & $S @c --pid $hostPid quit --force | Out-Null; throw 'launch.timeout' }
+if ($code -ne 0) { throw "launch exit $code" }
+try {
+    & $S @c --pid $hostPid wait settled;                          "wait exit $LASTEXITCODE"
+    & $S @c --pid $hostPid compare runtime-scene --source window; "compare exit $LASTEXITCODE"
+}
+finally { & $S @c --pid $hostPid quit | Out-Null; "quit exit $LASTEXITCODE" }
+```
+
+That is the `SKILL.md` PowerShell shape. Re-read the skill before the first run in case the tree's copy moved.
 - **Style:** `/MD`, no `/fp:fast`, ASCII comments, UTF-8 without BOM. Do not edit `ThirdParty/NRI`. A new tunable is a settings field. `ARC_CONSTANT` marks an invariant and expands to nothing (`Constant.hpp:11-14`); `ConstantGuardTest` fails on an unmarked numeric constant. `ApplyMode::Restart` is the enumerator at `CVarTypes.hpp:134` ("read once at boot").
 - **Failure** is a refusal or an empty result. No throw on the upload path. Hardware that cannot index the compiled bindless capacity is still refused (`MeshNode::Create`, the check at `MeshNode.cpp` in the 208–221 region; re-read it before editing). No runtime growth. No `VARIABLE_SIZED_ARRAY` (`MeshNode.cpp` records why near the 426 region; re-read before editing).
 - **Fences** mean something only inside one context's submission timeline. `NriDevice::Graves()` stays drain-only. Never bury a descriptor or a texture at another context's fence value, and never in `Graves()`.
@@ -60,10 +81,12 @@ Claude-Session: https://claude.ai/code/session_01Ertr3dpdimU1VjCXXAJSBi
 
 Re-verified 2026-10-19 on `main` `a12f33e6`: no cited file changed since `309aa06e`.
 
+Re-verified 2026-10-25 on `main` `164eb836` (Rev 4). `git diff --name-only a12f33e6 164eb836` touches nine of the files this plan cites by path: `build.ps1`, `build.sh`, `premake5.lua`, `NriGraphContext.cpp`, `EditorAppProject.cpp`, `JobSystem.cpp`, `ProcessContext.hpp`, `Runtime.cpp` and `ProcessContextTest.cpp`. Two more it names changed without moving anything it relies on: `MacroPrefixGuardTest.cpp` (two env names added to `kEnvNames`) and `ArcaneRender.arcmodule` (ArcanePhysics2D dropped from the render module's public deps). Every other cited file is byte-identical to `a12f33e6`, so its line cites still hold; a sample of 30 was re-read on `164eb836` and matched. The rows below that changed carry the `164eb836` lines.
+
 | Citation | Code |
 |---|---|
-| `build.ps1` first step | `scripts/ci/build.ps1:39` is `Step 'generate'` of `GenerateProjects.bat`. |
-| `build.sh` generate | `scripts/ci/build.sh:87` is the premake `gmake` step. |
+| `build.ps1` first step | `scripts/ci/build.ps1:40` is `Step 'generate'` of `GenerateProjects.bat` (was 39). `:42` is the new `abi` step (`arcane-abi-digest --check`). The header comment listing the steps is lines 3-11. |
+| `build.sh` generate | `scripts/ci/build.sh:88` is the premake `gmake` step (was 87). `:91` is the `abi` step. The step list comment is lines 3-13. `scripts/ci/tests/test-build-sh.sh` (new since `a12f33e6`, run by `ci.yml`'s image-tag job) pins the exact call list at lines 63-72 and the five step logs. |
 | `compile-shaders.bat` | Line 89 invokes DXC with no `-I`. The include directory is the source file's directory. `bindless-capacity.hlsli` sits in `data/shaders/` beside `mesh.hlsl`. `data/shaders/generated/` stays gitignored. |
 | `kBindlessCapacity` | `MeshNode.hpp:605` is `256`. `mesh.hlsl:161` is `#define kMeshBindlessCapacity 256`. The comment is lines 155–160. |
 | `BindlessTable` | Policy comment `BindlessTable.hpp:17-20`. `kInvalidSlot` line 55. `Add` line 85. Whole-table `Release` lines 87–93. |
@@ -79,7 +102,9 @@ Re-verified 2026-10-19 on `main` `a12f33e6`: no cited file changed since `309aa0
 | Per-vehicle comment | `MeshResidencyBudget.hpp:32-39`. |
 | UploadData call sites | `NriTextureCache.cpp:339` (content pixels), `:454` (checkerboard placeholder), `:582` (mip chain). `NriMeshBufferCache.cpp:221` (VB + IB). All four submit and wait. All four move. |
 | `kMaxFramesInFlight` | `FramePacing.hpp:39`, value 3. |
-| JobSystem | On `a12f33e6`: `JobSystem.hpp:3-7` says one scheduler per process. `Runtime.cpp:200` is a `JobSystem` member, constructed at `:239`. The destructor at `JobSystem.cpp:119-126` resets the adapter, then the task executor, then calls `WaitforAllAndShutdown`. `ProcessContext.hpp` has no `JobSystem`. Fix Task 11 reorders that destructor (scheduler shutdown before the executor drops). Fix Task 12 moves the `JobSystem` onto `ProcessContext`. Re-read all three after they merge. |
+| `NriGraphContext` | Caches created at `NriGraphContext.cpp:442` (texture) and `:446` (mesh). `ResolveMeshAlbedoSlot` is `:673`. The ring footgun comment is `:1304-1308`. `RenderFrame`: `BuildFrame` `:1962`, `Compile` `:1967`, `BeginFrame` `:1981`. `RenderFrameOffscreen`: `BuildFrame` `:2111`, `Compile` `:2116`, `BeginFrame` `:2125`. `InvalidateMeshAlbedoSlot` is `NriGraphContext.hpp:1578` (a plain erase). |
+| Editor callers | Cook completion: `EditorAppProject.cpp:829-845` (viewport `InvalidateContentTexture` + `InvalidateMeshAlbedoSlot` at `:831-832`, chrome Display sweep at `:844`). Asset move/remove/restore: `EditorAppAssetOps.cpp:201-212` (`Material` at `:204`; `Texture`/`Model` at `:207-213`, the same viewport pair at `:211` and the chrome call at `:212`). Project switch: `ResetPerProjectState` `EditorAppProject.cpp:2191`, `m_resolver->Clear()` `:2200-2201`, then `ClearSceneReferences` `:2206`. |
+| JobSystem | On `164eb836` (fix #11 landed, PR #19): `ProcessContext::AcquireJobSystem(workerCount)` at `ProcessContext.hpp:65`, a `weak_ptr<JobSystem>` at `:75`. `Runtime::Impl::jobs` is a `shared_ptr<JobSystem>` at `Runtime.cpp:198`, acquired at `:237`; `Runtime::WorkScheduler()` is `:463`, `Runtime::Jobs()` `:465`. `~JobSystem` is `JobSystem.cpp:119-134`: `WaitforAllAndShutdown`, null the adapter's executor, then drop the adapter and the executor. `RuntimeTest.cpp:456` already pins one pool for two Runtimes. |
 
 ## Review Focus
 
@@ -91,7 +116,7 @@ Re-verified 2026-10-19 on `main` `a12f33e6`: no cited file changed since `309aa0
 
 ## Out of scope
 
-- Implementing fix #11. Task 6 only detects it.
+- Implementing fix #11. It landed in fix round 1 (PR #19); Task 6 only checks it.
 - Raising `bindlessCapacity` above 256. The generator makes a later raise a one-line lua edit.
 - A copy queue, unbounded descriptor arrays, bindless paging, ImGui's descriptor pools.
 - Box3D, F5 Plans 2 and 3, an ABI epoch bump, a golden re-bless.
@@ -124,8 +149,11 @@ Re-verified 2026-10-19 on `main` `a12f33e6`: no cited file changed since `309aa0
 - Create: `scripts/generate-engine-constants.sh`
 - Create: `Source/Client/ArcaneRender/src/Arcane/Render/Generated/BindlessCapacity.gen.hpp`
 - Create: `data/shaders/bindless-capacity.hlsli`
-- Modify: `scripts/ci/build.ps1` (insert a step before line 39)
-- Modify: `scripts/ci/build.sh` (insert a step before line 87)
+- Modify: `scripts/ci/build.ps1` (insert a `constants` step before line 40, and list it in the header comment, lines 3-11)
+- Modify: `scripts/ci/build.sh` (insert a `constants` step before line 88, and list it in the header comment, lines 3-13)
+- Modify: `scripts/ci/tests/test-build-sh.sh` (the fixture, the pinned call list, the step-log count, and a drift case; see Rev 4 rulings below)
+- Create: `scripts/generate.sh`
+- Modify: `scripts/generate.bat`, `data/shaders/compile-shaders.bat`, `data/shaders/compile-shaders.sh`
 - Modify: `data/shaders/mesh.hlsl:161`
 - Modify: `MeshNode.hpp:604-605` to include the generated header instead of the literal
 - Test: `Tests/ArcaneTests/src/EngineConstantsTest.cpp` (new)
@@ -175,20 +203,33 @@ static constexpr std::uint32_t kBindlessCapacity = Arcane::kBindlessCapacity;
 
 The script exits non-zero if the lua field is missing or not an integer in `1..4096`. It does not run premake and it does not invoke DXC.
 
-Wire it at every entry that generates projects or compiles shaders. `GenerateProjects.bat` is a wrapper to `scripts\generate.bat` (lines 1–3). `scripts/generate.bat` calls premake at line 56. `data/shaders/compile-shaders.bat` sets DXC at line 31 and starts compiles at line 39 with no `-I`; includes resolve beside the source. `compile-shaders.sh` parses the bat for `call :compile` and does not execute a powershell line at the top of the bat, so it needs its own call. `premake5.lua:370-372` prebuildcommands call both the bat and the sh. There is no `scripts/generate.sh` today; Linux generation is `scripts/ci/build.sh:87` calling premake directly.
+Wire it at every entry that generates projects or compiles shaders. `GenerateProjects.bat` is a wrapper to `scripts\generate.bat` (lines 1–3). `scripts/generate.bat` calls premake at line 56. `data/shaders/compile-shaders.bat` sets DXC at line 31 and starts compiles at line 39 with no `-I`; includes resolve beside the source. `compile-shaders.sh` parses the bat for `call :compile` and does not execute a powershell line at the top of the bat, so it needs its own call. `premake5.lua:370-372` prebuildcommands call both the bat and the sh. There is no `scripts/generate.sh` today; Linux generation is `scripts/ci/build.sh:88` calling premake directly.
 
 - `scripts/generate.bat`: run `generate-engine-constants.ps1` before the premake call on line 56.
-- Add `scripts/generate.sh` as the Linux twin of `generate.bat`. It runs `generate-engine-constants.sh`, then the same premake `gmake` line `build.sh` uses today. `scripts/ci/build.sh` calls `scripts/generate.sh` instead of premake directly.
-- `scripts/ci/build.ps1`: run the PowerShell generator before the generate step on line 39.
+- Add `scripts/generate.sh` as the Linux and macOS developer twin of `generate.bat`. It runs `generate-engine-constants.sh`, then the same premake `gmake` line `build.sh` uses (family from `$CC`, as `build.sh` derives it). `scripts/ci/build.sh` keeps calling premake directly (Rev 4 ruling below).
+- `scripts/ci/build.ps1`: a `constants` step that runs the PowerShell generator with `-Check`, before the generate step on line 40.
+- `scripts/ci/build.sh`: a `constants` step that runs `generate-engine-constants.sh --check`, before the generate step on line 88.
 - `data/shaders/compile-shaders.bat` and `data/shaders/compile-shaders.sh`: run the matching generator before DXC.
 
 Two modes. With no flag, the script writes the two checked-in paths. A developer who changed the lua runs that mode and commits. With `-Check` (PowerShell) or `--check` (shell), the script regenerates both outputs in a temp directory and exits non-zero if either differs from the checked-in file. It does not write the committed files first. CI uses only the check mode. A second check leaves `git diff` empty. The Catch2 test invokes the check (or replicates that temp-dir compare) and also checks `kBindlessCapacity == 256`. It does not run the writer against the committed paths before asserting.
+
+**Rev 4 rulings for this task (re-vet 2026-10-25):**
+
+- **Line endings.** `.gitattributes` pins `*.hpp`, `*.lua`, `*.sh` and `*.hlsl` to LF, but has no rule for `*.hlsli`, so `* text=auto` with `core.autocrlf=true` checks the hlsli out CRLF on Windows (`gpu_scene.hlsli` is CRLF on this desk). Both generators and the Catch2 test compare content with every `
+` folded to `
+` first. Do not add a `.gitattributes` rule in this task; it would re-check-out `gpu_scene.hlsli`.
+- **The writer is idempotent.** With no flag, a script that finds an output whose normalized content already equals the generated text leaves that file untouched, so its mtime does not move. `compile-shaders.bat` / `.sh` run as ArcaneRender's prebuild on every build, and a rewrite there would recompile every includer of `MeshNode.hpp` each time.
+- **Encodings.** The PowerShell script runs on Windows PowerShell 5.1 and writes UTF-8 without BOM, LF, through `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding $false))`. `Set-Content` and `Out-File` add a BOM or CRLF on 5.1. The shell script is POSIX `sh` (`#!/bin/sh`, like `compile-shaders.sh`), because macOS runs it as the prebuild and its `/bin/bash` is 3.2.
+- **CI step shape.** `build.ps1` adds `Step 'constants' 'build-constants.log' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\generate-engine-constants.ps1'), '-Check')` before `Step 'generate'`. `build.sh` adds `step constants build-constants.log sh scripts/generate-engine-constants.sh --check` before `step generate`, and keeps its premake line. This departs from the 10-17 text, which routed `build.sh` through `scripts/generate.sh`. CI must not run the writer before it compares, and `test-build-sh.sh` pins the premake call. A writer that runs later (the prebuild, `generate.bat`) is then a no-op by the idempotence rule.
+- **`scripts/ci/tests/test-build-sh.sh`** (new since the plan was written; `ci.yml`'s image-tag job runs it) copies only `build.sh` and `arcane-bin-dir.sh` into a fake checkout and pins the exact call list. In the fixture, stub `scripts/generate-engine-constants.sh` like the other tools (it records `constants <args>` and exits `$FAIL_CONSTANTS` when that is set). Put `constants --check` first in `expected`. The step-log loop becomes six logs, with `constants` added. The two first-call assertions (`clang from CC`, `no CC on Linux -> gcc`) read the premake line, not line 1. `generate failure stops the build` expects two calls. Add `constants drift stops the build before generate`: `FAIL_CONSTANTS=6` gives rc 6, one call, and no premake line. Add `scripts/generate-engine-constants.sh` and `scripts/generate.sh` to the bash 3.2 lint's `LINTED` list. Run it from Git Bash on the desk (`bash scripts/ci/tests/test-build-sh.sh`). Hosted CI is the Linux and macOS proof; do not ssh anywhere.
 
 - [ ] **Step 1: Write the failing drift test**
 
 ```cpp
 TEST_CASE("generated bindless capacity matches engine-constants.lua", "[render][constants]")
 {
+    // RepoRoot() is Helpers/ConstantScan.hpp (namespace Arcane::Test). ReadFileBinary is
+    // file-local in AbiDigestTest.cpp, so this file carries its own five-line copy.
     const auto root = Arcane::Test::RepoRoot();
     const std::string lua = ReadFileBinary(root / "build/engine-constants.lua");
     REQUIRE(lua.find("bindlessCapacity = 256") != std::string::npos);
@@ -211,6 +252,8 @@ The test calls `Arcane::kBindlessCapacity` and includes the generated header, wh
 
 Write the scripts and the two outputs, including the `ARC_CONSTANT` marker and the `Constant.hpp` include. Wire `generate.bat`, the new `generate.sh`, both compile-shaders scripts, `build.ps1`, and `build.sh` as the Interfaces section says. Point `mesh.hlsl` and `MeshNode.hpp` at the outputs. Run the writer once. Then run `-Check` / `--check`. Expected: exit 0, and `git diff` empty on the two outputs. The check must not have written them in order to make them match.
 
+Every `find` in the test runs on the CRLF-folded text.
+
 - [ ] **Step 4: Build, test, shaders, golden**
 
 Desk build. Expected: exit 0, and `compile-shaders.bat` (ArcaneRender's prebuild, `premake5.lua:370`) compiles `mesh.hlsl` with the include. A DXC error that the include is missing means the hlsli is not beside `mesh.hlsl`.
@@ -222,7 +265,7 @@ Desk build. Expected: exit 0, and `compile-shaders.bat` (ArcaneRender's prebuild
 Expected: PASS. From the exe directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\run-tests.ps1 Debug
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\run-tests.ps1 Debug
 ```
 
 Expected: exit 0, including `ConstantGuardTest` (the generated header is marked).
@@ -230,29 +273,17 @@ Expected: exit 0, including `ConstantGuardTest` (the generated header is marked)
 Golden gate, Debug, both `imgui.ini` deleted. The script path is root-qualified:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\golden-gate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\golden-gate.ps1
 ```
 
-Expected: 14/14, `diffCount` 0. No `--bless`.
+Expected: every lane's `diffCount` equals the baseline run's (Global Constraints). No `--bless`.
 
-Run this exact Servitor sequence once on an unmodified build of the arc's base commit and record the exit codes. `compare runtime-scene` after `wait settled` reads the held frame 0. Fix-round Tasks 18-19 change what frame 0 presents. If the base tree already exits 8, that is pre-existing and not this task's regression. Report it and do not bless.
-
-Servitor. Capacity stays 256, so the reference picture should match. Own headless runtime. Record every exit code. Quit even if a later command fails.
-
-```powershell
-$S = 'D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe'
-& $S --project ReferenceProject launch runtime --headless -- --fixed-time 0
-& $S --project ReferenceProject --client plan-c --host runtime wait settled
-& $S --project ReferenceProject --client plan-c --host runtime compare runtime-scene --source window
-& $S --project ReferenceProject --client plan-c --host runtime quit
-```
-
-Expected: every exit 0. Do not pass `--client` to `launch` or `status`. Main refuses it with exit 2. Fix-round Task 21 makes them accept it. The commands below work either way. `compare` exit 8 is a pixel miss. Do not bless.
+Servitor: the canonical sequence (Global Constraints), client `readiness-c-t1`. Capacity stays 256, so the picture should not move. Expected: launch, wait and quit exit 0, and `compare` exits with the baseline run's code (the base tree is the reference; the `runtime-scene` golden is stale on this desk). `compare` exit 8 on a tree whose baseline was 0 is a pixel miss: stop. Do not bless.
 
 - [ ] **Step 5: Commit**
 
 ```
-git add build/engine-constants.lua scripts/generate-engine-constants.ps1 scripts/generate-engine-constants.sh scripts/generate.bat scripts/generate.sh scripts/ci/build.ps1 scripts/ci/build.sh data/shaders/compile-shaders.bat data/shaders/compile-shaders.sh Source/Client/ArcaneRender/src/Arcane/Render/Generated/BindlessCapacity.gen.hpp data/shaders/bindless-capacity.hlsli data/shaders/mesh.hlsl Source/Client/ArcaneRender/src/Arcane/Render/Nri/nodes/MeshNode.hpp Tests/ArcaneTests/src/EngineConstantsTest.cpp
+git add build/engine-constants.lua scripts/generate-engine-constants.ps1 scripts/generate-engine-constants.sh scripts/generate.bat scripts/generate.sh scripts/ci/build.ps1 scripts/ci/build.sh scripts/ci/tests/test-build-sh.sh data/shaders/compile-shaders.bat data/shaders/compile-shaders.sh Source/Client/ArcaneRender/src/Arcane/Render/Generated/BindlessCapacity.gen.hpp data/shaders/bindless-capacity.hlsli data/shaders/mesh.hlsl Source/Client/ArcaneRender/src/Arcane/Render/Nri/nodes/MeshNode.hpp Tests/ArcaneTests/src/EngineConstantsTest.cpp
 git commit -m "build: generate the bindless capacity from one lua field"
 ```
 
@@ -262,7 +293,7 @@ with the trailer.
 
 ### Task 2: Bindless free list and the device-wide last-use record
 
-**Prerequisite of this task:** Fix-round Task 7 is on `main` (it makes `ClearSceneReferences` return `bool` and abort `ResetPerProjectState`'s scene half).
+**Prerequisite of this task:** Fix-round Task 7 is on `main` (it makes `ClearSceneReferences` return `bool` and abort `ResetPerProjectState`'s scene half). Met on `164eb836`: `ClearSceneReferences` is `[[nodiscard]] bool` (`EditorApp.hpp:2300`). `ResetPerProjectState` (`EditorAppProject.cpp:2191`) calls `m_resolver->Clear()` at `:2200-2201`, before `ClearSceneReferences` at `:2206`. A refusal there logs `ARC_ERROR` and the function continues, so the resolver release already runs on the refusal path.
 
 **Files:**
 - Create: `Source/Client/ArcaneRender/src/Arcane/Render/Nri/DeviceResourceLifetime.hpp`
@@ -311,12 +342,14 @@ namespace Arcane
 
 Callers, all four:
 
-1. **Material destruction.** `SceneRenderResolver::InvalidateMaterial` and `EditorApp::InvalidateAssetCaches` for `AssetKind::Material` drop the ref. `EditorApp::InvalidateAssetCaches` is `EditorAppAssetOps.cpp:201-212`.
-2. **Texture invalidation.** Cook-completion and asset-delete sites that today call `InvalidateContentTexture` and `InvalidateMeshAlbedoSlot` call `Release` for **both** `ColorSpace` values of that `Guid`. `NriTextureCache::Invalidate` already sweeps both spaces (re-read `NriTextureCache.hpp` around 230–233, including the chrome Display entry the editor drops near `EditorAppProject.cpp:833`).
-3. **Project switch.** `EditorApp::ResetPerProjectState` already calls `SceneRenderResolver::Clear` (`EditorAppProject.cpp:2205-2215` on `a12f33e6`, `2191-2201` at fix `751786bd`; re-read after fix Task 7, and keep the resolver release on the path that runs when `ClearSceneReferences` aborts). It also `Release`s every mapping and dirties rows in that call.
+1. **Material destruction.** `SceneRenderResolver::InvalidateMaterial` and `EditorApp::InvalidateAssetCaches` for `AssetKind::Material` drop the ref. `EditorApp::InvalidateAssetCaches` starts at `EditorAppAssetOps.cpp:201`; the `Material` arm is `:204`.
+2. **Texture invalidation.** Cook-completion and asset-delete sites that today call `InvalidateContentTexture` and `InvalidateMeshAlbedoSlot` call `Release` for **both** `ColorSpace` values of that `Guid`. `NriTextureCache::Invalidate` already sweeps both spaces (re-read `NriTextureCache.hpp` around 230–233, including the chrome Display entry the editor drops at `EditorAppProject.cpp:844`). On `164eb836` there are two such sites: cook completion, `EditorAppProject.cpp:829-845` (the viewport pair at `:831-832`), and asset move/remove/restore, the `Texture`/`Model` arm of `InvalidateAssetCaches` (`EditorAppAssetOps.cpp:207-213`, the viewport pair at `:211`). Both call the viewport graph's `InvalidateMeshAlbedoSlot` only.
+3. **Project switch.** `EditorApp::ResetPerProjectState` already calls `SceneRenderResolver::Clear` (`EditorAppProject.cpp:2200-2201` on `164eb836`; keep the bindless release beside it, before `ClearSceneReferences` at `:2206`, so it runs on the refusal path too). It also `Release`s every mapping and dirties rows in that call.
 4. **Eviction.** Task 4's texture eviction calls this `Release` before the texture object is destroyed. In this task, expose `Release` and call it from a test double. A mesh eviction frees no bindless slot. The test for caller 4 lives in this task as a direct `Release` of a texture key; Task 4's eviction path calls the same function.
 
 `m_meshAlbedoSlots` leaves the context and sits on the device table.
+
+Sampling contexts on `164eb836`, each a `ResolveMeshAlbedoSlot` caller: the editor viewport (`EditorApp.cpp:1017`), the shader editor's preview graph (`ShaderEditorDocument.cpp:1735`), the material preview harvester (`MaterialPreviewHarvester.cpp:1131`), and the runtime's graph (`RuntimeApp.cpp:401`). The editor's three share one device, so all three get the `UpdateDescriptorRanges` write and all three are waiters in `AllRetired`. Today only the viewport's memo is invalidated (caller 2 above), so the preview and harvester memos can keep a stale slot; the device-wide memo closes that.
 
 - [ ] **Step 1: Write the failing device-less tests**
 
@@ -409,7 +442,7 @@ Desk build. The cases call `DeviceResourceLifetime` and a per-key `Release`, whi
 
 - [ ] **Step 3: Implement the table, the record, and the four callers**
 
-Rewrite the slot-policy comment. `Add` pops or appends. Per-key `Release` does not destroy. Destroy pushes the index. Move the memo off the context. Wire the four callers. Re-read each call site in the editor before editing it; the line hints in the spec (`EditorAppProject.cpp:828-843` and `:2214-2215`) were right in substance at the 2026-10-17 read and must be re-found if the editor moved.
+Rewrite the slot-policy comment. `Add` pops or appends. Per-key `Release` does not destroy. Destroy pushes the index. Move the memo off the context. Wire the four callers. Re-read each call site in the editor before editing it; the line hints in the spec (`EditorAppProject.cpp:828-843` and `:2214-2215`) were right in substance at the 2026-10-17 read; on `164eb836` they are `:829-845` and `:2200-2201`.
 
 Do not call `DeviceWaitIdle` per slot on the update-after-set path.
 
@@ -428,22 +461,12 @@ Expected: PASS, including `RenderErrorCount() == 0` on both backends. Skip a bac
 Golden gate, script path root-qualified:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\golden-gate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\golden-gate.ps1
 ```
 
-Expected: 14/14, `diffCount` 0. No scene in the gate frees a material mid-frame, so indices stay. No `--bless`.
+Expected: every lane's `diffCount` equals the baseline run's. No scene in the gate frees a material mid-frame, so indices stay. No `--bless`.
 
-Servitor:
-
-```powershell
-$S = 'D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe'
-& $S --project ReferenceProject launch runtime --headless -- --fixed-time 0
-& $S --project ReferenceProject --client plan-c --host runtime wait settled
-& $S --project ReferenceProject --client plan-c --host runtime compare runtime-scene --source window
-& $S --project ReferenceProject --client plan-c --host runtime quit
-```
-
-Expected: exit 0 on each, including `compare`. Exit 8 means pixels moved. Stop. Do not bless.
+Servitor: the canonical sequence, client `readiness-c-t2`. Expected: launch, wait and quit exit 0, and `compare` exits with the baseline's code. A different `compare` result means pixels moved. Stop. Do not bless.
 
 - [ ] **Step 5: Commit**
 
@@ -473,7 +496,7 @@ This task runs **before** the account exists. It does not evict anything.
 Measurement, on this machine, written into the commit message:
 
 - For each golden-gate scene the gate already loads, sum resident texture bytes (the bytes `NriTextureCache` would upload: mip footprints at the device's row and slice alignment, or, if no device is up, the source RGBA8/BC7 byte size the cache stores) and `MeshResidencyBytes` of each resident mesh.
-- If `D:\dev\starworks\Aphelyon\Content` exists, cook or load the largest scene that checkout can cook and add those two sums. If the checkout is absent, write "Aphelyon Content absent, defaults unchanged by content" in the commit message and keep the provisional numbers. Do not invent a scene.
+- If `D:\dev\starworks\Aphelyon\Content` exists, cook or load the largest scene that checkout can cook and add those two sums. It exists on this desk (79 KB of source: one scene, `Content/scenes/test.arcscene`, a logo png, materials and meshes; one cooked `.arcart` under `Intermediate/Artifacts`). Treat `D:\dev\starworks\Aphelyon` as read-only: copy `Aphelyon.arcproj`, `Config` and `Content` into a scratch directory and cook or load that copy, and never write into the Aphelyon tree. If the checkout is absent, write "Aphelyon Content absent, defaults unchanged by content" in the commit message and keep the provisional numbers. Do not invent a scene.
 - Disk file sizes are not the answer. The spec's 179-byte png, 2124-byte glb, 28076-byte png, and 265-byte `.arcmesh` are source sizes. Do not treat them as resident bytes.
 
 Predicate, applied independently to the texture sum and to the mesh sum. Let `measured` be that sum. The reservation is `cap * percent / 100`. Provisional texture cap is `512ull << 20`, percent is 50, so the reservation is 256 MiB. The mesh cap is already `512ull << 20`.
@@ -519,15 +542,15 @@ ARC_END_REFLECT_TYPE()
 ```cpp
 TEST_CASE("texture and residency settings are registered", "[cvar][residency]")
 {
-    CHECK(Arcane::CVarRegistry::Get().Find("render.texture.residencyBudgetBytes") != nullptr);
-    CHECK(Arcane::CVarRegistry::Get().Find("render.residency.reservationPercent") != nullptr);
+    CHECK_FALSE(Arcane::CVarRegistry::Get().Find("render.texture.residencyBudgetBytes").IsStale());
+    CHECK_FALSE(Arcane::CVarRegistry::Get().Find("render.residency.reservationPercent").IsStale());
     CHECK(Arcane::Settings<Arcane::RenderTextureSettings>().residencyBudgetBytes >= (64ull << 20));
     CHECK(Arcane::Settings<Arcane::RenderTextureSettings>().residencyBudgetBytes <= (16ull << 30));
     CHECK(Arcane::Settings<Arcane::RenderResidencySettings>().reservationPercent <= 100u);
 }
 ```
 
-Use the registry lookup the existing settings tests use if `Find` is not the name. The assertion is that both cvars exist and the texture cap is inside the mesh field's range.
+`CVarRegistry::Find` returns a `CVarHandle` (`CVarRegistry.hpp:358`), and a miss is `IsStale()` (`CVarHandle.hpp:14`); there is no pointer to compare with `nullptr`. The assertion is that both cvars exist and the texture cap is inside the mesh field's range.
 
 - [ ] **Step 2: Build, then stop on the compile error**
 
@@ -542,20 +565,16 @@ Do the measurement before editing the initializers. Record the two sums in the c
 Desk build. Expected: `ExitCode` 0. The new test PASS.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\run-tests.ps1 Debug
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\run-tests.ps1 Debug
 ```
 
 Expected: exit 0. No golden gate (no pixel change).
 
-Servitor. The new cvars are visible on a running host. Do not pass `--client` to `launch` or `status`. Main refuses it with exit 2. Fix-round Task 21 makes them accept it. The commands below work either way. Record every exit code. Quit even if a later command fails.
+Servitor. The new cvars are visible on a running host. The canonical sequence, client `readiness-c-t3`, with these two lines in place of `compare` inside the `try`:
 
 ```powershell
-$S = 'D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe'
-& $S --project ReferenceProject launch runtime --headless -- --fixed-time 0
-& $S --project ReferenceProject --client plan-c --host runtime wait settled
-& $S --project ReferenceProject --client plan-c --host runtime cvar explain render.texture.residencyBudgetBytes
-& $S --project ReferenceProject --client plan-c --host runtime cvar explain render.residency.reservationPercent
-& $S --project ReferenceProject --client plan-c --host runtime quit
+    & $S @c --pid $hostPid cvar explain render.texture.residencyBudgetBytes; "explain exit $LASTEXITCODE"
+    & $S @c --pid $hostPid cvar explain render.residency.reservationPercent;  "explain exit $LASTEXITCODE"
 ```
 
 Expected: every exit 0. Each `cvar explain` envelope names that cvar. A missing name is exit 6, not a pass.
@@ -578,7 +597,7 @@ The body of the message contains the two measured sums, whether Aphelyon Content
 **Files:**
 - Create: `Source/Client/ArcaneRender/src/Arcane/Render/Nri/ResidencyAccount.hpp`
 - Create: `Source/Client/ArcaneRender/src/Arcane/Render/Nri/ResidencyAccount.cpp`
-- Modify: `NriMeshBufferCache` and `NriTextureCache` so both vehicles on one device charge the same account. `NriGraphContext.cpp` creates both caches (the create is near lines 441–445 on `a12f33e6`, 442–446 after fix Task 2; re-read it). They stop latching a private 512.
+- Modify: `NriMeshBufferCache` and `NriTextureCache` so both vehicles on one device charge the same account. `NriGraphContext.cpp` creates both caches (`NriGraphContext.cpp:442` texture, `:446` mesh, on `164eb836`). They stop latching a private 512.
 - Modify: `MeshResidencyBudget.hpp:32-39` so the comment says the budget is the device account, not per vehicle.
 - Test: `Tests/ArcaneTests/src/ResidencyAccountTest.cpp` (new)
 
@@ -708,19 +727,15 @@ Desk build. The cases call `Admit`, which does not exist. Expected: `ExitCode` i
 Desk build. Expected: `ExitCode` 0. All seven cases PASS at `--rng-seed 1`, including the two-space case.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\run-tests.ps1 Debug
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\run-tests.ps1 Debug
 ```
 
 Expected: exit 0. No golden gate yet (Task 5 changes the upload path; the account at these caps does not evict the gated scenes, and Task 5's gate covers the pixels). If Task 3 raised a cap, say so in this commit message. The locked test still passes 512/50 because it passes caps explicitly.
 
-Servitor. The caches change what a host keeps resident at boot. Do not pass `--client` to `launch` or `status`. Main refuses it with exit 2. Fix-round Task 21 makes them accept it. The commands below work either way. Record every exit code. Quit even if a later command fails.
+Servitor. The caches change what a host keeps resident at boot. The canonical sequence, client `readiness-c-t4`, with this line in place of `compare` inside the `try`:
 
 ```powershell
-$S = 'D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\Servitor\servitor.exe'
-& $S --project ReferenceProject launch runtime --headless -- --fixed-time 0
-& $S --project ReferenceProject --client plan-c --host runtime wait settled
-& $S --project ReferenceProject --client plan-c --host runtime cvar explain render.texture.residencyBudgetBytes
-& $S --project ReferenceProject --client plan-c --host runtime quit
+    & $S @c --pid $hostPid cvar explain render.texture.residencyBudgetBytes; "explain exit $LASTEXITCODE"
 ```
 
 Expected: every exit 0. `wait settled` exit 0 is the host booting with the account in place. The cvar explain exit 0 shows the latched cap is the registered setting. A dead host is exit 7.
@@ -765,7 +780,7 @@ bool RingLayout::Fits(std::uint64_t size, std::uint64_t align) const
 
 `Allocate` calls `Fits`. On false it increments `m_overflowCount` and returns `{0, false}`, as it does today. `Fits` does **not** increment the counter. The planner calls `Fits`. An oversized payload that never calls `Allocate` does not bump the counter. `NriUploadRing::Fits` forwards to the current slot's `RingLayout` and does not allocate. The GPU exec calls that after `BeginFrame`. A NONE-device test does not call it: `NriUploadRing::Init` fails on NONE because `MapBuffer` returns null (`NriUploadRing.hpp:25-30`), so that test drives a standalone `RingLayout`, which is the math `BeginFrame` resets.
 
-`ring.BeginFrame(slot)` runs after `BuildFrame` returns and after `Compile` (`NriGraphContext.cpp:1304-1308` says a setup-fn allocation lands in the previous slot). `RenderFrame` calls `BuildFrame` at 1962, `Compile` at 1968, `BeginFrame` at 1981. `RenderFrameOffscreen` waits the pacing fence, then `BuildFrame` at 2111, `Compile` at 2117, `BeginFrame` at 2125. `RingLayout::Init` sets the cursor to 0 (`NriUploadRing.cpp:42-47`). `Reset` zeros it (lines 50–53). `Allocate` uses the subtraction form (lines 55–76).
+`ring.BeginFrame(slot)` runs after `BuildFrame` returns and after `Compile` (`NriGraphContext.cpp:1304-1308` says a setup-fn allocation lands in the previous slot). `RenderFrame` calls `BuildFrame` at 1962, `Compile` at 1967, `BeginFrame` at 1981. `RenderFrameOffscreen` waits the pacing fence, then `BuildFrame` at 2111, `Compile` at 2116, `BeginFrame` at 2125 (lines on `164eb836`; the 10-17 text said 1968 and 2117, which are the `if (!compiled)` lines). `RingLayout::Init` sets the cursor to 0 (`NriUploadRing.cpp:42-47`). `Reset` zeros it (lines 50–53). `Allocate` uses the subtraction form (lines 55–76).
 
 Reservation, both the window path and the offscreen path. The setup lambdas inside `BuildFrame` (the `AddNode` builders, before `Compile`) only declare the upload node, the `CopyDst` writes, and the consumer reads. They do not call `Fits` or `Allocate`. The exec function runs after `BeginFrame` in both `RenderFrame` and `RenderFrameOffscreen`. That is where the payload is classified and, when it takes the ring, allocated on that frame's cursor. A test drives both paths.
 
@@ -1023,12 +1038,12 @@ The device-less cases PASS, including the ring-miss frame whose compiled consume
 Golden gate, script path root-qualified:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\golden-gate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\golden-gate.ps1
 ```
 
-Expected: 14/14, `diffCount` 0. At the latched defaults the gated scenes sit inside the mesh reservation, so nothing is evicted. No `--bless`.
+Expected: every lane's `diffCount` equals the baseline run's. At the latched defaults the gated scenes sit inside the mesh reservation, so nothing is evicted. No `--bless`.
 
-Servitor, same commands as Task 2 (`plan-c`, `compare runtime-scene --source window`). `launch` takes no `--client`. Record every exit code. Expected: every exit 0, including `compare`. Exit 8 is a pixel miss. Then quit.
+Servitor: the canonical sequence, client `readiness-c-t5`. Record every exit code. Expected: launch, wait and quit exit 0, and `compare` exits with the baseline's code. A different `compare` result is a pixel miss. Quit in the `finally`.
 
 - [ ] **Step 5: Commit**
 
@@ -1048,64 +1063,76 @@ with the trailer.
 - Do not modify `ProcessContext`, `JobSystem`, or `Runtime.cpp` in this task.
 
 **Interfaces:**
-- Consumes: `ProcessContext.hpp` after fix Task 12 (the accessor it adds). `Runtime.cpp:200` and `:239` still construct one `JobSystem` per world. `JobSystem.hpp:3-7` still claims one per process. Two `Runtime`s already share a `TypeContext` (`ProcessContextTest.cpp:72-77`). That is not the scheduler check.
-- Produces: a Catch case named exactly `two Runtimes in one process share one scheduler`.
+- Consumes (Rev 4, `164eb836`): `ProcessContext::AcquireJobSystem(workerCount)` (`ProcessContext.hpp:65`), the accessor fix #11 added. While a pool is alive it returns that pool and ignores `workerCount` (the comment at `:55-64`). `Runtime::Jobs()` (`Runtime.cpp:465`) and `Runtime::WorkScheduler()` (`:463`), which returns `Impl::sched`, the adapter `jobs->WorkScheduler()` produced at `:237`. Two `Runtime`s already share a `TypeContext` (`ProcessContextTest.cpp`), and `RuntimeTest.cpp:456` already pins `&a.Jobs() == &b.Jobs()` and that the survivor can `Submit`. Neither checks the `IWorkScheduler` the registries, the systems and the physics hook use, and neither checks the pointer against `ProcessContext`'s accessor. This case adds exactly that.
+- Produces: a Catch case named exactly `two Runtimes in one process share one scheduler`, tagged `[runtime][jobs][arc-complete]`, not `[.]`.
 
-Look at `ProcessContext` before writing the test.
-
-- If it still has no accessor that returns the process `JobSystem` or its `IWorkScheduler`: add the hidden test below. Do not add the accessor. Do not include a header that does not exist.
+The 10-17 text had two branches, a hidden `FAIL` for a tree without the accessor and a real check for a tree with it. `164eb836` has the accessor, so only the real check is written. Do not write the hidden `FAIL` form.
 
 ```cpp
-TEST_CASE("two Runtimes in one process share one scheduler", "[.][arc-complete]")
+TEST_CASE("two Runtimes in one process share one scheduler", "[runtime][jobs][arc-complete]")
 {
-    FAIL("fix #11 is not in this tree: ProcessContext does not expose one process JobSystem");
+    Arcane::Runtime b(Arcane::Test::Process(), Arcane::NetMode::Standalone);
+    Arcane::IWorkScheduler* shared = b.WorkScheduler();
+    REQUIRE(shared != nullptr);
+    {
+        Arcane::Runtime a(Arcane::Test::Process(), Arcane::NetMode::Standalone);
+        CHECK(a.WorkScheduler() == shared);
+        CHECK(&a.Jobs() == &b.Jobs());
+        // While a pool is alive the accessor returns it; the count is ignored.
+        const std::shared_ptr<Arcane::JobSystem> process = Arcane::Test::Process().AcquireJobSystem(1);
+        CHECK(process.get() == &a.Jobs());
+        CHECK(process->WorkScheduler().get() == shared);
+    }   // a is gone; b still holds the pool
+    CHECK(b.WorkScheduler() == shared);
+    std::atomic<std::size_t> covered{0};
+    shared->ParallelFor(1024, 16, [&](std::size_t begin, std::size_t end, std::uint32_t) { covered.fetch_add(end - begin); });
+    CHECK(covered.load() == 1024u);
 }
 ```
 
-`[.]` hides it from `~[gpu]` and from `run-tests.ps1`. Invoking it by name runs it, and it fails. That is the record "merged, arc not complete."
+Re-read `Runtime.hpp` before compiling: `WorkScheduler()` returns `::Arcane::IWorkScheduler*`, the alias of `Mosaic::IWorkScheduler` (`ThirdParty/Mosaic/include/Mosaic/Jobs/WorkScheduler.hpp:20`). `ParallelFor` takes a `FunctionRef`, so a capturing lambda is fine. The destructor order is the one fix #11 left in `JobSystem.cpp:119-134`. This task does not change it.
 
-- If a later merge already added the accessor: do not use `[.]` and do not `FAIL`. Construct two `Arcane::Runtime`s on `Arcane::Test::Process()`, and `CHECK` that the scheduler each world uses is the same pointer as `ProcessContext`'s accessor. Also `CHECK` that destroying one `Runtime` does not destroy that scheduler (the other `Runtime` still steps). The destructor order is whatever fix Task 11 left in `JobSystem.cpp`. This task does not change it. This task still does not implement that destructor. It only asserts the pointer.
+- [ ] **Step 1: Write the test**
 
-- [ ] **Step 1: Write the test that matches the tree you have**
-
-Use the hidden `FAIL` form unless the accessor is already there.
+Write the case above in `ProcessSchedulerCompleteTest.cpp`. It pins behaviour that already landed, so there is no red to observe. Say so in the task report. A red that is forced by editing production code is not wanted.
 
 - [ ] **Step 2: Build, then run it by name**
 
-The hidden case compiles: it calls `FAIL`, which exists. Desk build. Expected: `ExitCode` 0. Then, from the exe directory:
+Desk build. Expected: `ExitCode` 0. Then, from the exe directory:
 
 ```powershell
-Set-Location D:\dev\starworks\Arcane-3dr\Binaries\Debug-windows-x86_64-md\ArcaneTests
+Set-Location D:\dev\starworks\Arcane-3drc\Binaries\Debug-windows-x86_64-md\ArcaneTests
 .\ArcaneTests.exe "two Runtimes in one process share one scheduler" --rng-seed 1
 ```
 
-Expected when the accessor is absent: assertion failure, and the message contains `fix #11 is not in this tree`. That is not a compile error. Expected when the accessor exists: PASS. Do not launch Servitor. This case does not change host-visible behaviour until it is unhidden.
+Expected: PASS. Do not launch Servitor. This case does not change host-visible behaviour.
 
-- [ ] **Step 3: Confirm the default suite does not run it**
+- [ ] **Step 3: The default suite runs it**
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\run-tests.ps1 Debug
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts
+un-tests.ps1 Debug
 ```
 
-Expected: exit 0. The hidden case is not a failure of that script. If you removed `[.]` because the accessor exists, this script runs the case and it must PASS.
+Expected: exit 0, and this case is among the cases that ran (it is not hidden).
 
 - [ ] **Step 4: Final golden gate**
 
 Delete both `imgui.ini` files. The script path is root-qualified even after a `Set-Location` into the exe directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3dr\scripts\golden-gate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\starworks\Arcane-3drc\scripts\golden-gate.ps1
 ```
 
-Expected: 14 lanes, every `diffCount` 0. No `--bless`.
+Expected: 14 lanes, every lane's `diffCount` equal to the baseline run's. No `--bless`.
 
-Write one paragraph in the commit message: either "arc not complete: fix #11's process JobSystem is absent" or "arc complete: two Runtimes share ProcessContext's scheduler".
+Write one paragraph in the commit message: "arc complete: two Runtimes share ProcessContext's scheduler", naming the case and its pass.
 
 - [ ] **Step 5: Commit**
 
 ```
 git add Tests/ArcaneTests/src/ProcessSchedulerCompleteTest.cpp
-git commit -m "test: record whether two Runtimes share one process scheduler"
+git commit -m "test: two Runtimes in one process share ProcessContext's scheduler (3D-readiness arc completion check)"
 ```
 
 with the trailer.
@@ -1149,3 +1176,47 @@ Codex re-review `plan-rereview-c-gpu-resources.md` (NEEDS REVISION). Both new fi
 Codex re-review `plan-rereview2-c-gpu-resources.md` (NEEDS REVISION). The remaining finding is fixed. None rejected. Full-table recycling stays addressed, as that re-review marked it.
 
 1. **Ring-miss test was a comment (Important).** The case `a ring miss in a frame with a consumer emits no consumer barrier and does not sample` is executable Catch2. Before `Execute` it `REQUIRE`s the mesh node's compiled consumer barrier (`CopyDst` to `ShaderRead`, `preBarriers` size 1, `resourceIndex` 0). The miss frame `CHECK`s `DebugSkippedBarrierCount() == 1`, mesh exec count 1, and sample count 0. The next frame resets the standalone `RingLayout`, does not suppress, `Allocate`s 4096, and `CHECK`s sample count 1, `DebugSkippedBarrierCount() == 0`, and `OverflowCount() == 0`. Tree APIs: `AddNode`, `Compile`, `Execute`, `CreateTexture`, `Write`, `Read`, `RgUsage::CopyDst`, `RgUsage::ShaderRead`, `RgBarrier`, `RingLayout::Init` / `Reset` / `Allocate` / `OverflowCount` (`NriUploadRing.hpp:76-104`), `NriDevice::CreateNoneForTests`, `RgExecuteDesc`, `RenderErrorCount`. Task 5 defines the three the case also calls: `RingLayout::Fits`, `RenderGraphNodeContext::SuppressConsumers(RgTexture)`, `RenderGraph::DebugSkippedBarrierCount`. `CreateTexture` is the realized resource because `ImportTexture(nullptr)` fails `Execute` (`RenderGraphExec.cpp:1257-1284`). The red is a desk-build compile error, `ExitCode` non-zero: `Fits` is absent at `NriUploadRing.hpp:97`, `SuppressConsumers` is absent at `RenderGraph.hpp:225-251`, and `DebugSkippedBarrierCount` is absent beside `DebugSubmitCount` at `RenderGraph.hpp:769`. `logs\build-tests.log` names `SuppressConsumers` and `DebugSkippedBarrierCount`. Do not run `ArcaneTests.exe`.
+
+### Rev 4 (re-vet 2026-10-25, controller session readiness-c)
+
+Reading only; nothing was built or run. Base: `main` `164eb836` (PR #20, Plans A and B), which contains review fix round 1 (PR #19, `5ead1703`). Method: `git diff --name-only a12f33e6 164eb836` (268 files) intersected with every path this plan cites, each changed file re-read at its cited regions, a sample of 30 cites in unchanged files re-read, and the A/B surfaces the brief named checked for overlap (the solver-free physics seam and SimHook, the ABI digest and load gate, the shared `.arcart` codec, DeterministicTrig, Linux module pinning). The physics seam, the codec, DeterministicTrig and the pinning touch no file this plan edits: `NriTextureCache.cpp`, `NriMeshBufferCache.cpp`, `MeshNode.*`, `PickOutlineNodes.cpp`, `RenderGraph*`, `NriUploadRing.*`, `BindlessTable.*`, `MeshResidencyBudget.hpp`, `RenderBudgetSettings.*` and the shaders are byte-identical to `a12f33e6`. The ABI digest is the one A/B surface that reaches this plan, and only as a check every build now runs.
+
+Drift ledger. Each row is ruled; none needed the user.
+
+| # | Where | Was | Now (`164eb836`) | Ruling |
+|---|---|---|---|---|
+| 1 | Header, Global Constraints | Worktree `Arcane-3dr`, base `a12f33e6`, gates on fix Tasks 7/11/12 | Worktree `Arcane-3drc` on `feat/3d-readiness-c` from `164eb836`; every gate met. `Arcane-3dr` is the merged A/B tree, where the user may have an editor open | Paths repointed (20 uses). An external gate is added: the Astra storage session's Task 42, or the user's word |
+| 2 | Spec path | `D:/dev/starworks/arcane-readiness/...` | In-repo `docs/superpowers/specs/...`; A/B amended 3.1 and 3.4 only | Cite the repo copy |
+| 3 | Desk build | `/MP4`, `-Jobs 4` | Desk shared with the texteditor session; Astra benchmarks run on it | `/MP2`, `-Jobs 2`, BelowNormal; no build while another worktree compiles or `AstraBenchmark*` runs; no `CI` / `ARCANE_BUILD_MACHINE`; `build/arcane.lua` is not edited without the user |
+| 4 | `build.ps1` | `generate` at `:39` | `:40`; new `abi` step `:42` | Lines updated. The `abi` step makes every green desk build a digest check; a failure stops the plan, and `--write` is not a fix |
+| 5 | `build.sh` | premake at `:87` | `:88`; `abi` at `:91`; `scripts/ci/tests/test-build-sh.sh` pins the call list | Task 1 adds a `constants --check` step and keeps the premake line (`build.sh` no longer routes through `generate.sh`), and updates `test-build-sh.sh` |
+| 6 | `premake5.lua:1316` glob | ArcaneTests glob | `:1494` | Updated |
+| 7 | `.hlsli` line endings | Not addressed | No `.gitattributes` rule for `*.hlsli`; `autocrlf=true` checks it out CRLF | Generators and the test fold CRLF before comparing; the writer is idempotent (no mtime churn from the prebuild); the PS writer is BOM-free on 5.1; the sh writer is POSIX `sh` |
+| 8 | Task 1 test helpers | `Arcane::Test::RepoRoot()`, `ReadFileBinary` | `RepoRoot` is `Helpers/ConstantScan.hpp`; `ReadFileBinary` is file-local in `AbiDigestTest.cpp` | Include the helper; carry a local `ReadFileBinary` |
+| 9 | Task 2, caller 3 | `ResetPerProjectState` `:2205-2215`; abort path unknown | `:2191`; `m_resolver->Clear()` `:2200-2201` runs before `ClearSceneReferences` `:2206`, which now returns `bool` and only logs on refusal | The bindless release goes beside the resolver clear, so it runs on the refusal path |
+| 10 | Task 2, caller 2 | Cook site `:828-843`, chrome `:833` | Cook `:829-845` (chrome `:844`); a second site, `InvalidateAssetCaches` `Texture`/`Model` arm, `EditorAppAssetOps.cpp:207-213` | Both sites listed |
+| 11 | Task 2, sampling contexts | "every context on that device" | Four `ResolveMeshAlbedoSlot` callers: viewport, shader-editor preview, material preview harvester (editor), and the runtime | Listed; the editor's three are waiters and get the descriptor write. Today only the viewport memo is invalidated, which the device memo fixes |
+| 12 | Task 3 registration test | `Find(...) != nullptr` | `Find` returns `CVarHandle`; a miss is `IsStale()` | Test rewritten |
+| 13 | Task 3 measurement | Aphelyon "cook or load" | `D:/dev/starworks/Aphelyon/Content` exists (79 KB, one scene) | Read-only: cook or load a scratch copy, never write into that tree |
+| 14 | Task 4 cache create | `:441-445` / `:442-446` | `NriGraphContext.cpp:442`, `:446` | Updated |
+| 15 | Task 5 frame order | `Compile` at 1968 / 2117 | 1967 / 2116 (the old numbers are the `if (!compiled)` lines) | Updated; the order the classification relies on is unchanged |
+| 16 | Task 6 | Two branches; on `a12f33e6` the hidden `FAIL` | Fix #11 landed: `ProcessContext::AcquireJobSystem` (weak-owned shared pool), `~JobSystem` drains first; `RuntimeTest.cpp:456` already pins one pool | Only the visible accessor check is written. It adds the `IWorkScheduler` identity, the accessor identity and the survivor's `ParallelFor`. It has no red; the report says so |
+| 17 | Goldens | "14/14, `diffCount` 0" | `runtime-scene` is stale on this desk (`main` fails it with `diffPixels` 13912; only the user re-blesses) | Base-tree baseline first; each gate expects every lane equal to the baseline |
+| 18 | Servitor | No `--client` on `launch`/`status`; client `plan-c`; drive by `--host` | PR #19: `--client` on every call; a unique name per run | One canonical block: `readiness-c-t<N>`, `--json` launch, `--pid`, quit in `finally`; a `compare` result equal to the baseline is not a regression |
+| 19 | Roles | Not stated | Brief: Sonnet implements, Opus reviews | Stated in Global Constraints |
+
+Unchanged and re-confirmed: no epoch bump; the digest stays put (no Plan C type is in any of the three manifest groups); no `ThirdParty/NRI` edit; no golden bless; `MacroPrefixGuardTest` needs no new name (the plan adds no `ARCANE_*` token; A's two names are already in `kEnvNames`); `ConstantGuardTest` treats the `MeshNode::kBindlessCapacity` alias as unmarked-safe (its initializer holds no numeric literal, `ConstantScan.hpp` `kNumber`).
+
+**Rev 4 addendum (Task 3 review).** A Dev-flagged cvar is checked with `Test::InThisBuild(name)` (Helpers/SettingsSweep.hpp), never `Find(name).IsStale()`: Dist compiles Dev cvars out, so the `IsStale()` check fails there. The Task 3 Step 1 snippet (line ~546) had that bug for `render.residency.reservationPercent`; Task 4 must not repeat the pattern.
+
+### Rev 5 (user ruling, 2026-11-06)
+
+Task 5 implements deferred first-use uploads (spec Revision 4), because same-frame upload cannot be planned from the first node (`task-5-report-needs-context.md` in the SDD workspace has the call-order trace). The ruling at the end of `task-5-brief.md` overrides Task 5's text: no `SuppressConsumers`, no upload-frame consumer reads, and one-shot renderers wait for pending uploads. Branch merged origin/main at 047ad3ae before this revision.
+
+### Rev 6 (Task 5 review rulings, 2026-11-06)
+
+Spec Revision 5: per-frame upload budget, no explicit two-context queue wait, no idle on first-use material builds. The SDD workspace file task-5-fix1-findings.md has the details.
+
+### Rev 7 (final review rulings, 2026-11-07)
+
+Spec Revision 6: baked consumers declare use and detect changed views, referenced bindless slots are stamped, the table reclaims at capacity, dedicated staging is paced. The SDD workspace file final-fix-findings.md has the details.

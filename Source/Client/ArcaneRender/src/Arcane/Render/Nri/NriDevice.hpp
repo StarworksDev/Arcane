@@ -24,10 +24,15 @@
 
 #include <Arcane/Modules/ArcaneRenderApi.hpp>
 #include <Arcane/Render/RenderDeviceDesc.hpp>
+#include <Arcane/Render/Nri/DeviceResourceLifetime.hpp>
 #include <Arcane/Render/Nri/Graveyard.hpp>
 #include <Arcane/Render/Nri/NriDeviceCaps.hpp>
 
+#include <Arcane/Guid.hpp>
+
+#include <functional>
 #include <memory>
+#include <vector>
 
 namespace Arcane
 {
@@ -38,6 +43,9 @@ namespace Arcane
     // headers and no Vulkan-Hpp dispatcher storage of its own).
     struct VulkanDeviceCreation;
     struct D3D12DeviceCreation;
+    class BindlessTable;
+    class ResidencyAccount;
+    struct ResidencyCaps;
 
     // -------------------------------------------------------------------
     // NativeDeviceOwner -- the caller-owns half of the ownership contract.
@@ -131,6 +139,13 @@ namespace Arcane
 
         [[nodiscard]] nri::Device& Device() const { return *m_device; }
         [[nodiscard]] const nri::CoreInterface& Core() const { return m_core; }
+
+        // TEST INSTRUMENT ONLY (Plan C Task 5): swaps THIS device's Core() table entry
+        // for DeviceWaitIdle with a forwarder that counts its calls, so a [gpu] case
+        // can prove an upload path issues none. Process-wide count; call once per
+        // device, before the code under test.
+        void EnableDeviceWaitIdleCounting();
+        [[nodiscard]] static std::uint64_t DeviceWaitIdleCount() noexcept;
         // nriGetInterface through THIS module's NRI (ArcaneRender links the only
         // NRI copy the engine modules share): a module that links no NRI of its
         // own -- ArcaneImGui's HelperInterface -- fetches extension tables here,
@@ -185,8 +200,70 @@ namespace Arcane
         // is all it is.
         [[nodiscard]] Graveyard& Graves() { return m_graveyard; }
 
+        // THE DEVICE-WIDE LAST-USE RECORD (3D-readiness arc spec 3.5): which
+        // contexts sampled which bindless slot, and the fence of that context's
+        // own submit. One per device, because the bindless index space is one
+        // per device.
+        [[nodiscard]] DeviceResourceLifetime& ResourceLifetime() noexcept { return m_life; }
+
+        // THE DEVICE'S BINDLESS TABLE: one per NriDevice, created on first use at
+        // Arcane::kBindlessCapacity over ResourceLifetime(). Every
+        // NriGraphContext on this device shares it; null only if creation was
+        // refused (already logged).
+        [[nodiscard]] BindlessTable* Bindless();
+        // The table if it exists yet; never creates it.
+        [[nodiscard]] BindlessTable* BindlessIfCreated() noexcept { return m_bindless.get(); }
+
+        // THE DEVICE'S RESIDENCY ACCOUNT (3D-readiness arc Plan C Task 4): one per
+        // NriDevice, created on first use and latched from render.mesh.*,
+        // render.texture.* and render.residency.* at that moment (Restart). Every
+        // mesh and texture cache on this device charges it. Device-less: it touches
+        // no NRI, so a NONE device works.
+        [[nodiscard]] ResidencyAccount& Residency();
+        [[nodiscard]] ResidencyAccount* ResidencyIfCreated() noexcept { return m_residency.get(); }
+        // TEST SEAM (by name): create-if-absent with explicit caps instead of the latched
+        // settings, so a NONE device can reach the eviction glue with KiB caps. Returns
+        // the existing account unchanged when one was already created. Production code
+        // calls Residency().
+        [[nodiscard]] ResidencyAccount& ResidencyForTests(const ResidencyCaps& caps);
+
+        // ---- device-wide texture invalidation (3D-readiness arc spec 3.5) -------
+        // Each NriGraphContext keeps its own NriTextureCache, but the bindless
+        // mapping memo is the device's, so a texture's invalidation has to reach
+        // EVERY context's cache or a stale cache would publish the old view to all.
+        // A context registers a callback that drops a Guid from ITS cache (buried at
+        // its own fence, or joined to the slot retire it backs); contexts unregister
+        // at teardown.
+        using TextureInvalidateFn = std::function<void(const Guid&)>;
+        //
+        // `drainResidency` (optional) carries out the evictions the device residency
+        // account queued for THIS context's caches, on THIS context's own graveyard at
+        // its OWN last-submitted fence (never another context's fence, never Graves()).
+        // It exists so a holder that stops ticking cannot keep evicted GPU copies alive
+        // while the account counts them free: see DrainOtherContexts.
+        using ResidencyDrainFn = std::function<void()>;
+        void RegisterContext(const void* owner, TextureInvalidateFn invalidateTexture,
+                             ResidencyDrainFn drainResidency = {});
+        void UnregisterContext(const void* owner);
+        [[nodiscard]] std::size_t RegisteredContextCount() const noexcept { return m_contexts.size(); }
+
+        // The ONE entry point for "the texture behind `id` changed or is gone":
+        // releases every bindless mapping of `id` (both colour spaces, unconditional)
+        // FIRST, then drops `id` from every registered context's texture cache.
+        void InvalidateTexture(const Guid& id);
+
+        // The admitting context's frame boundary calls this AFTER draining its own
+        // queue: runs every OTHER registered context's drain hook, each draining its own
+        // queue on its own graveyard at its own fence. Same sequential-recording
+        // assumption as InvalidateTexture: the device's contexts record and submit one
+        // after another on the thread that calls this, so no other context is mid-record
+        // and its last-submitted fence covers everything it recorded. A texture a bindless
+        // slot views still goes through AdoptTextureBacking inside the cache drop. A hook
+        // must not (un)register contexts or destroy a context.
+        void DrainOtherContexts(const void* admitting);
+
     private:
-        NriDevice() = default;
+        NriDevice();
 
         // Shared tail of both Wrap* entry points: CoreInterface, the queue
         // assert, and the identity log (contract item 14).
@@ -194,6 +271,11 @@ namespace Arcane
                                                      GraphicsBackend backend);
 
         Graveyard          m_graveyard;
+        DeviceResourceLifetime m_life;
+        std::unique_ptr<BindlessTable> m_bindless;
+        std::unique_ptr<ResidencyAccount> m_residency;
+        struct ContextHook { const void* owner; TextureInvalidateFn invalidate; ResidencyDrainFn drain; };
+        std::vector<ContextHook> m_contexts;
         nri::CoreInterface m_core{};
         nri::Device*       m_device        = nullptr;
         nri::Queue*        m_graphicsQueue = nullptr;

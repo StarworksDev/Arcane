@@ -22,7 +22,7 @@ namespace Arcane::Editor
     {
         std::uint32_t size           = 64;      // px; the rendered target, the PNG and the loader's cap
         float         time           = 0.35f;   // the fixed material clock every thumbnail renders at
-        std::int32_t  maxRetries     = 3;       // vehicle failures before the harvester gives up for the session
+        std::int32_t  maxRetries     = 3;       // vehicle failures before the harvester gives up for the session; ALSO the frames without upload progress a thumbnail or cover waits before giving up on that picture
         float         meshFovDegrees = 35.0f;   // vertical FOV of the mesh thumbnail camera
         float         framingMargin  = 0.15f;   // breathing room past a tight fit of a mesh's bounds (0.15 = 15%)
     };

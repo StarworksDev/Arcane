@@ -16,6 +16,7 @@
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Mesh/MeshBuilder.hpp>
 #include <Arcane/Render/MeshMaterialCache.hpp>
+#include <Arcane/Render/Nri/BindlessTable.hpp>
 #include <Arcane/Render/Nri/NriGraphContext.hpp>
 #include <Arcane/Render/PostChainCache.hpp>   // PostChainDesc
 #include <Arcane/Render/ShaderCompiler.hpp>
@@ -166,6 +167,7 @@ namespace Arcane::Editor
             Arcane::MeshData               meshGeometry;    // local space, unit-rule scaled
             Arcane::MeshBounds             meshBounds;      // ResolveMeshData's answer -- FrameMeshBounds' input
             std::vector<Arcane::MeshInstance> meshInstances;   // one per section, materials pre-resolved
+            std::vector<Arcane::Guid>         meshInstanceMaterials;   // the material each section's slot came from (nil = none), so a re-render can re-Request it
         };
 
         // ---- one material's finished thumbnail --------------------------
@@ -287,6 +289,12 @@ namespace Arcane::Editor
 
         bool EnsureVehicle(Arcane::NriGraphContext& chrome);
         void ResetVehicle();                      // destroy it + re-queue what it scoped
+        // The device table released bindless slot `slot` (a texture replaced or
+        // evicted, a material save, a project switch): this harvester is a holder of
+        // slot indices (meshMats' memo and the queued Ready records), so it resets
+        // the memo (the next Request re-resolves) and re-queues any Ready that
+        // captured the index -- never draws with a released index.
+        void OnAlbedoSlotReleased(std::uint32_t slot);
         void DropVehicle();                       // ResetVehicle, as a FAILURE (spends budget)
         void GiveUp(std::string_view why);        // no previews at all, this session
         void StartOne(const WorkKey& key, double now);
@@ -335,6 +343,9 @@ namespace Arcane::Editor
         // that device is provably alive; this is the backstop for a run that
         // never got that far (a failed boot), where nothing was ever created
         // in the first place.
+        // The slot observer is removed before the vehicle dies (ResetVehicle).
+        if (m_impl->ctx)
+            m_impl->ResetVehicle();
         delete m_impl;
     }
 
@@ -361,8 +372,36 @@ namespace Arcane::Editor
     // NO BUDGET IS SPENT HERE. This is the neutral "the vehicle is gone" half,
     // which teardown needs as much as a failed frame does; DropVehicle below
     // is the FAILURE flavour that also pays the budget.
+    void MaterialPreviewHarvester::Impl::OnAlbedoSlotReleased(std::uint32_t slot)
+    {
+        if (meshMats)
+            meshMats->ResetAlbedoSlot(slot);
+        for (std::size_t i = 0; i < ready.size();)
+        {
+            const Ready& r = ready[i];
+            bool stale = r.meshSlot == slot;
+            for (const Arcane::MeshInstance& inst : r.meshInstances)
+                stale = stale || inst.materialSlot == slot;
+            if (!stale)
+            {
+                ++i;
+                continue;
+            }
+            // Re-queue (the material is fine, the index it captured is not).
+            const WorkKey key{ r.id, r.subject };
+            inFlight.erase(key);
+            ready.erase(ready.begin() + static_cast<std::ptrdiff_t>(i));
+            Push(key);
+        }
+    }
+
     void MaterialPreviewHarvester::Impl::ResetVehicle()
     {
+        // Stop listening BEFORE the context dies: its teardown releases the slots it
+        // minted, which would call back into half-reset state.
+        if (ctx)
+            if (Arcane::BindlessTable* table = ctx->Device().BindlessIfCreated())
+                table->RemoveObserver(this);
         ctx.reset();
         batch.reset();
         meshMats.reset();
@@ -430,25 +469,19 @@ namespace Arcane::Editor
     // ref-count -- so a later Resolve may land its replacement on the address
     // this one just vacated. ImGuiNri caches per texture by RAW POINTER, so a
     // bit-identical id would report a cache HIT on a descriptor set naming the
-    // DESTROYED texture. The evict therefore runs BEFORE the destroy, and
-    // unconditionally rather than "if the pointer changed" -- an unchanged
-    // pointer is precisely the case a recycled address fakes.
+    // DESTROYED texture. The cache's drop path takes that entry with it, in the
+    // chrome context's own lane, ahead of the texture (SetDropHook, spec Revision
+    // 6), which is also what an eviction does.
     //
-    // COST, stated because it is not free: InvalidateUserTextureNow idles the
-    // whole device unconditionally (ImGuiNri.cpp's own note). Both call sites
-    // are rare -- a material edit, a project switch -- and the `e.texture == 0`
-    // guard means an entry nothing ever uploaded costs nothing at all.
+    // WHENEVER THE KEY EXISTS, not only when a draw has already got a texture id
+    // out of it: a picture that is queued, or ready and not asked for since, is
+    // still the OLD picture, and the next draw would be served it. A no-op for a
+    // key the cache does not hold.
     void MaterialPreviewHarvester::Impl::ReleaseThumbTexture(Entry& e)
     {
-        if (e.texture == 0)
-            return;
-        if (Arcane::NriGraphContext* chrome = Chrome())
-        {
-            if (Arcane::RenderOverlayNode* hud = chrome->ImGuiHud())
-                hud->InvalidateUserTextureNow(
-                    reinterpret_cast<nri::Texture*>(static_cast<std::intptr_t>(e.texture)));
-            chrome->InvalidateContentTexture(e.thumbId);
-        }
+        if (e.thumbId.IsValid())
+            if (Arcane::NriGraphContext* chrome = Chrome())
+                chrome->InvalidateContentTexture(e.thumbId);
         e.texture = 0;
     }
 
@@ -471,7 +504,7 @@ namespace Arcane::Editor
         // point the chrome context is about to be destroyed, and
         // ~NriGraphContext's own ordering covers a texture and the ImGuiNri
         // that cached it when both belong to the SAME context (see
-        // EditorApp's m_graphLogoTexture, which states the distinction).
+        // EditorApp's m_graphLogoId, which states the distinction).
         // Paying N device idles on the way out would buy nothing.
         for (auto& [id, e] : im.entries)
             e.texture = 0;
@@ -950,6 +983,7 @@ namespace Arcane::Editor
             inst.indexOffset  = section.indexOffset;
             inst.indexCount   = section.indexCount;
             r.meshInstances.push_back(inst);
+            r.meshInstanceMaterials.push_back(slotMat);
         }
         ready.push_back(std::move(r));
     }
@@ -1126,11 +1160,17 @@ namespace Arcane::Editor
         ms.resolveAsset = services.resolveAsset;
         ms.resolveAlbedoSlot = [this](const Arcane::Guid& g) -> std::uint32_t
         {
-            // THIS context's own bindless table -- a slot from another
-            // MeshNode's table names a different texture entirely.
+            // The DEVICE's shared bindless table (one index space for every context
+            // on the device): the slot is valid until the table releases it, at
+            // which point OnAlbedoSlotReleased resets this cache's memo.
             return ctx ? ctx->ResolveMeshAlbedoSlot(g) : 0xFFFFFFFFu;
         };
         meshMats = std::make_unique<Arcane::MeshMaterialCache>(std::move(ms));
+        // Every holder of a device slot index is a released-slot observer: the
+        // device's mapping memo is shared by every context, so a slot this cache
+        // resolved can be released by the viewport's cook or material save.
+        if (Arcane::BindlessTable* table = ctx->Device().Bindless())
+            table->SetObserver(this, [this](std::uint32_t slot) { OnAlbedoSlotReleased(slot); });
         return true;
     }
 
@@ -1170,6 +1210,12 @@ namespace Arcane::Editor
         //                  lens -- so "trivially reachable" was true, and the
         //                  mocks show spheres.
         Arcane::Batcher2D& b = *batch;
+
+        // The picture's 2D half, as a lambda because a frame whose uploads were still
+        // in flight is RENDERED AGAIN (below): RenderFrameOffscreen drains the batcher,
+        // so every pass re-fills it.
+        const auto fillBatch = [&]()
+        {
         b.Begin(thumb.size, thumb.size);
         b.SetGlobals(globals);   // AFTER Begin -- matching every other call site
 
@@ -1193,6 +1239,8 @@ namespace Arcane::Editor
                            glm::vec2(s, s),
                            glm::vec2(0.0f), glm::vec2(1.0f), glm::vec4(1.0f));
         }
+        };   // fillBatch
+        fillBatch();
 
         Arcane::NriGraphContext::FrameDesc vp;
         vp.batch   = &b;
@@ -1264,7 +1312,113 @@ namespace Arcane::Editor
             vp.mesh = &meshScene;
         }
 
-        if (ctx->RenderFrameOffscreen(vp) != Arcane::NriGraphContext::FrameOutcome::Presented)
+        // ===== ALBEDO SLOTS FOLLOW THE UPLOADS (Plan C Task 5, review I2) =====
+        // StartOne/StartOneMesh asked the material cache ONCE. On a first use an albedo
+        // texture is only QUEUED by that ask (ResolveMeshAlbedoSlot answers the invalid
+        // slot), so the slot baked into `instances` would stay invalid and the flat-colour
+        // picture would be published as a success. Before every re-render the materials
+        // are Requested again (a re-ask re-resolves an invalid slot) and the slots
+        // rewritten into `instances`. Reports whether any slot CHANGED (the picture last rendered
+        // used the old one, so it must not be published) and whether an albedo is still on its way.
+        struct SlotState { bool changed = false; bool outstanding = false; };
+        const auto refreshAlbedoSlots = [&]() -> SlotState
+        {
+            SlotState state;
+            const auto onItsWay = [&](const Arcane::ResolvedMeshMaterial& m)
+            {
+                if (m.albedo.IsValid() && m.materialSlot == 0xFFFFFFFFu
+                    && (ctx->HasPendingUploads()
+                        || (ctx->Textures() && ctx->Textures()->UploadQueued(m.albedo))))
+                    state.outstanding = true;
+            };
+            if (!meshMats)
+                return state;
+            if (r.subject == Subject::Material && r.surface == Arcane::MaterialSurface::Mesh && !instances.empty())
+            {
+                meshMats->Request(r.id);
+                const auto& table = meshMats->Table();
+                if (const auto it = table.find(r.id); it != table.end())
+                {
+                    state.changed = state.changed || r.meshSlot != it->second.materialSlot
+                                 || r.meshColor != it->second.baseColor;
+                    r.meshColor = it->second.baseColor;
+                    r.meshSlot  = it->second.materialSlot;
+                    instances[0] = MaterialPreviewSphereInstance(r.meshColor, r.meshSlot);
+                    onItsWay(it->second);
+                }
+            }
+            else if (r.subject == Subject::Mesh && r.meshInstanceMaterials.size() == instances.size())
+            {
+                for (std::size_t i = 0; i < instances.size(); ++i)
+                {
+                    const Arcane::Guid& mat = r.meshInstanceMaterials[i];
+                    if (!mat.IsValid())
+                        continue;
+                    meshMats->Request(mat);
+                    const auto& table = meshMats->Table();
+                    if (const auto it = table.find(mat); it != table.end())
+                    {
+                        state.changed = state.changed || instances[i].materialSlot != it->second.materialSlot
+                                     || instances[i].baseColor != it->second.baseColor;
+                        instances[i].baseColor    = it->second.baseColor;
+                        instances[i].materialSlot = it->second.materialSlot;
+                        onItsWay(it->second);
+                    }
+                }
+            }
+            return state;
+        };
+
+        // REFRESH BEFORE THE FIRST RENDER too: a slot that became valid between StartOne and this harvest
+        // (another harvest's frames uploaded the albedo) must not be rendered flat. The first refresh's
+        // own `changed` is moot -- nothing was rendered with the old slot yet.
+        (void)refreshAlbedoSlots();
+
+        Arcane::NriGraphContext::FrameOutcome outcome = ctx->RenderFrameOffscreen(vp);
+
+        // ===== DEFERRED UPLOADS (Plan C Task 5): ONE FRAME IS NOT THE PICTURE ========
+        // A mesh, a texture or a declared material image that this frame resolved for
+        // the first time is only QUEUED by it: the next frame uploads, the one after
+        // draws. So while the vehicle reports uploads in flight the same picture is
+        // rendered again -- bounded by the retry budget this harvester already owns
+        // (editor.thumbnail.maxRetries, default 3 = the upload frame, the first
+        // drawing frame, and one spare) of frames WITHOUT PROGRESS, because the budget
+        // paces a picture with several large images over several upload frames, and being
+        // paced is not failing (UploadSettleBound). The stash SetMeshSupply serves from stays
+        // alive across the loop; it is released only after the last frame.
+        // NOTE (review, fix round 3): no path where a slot flips with NOTHING pending has been constructed -- a texture
+        // becomes ready only through a committed upload, which leaves HasPendingUploads() true for one more frame, and
+        // the refresh before the first render already absorbs a flip that happened before this harvest. `changed` is
+        // therefore a DEFENSIVE condition (it keeps the never-publish-a-stale-slot invariant if that ever stops holding).
+        // Render again while uploads are in flight, an albedo is still on its way, OR a slot changed since the
+        // picture last rendered (that picture used the old slot and is stale).
+        SlotState slots = refreshAlbedoSlots();
+        Arcane::UploadSettleBound settle;
+        settle.maxStalled   = thumb.maxRetries;
+        settle.lowestQueued = ctx->QueuedUploadCount();
+        while (outcome == Arcane::NriGraphContext::FrameOutcome::Presented
+               && (ctx->HasPendingUploads() || slots.changed || slots.outstanding)
+               && settle.AllowAnotherFrame(ctx->QueuedUploadCount()))
+        {
+            fillBatch();
+            outcome = ctx->RenderFrameOffscreen(vp);
+            slots = refreshAlbedoSlots();   // what the NEXT frame must use; changed == the one just rendered is stale
+        }
+
+        if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented
+            && (ctx->HasPendingUploads() || slots.changed))
+        {
+            // Gave up: the uploads never settled inside the budget. Behave as today's
+            // failure path does for a picture that cannot be made -- the item is
+            // Refused (memoized, kind icon), not published half-drawn.
+            ARC_WARN("[thumbs] the preview for {} {} still had uploads in flight after {} extra frame(s) "
+                     "without progress -- giving up on it", r.subject == Subject::Mesh ? "mesh" : "material",
+                     r.id.ToString(), thumb.maxRetries);
+            ReleaseMeshHarvest();
+            return HarvestOutcome::Refused;
+        }
+
+        if (outcome != Arcane::NriGraphContext::FrameOutcome::Presented)
         {
             // Skipped is impossible at a fixed 64px; Failed has already
             // latched + logged. The vehicle is dropped so the replacement is
@@ -1346,8 +1500,10 @@ namespace Arcane::Editor
     std::uint64_t MaterialPreviewHarvester::Impl::EnsureTexture(const Arcane::Guid& material,
                                                                 Entry& e) const
     {
-        if (e.texture != 0)
-            return e.texture;
+        // ASKED ON EVERY DRAW, never answered from a memo (spec Revision 6). The ask is what tells
+        // the device account this thumbnail is drawn, and the cache may have dropped the texture
+        // since the last one: a raw pointer kept across frames would dangle.
+        e.texture = 0;
         if (!e.pixels.Valid() || !e.thumbId.IsValid())
             return 0;
         Arcane::NriGraphContext* chrome = Chrome();
@@ -1359,6 +1515,8 @@ namespace Arcane::Editor
         // it decodes a second time and reads dark. These bytes are already
         // display-referred -- they came out of the tonemap.
         nri::Texture* t = cache->Resolve(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display);
+        if (!t && cache->UploadQueued(e.thumbId, Arcane::NriTextureCache::ColorSpace::Display))
+            return 0;   // created and queued: the chrome context's next frames upload it; asked again every draw
         if (!t)
         {
             ARC_WARN("[thumbs] the chrome texture cache refused the preview for material {}",

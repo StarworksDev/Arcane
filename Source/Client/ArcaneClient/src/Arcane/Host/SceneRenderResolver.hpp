@@ -122,6 +122,31 @@ namespace Arcane
             // the flat baseColor path.
             std::function<std::uint32_t(const Guid&)> resolveMeshAlbedoSlot;
 
+            // 3D-readiness arc spec 3.5: the matching release. A resolved
+            // material that held an albedo slot is going away (Invalidate / Clear);
+            // the device drops one reference on that texture's slot. Same
+            // injection reason as resolveMeshAlbedoSlot. Null leaves the count alone.
+            std::function<void(const Guid&)> releaseMeshAlbedoRef;
+
+            // Registers `fn` with the device's bindless table under `key` (idempotent
+            // per key), called with the slot index each time the device releases a
+            // slot. The host resolves the device at CALL time, so this is offered on
+            // every Refresh until a device exists (and again if it changes). `fn` is
+            // inert once this resolver is gone. Null disables the slot reset.
+            std::function<void(const void* key, const std::function<void(std::uint32_t)>& fn)> ensureAlbedoSlotObserver;
+
+            // The frame boundary for albedo references: called once per Refresh,
+            // after the mesh sweep has (re-)resolved every referenced material. A
+            // material whose reference dropped (a whole-cache Clear on a material
+            // save) and was re-acquired by that sweep keeps its slot; only a key
+            // still at zero is released. Null leaves zero-reference keys queued.
+            std::function<void()> flushMeshAlbedoReleases;
+
+            // Called once per Refresh, BEFORE the sweeps: every albedo a material holds a
+            // reference on counts as drawn now, so a Charge in the sweeps below cannot evict
+            // a visible one for a colder-looking stamp (spec Revision 6). Null skips it.
+            std::function<void()> stampReferencedAlbedoSlots;
+
             // F2c Plan 2 Task 6: drop resident GPU buffers for this .arcmesh
             // guid. Injected for the same reason resolveMeshAlbedoSlot is --
             // this class holds no device. Null (tests that do not care, a host

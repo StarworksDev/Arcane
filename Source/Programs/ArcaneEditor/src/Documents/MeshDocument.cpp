@@ -457,10 +457,19 @@ namespace Arcane::Editor
         // single Tick was skipped.
         if (outcome == Arcane::NriGraphContext::FrameOutcome::Presented)
         {
-            m_previewDirty       = false;
+            // Dirty STAYS set while this context still has an upload in flight (Plan C
+            // Task 5): the mesh this frame resolved for the first time was only queued, so
+            // the picture just rendered does not have it yet and the preview must render
+            // again (the dirty-driven tick would otherwise never redraw it).
+            m_previewDirty       = m_preview->HasPendingUploads();
             m_previewPresented   = true;
             m_previewFrameFailed = false;   // the next good frame clears the latch
         }
+    }
+
+    bool MeshDocument::PreviewUploadsPending() const noexcept
+    {
+        return m_preview && m_preview->HasPendingUploads();
     }
 
     std::uint64_t MeshDocument::PreviewTextureId() const noexcept

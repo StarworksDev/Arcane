@@ -183,6 +183,7 @@ namespace Arcane::Editor
         const std::string& Title() const override { return m_title; }
         Arcane::Guid AssetGuid() const override { return m_data.id; }
         bool Dirty() const override { return m_dirty; }
+        bool PreviewUploadsPending() const noexcept override;
         bool Save() override;
         bool WindowFocused() const override { return m_windowFocused; }
         void Tick(double dt) override;

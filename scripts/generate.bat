@@ -52,6 +52,14 @@ if not exist "%PREMAKE5%" (
     exit /b 1
 )
 
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%\scripts\generate-engine-constants.ps1"
+if errorlevel 1 (
+    echo ERROR: generate-engine-constants.ps1 failed.
+    echo.
+    if not defined _APH_NOPAUSE pause
+    exit /b 1
+)
+
 pushd "%PROJECT_ROOT%"
 call "%PREMAKE5%" vs2026
 set "PREMAKE_ERR=%ERRORLEVEL%"

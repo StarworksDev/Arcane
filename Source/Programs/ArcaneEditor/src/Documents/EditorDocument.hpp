@@ -34,6 +34,9 @@ namespace Arcane::Editor
         virtual const std::string& Title() const = 0;     // window title (stable, unique)
         virtual Arcane::Guid AssetGuid() const = 0;       // identity (nil for unsaved-new)
         virtual bool Dirty() const = 0;
+        // Whether a preview context this document owns still has a mesh/texture upload in flight
+        // (Plan C Task 5): the settled-capture paths must not converge while it does.
+        virtual bool PreviewUploadsPending() const noexcept { return false; }
         virtual bool Save() = 0;                          // false = save failed/refused
         // What a USER save gesture (Ctrl+S, from the document or from an
         // Inspector page showing it) runs. Default: Save(). A document with a

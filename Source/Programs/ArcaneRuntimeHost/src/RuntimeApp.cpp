@@ -32,6 +32,7 @@
 #include <Arcane/Render/GraphicsBackend.hpp>   // Arcane::GraphicsBackend / ToString (StageGpuCore's boot banner)
 #include <Arcane/Render/RenderErrorLatch.hpp>  // RenderErrorCount (the graph latch fold)
 #include <Arcane/Render/GpuInstrumentation.hpp>   // Arcane::GpuDeviceLostObserved (Run()'s exit-code tail)
+#include <Arcane/Render/Nri/BindlessTable.hpp>   // the device table the resolver's slot observer registers on
 #include <Arcane/Render/PickEmit.hpp>    // PickEntityForId (ShutdownGraphPath's --pick-probe AND pick@x,y reports)
 #include <Arcane/Render/RenderFramePacket.hpp>   // PushSceneCamera reads the extracted sprite view
 #include <Arcane/Scene/Components.hpp>   // Arcane::Identity (ShutdownGraphPath's pick@x,y readback resolution, Task 9)
@@ -401,7 +402,28 @@ bool RuntimeApp::StageSpriteTables(Arcane::HostBoot::BootContext&)
     rs.resolveMeshAlbedoSlot = [this](const Arcane::Guid& g) -> std::uint32_t
     {
         Arcane::NriGraphContext* graph = Graph();
-        return graph ? graph->ResolveMeshAlbedoSlot(g) : 0xFFFFFFFFu;
+        return graph ? graph->AcquireMeshAlbedoSlot(g) : 0xFFFFFFFFu;   // a material's reference
+    };
+    rs.releaseMeshAlbedoRef = [this](const Arcane::Guid& g)
+    {
+        if (Arcane::NriGraphContext* graph = Graph())
+            graph->ReleaseMeshAlbedoRef(g);
+    };
+    rs.ensureAlbedoSlotObserver = [this](const void* key, const std::function<void(std::uint32_t)>& fn)
+    {
+        if (Arcane::NriGraphContext* graph = Graph())
+            if (Arcane::BindlessTable* table = graph->Device().Bindless())
+                table->SetObserver(key, fn);
+    };
+    rs.flushMeshAlbedoReleases = [this]()
+    {
+        if (Arcane::NriGraphContext* graph = Graph())
+            graph->FlushMeshAlbedoReleases();
+    };
+    rs.stampReferencedAlbedoSlots = [this]()
+    {
+        if (Arcane::NriGraphContext* graph = Graph())
+            graph->StampReferencedMeshAlbedos();
     };
     rs.invalidateMeshGeometry = [this](const Arcane::Guid& g)
     {
@@ -897,7 +919,10 @@ void RuntimeApp::MainLoop()
         // unsaved documents.
         rc.hookUser           = this;
         rc.producersIdle      = [](void* user) -> bool {
-            return static_cast<RuntimeApp*>(user)->m_shaderCompiler.IsIdle();
+            auto* app = static_cast<RuntimeApp*>(user);
+            // Plus the graph's deferred mesh/texture uploads (Plan C Task 5): the upload
+            // frame is byte-identical to the frame that queued it.
+            return app->m_shaderCompiler.IsIdle() && !(app->Graph() && app->Graph()->HasPendingUploads());
         };
         // Task 19 (ruling F16): the runtime's one world.
         rc.worlds.user        = this;

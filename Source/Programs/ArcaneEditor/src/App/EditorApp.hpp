@@ -40,6 +40,7 @@
 #include <Arcane/Config/Settings.hpp>
 #include "Panels/CreateAssetDialog.hpp"
 #include "Panels/DiagnosticStore.hpp"
+#include "App/DeferredTextureDrops.hpp"   // m_textureDrops (Plan C N1)
 #include "App/DialogSlot.hpp"
 #include "App/InputEdges.hpp"
 #include "App/ModalErrorQueue.hpp"
@@ -241,6 +242,9 @@ namespace Arcane::Editor
         // ShutdownGraphPath -- every guard that used to read `if
         // (m_graphChrome)` reads `if (ChromeGraph())` instead.
         [[nodiscard]] Arcane::NriGraphContext* ChromeGraph() const noexcept;
+        // Whether either graph context still has a mesh/texture upload in flight (Plan C
+        // Task 5) -- the settle loops' extra quiescence conjunct.
+        [[nodiscard]] bool GraphUploadsPending() const noexcept;
         // The VIEWPORT context and every seam it needs, with TWO callers:
         // CreateGraphVehicles at boot, and SwitchProject's
         // "render_bridge" stage on every project switch -- which rebuilds this
@@ -2050,13 +2054,15 @@ namespace Arcane::Editor
         // needs a caller-side hook; same-context does not.
         Arcane::Guid      m_graphLogoId;
         Arcane::PixelData m_graphLogoPixels;
-        std::uint64_t     m_graphLogoTexture = 0;   // ImTextureID (raw nri::Texture*)
-        // The toolbar's mark -- 0 = no mark, which DrawSimTimeToolbar already
-        // treats as "skip it".
-        [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept
-        {
-            return m_graphLogoTexture;
-        }
+        // The toolbar's mark as an ImTextureID (raw nri::Texture*), asked of the chrome cache
+        // on every draw and never kept: 0 = no mark, or not uploaded (again) yet. While it is
+        // not uploaded, ToolbarLogoPending keeps the mark's box in the strip.
+        [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept;
+        // True while the mark's upload is queued or in flight (spec Revision 4: first use
+        // returns not-ready). Ask it AFTER ToolbarLogoTextureId in the same frame, so a
+        // re-queue after an eviction counts. The toolbar keeps the mark's box while it is
+        // true, so the strip's height never depends on residency; a refused mark is false.
+        [[nodiscard]] bool ToolbarLogoPending() const noexcept;
 
         // File -> Open Project (soft-restart). The menu sets menuReq.openProject;
         // DrawEditorUi launches the async .arcproj FILE dialog via the shared
@@ -2427,6 +2433,13 @@ namespace Arcane::Editor
         // T5 s7.7: the post-op selection step every RunAssetOp caller runs on a returned plan (B17 and B20 extend it).
         void AfterAssetOp(const Arcane::Editor::AssetOpPlan&);
         void InvalidateAssetCaches(const Arcane::Guid&, Arcane::Editor::AssetKind);
+        // Plan C N1: InvalidateAssetCaches' device-wide texture drop is RAISED here,
+        // never run on the spot: its callers can run inside the UI phase, after this
+        // frame's draw lists may already name the texture by raw pointer. MainLoop
+        // drains it right after PresentFrame (DeferredTextureDrops.hpp says why).
+        // Its drop, installed in StageSpriteTables beside the resolver services, is the ONE
+        // device-wide invalidation, on the viewport context, else the chrome's.
+        Arcane::Editor::DeferredTextureDrops m_textureDrops;
         // T5 s7.6: the asset page's Rename modal (requestRename opens it).
         Arcane::Editor::RenameModalState m_renameModal;
         // T5 s7.5: the ONE Delete confirm modal (requestDelete opens it). Its

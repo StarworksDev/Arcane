@@ -11,6 +11,7 @@
 #include <Arcane/Project/Project.hpp>
 #include <Arcane/Render/Batcher2D.hpp>
 #include <Arcane/Render/MeshCache.hpp>
+#include <Arcane/Render/GpuSceneTypes.hpp>   // GpuSceneMirror::ReleaseMaterialSlot
 #include <Arcane/Render/MeshMaterialCache.hpp>
 #include <Arcane/Render/PostChainCache.hpp>
 #include <Arcane/Render/ShaderCompiler.hpp>
@@ -39,6 +40,13 @@ namespace Arcane
         // `resolveAsset` is the only thing they share with the three above.
         std::unique_ptr<MeshCache>         meshes;
         std::unique_ptr<MeshMaterialCache> meshMaterials;
+
+        // The device told us a bindless slot was released: see Services::
+        // ensureAlbedoSlotObserver. `alive` outlives this object only through the
+        // observer's weak_ptr, which is how a stale registration on a longer-lived
+        // device table goes inert.
+        std::shared_ptr<bool>                 alive = std::make_shared<bool>(true);
+        std::function<void(std::uint32_t)>    slotObserver;
 
         GlobalParams globals{};
 
@@ -150,11 +158,27 @@ namespace Arcane
         // ResolveAlbedoSlotFn / this class's own Services field), so there is
         // nothing for a wrapper lambda here to add.
         meshMaterialServices.resolveAlbedoSlot = m_impl->services.resolveMeshAlbedoSlot;
+        meshMaterialServices.releaseAlbedoSlot = m_impl->services.releaseMeshAlbedoRef;
         m_impl->meshMaterials = std::make_unique<MeshMaterialCache>(std::move(meshMaterialServices));
+
+        // A released slot: every resolved material holding it falls back to the
+        // invalid slot (and re-resolves later), and every GPU row last staged with
+        // it is re-dirtied so GpuSceneSync rewrites it before the index is reused.
+        m_impl->slotObserver = [impl = m_impl, weak = std::weak_ptr<bool>(m_impl->alive)](std::uint32_t slot)
+        {
+            if (!weak.lock())
+                return;
+            impl->meshMaterials->ResetAlbedoSlot(slot);
+            if (impl->services.runtime)
+                if (GpuSceneMirror* mirror = impl->services.runtime->Registry().GetResource<GpuSceneMirror>())
+                    mirror->ReleaseMaterialSlot(slot);
+        };
     }
 
     SceneRenderResolver::~SceneRenderResolver()
     {
+        // Any observer still registered on a device table goes inert here.
+        m_impl->alive.reset();
         // The registry's SpriteTable / SpriteMaterialTable hold NON-OWNING
         // pointers into the caches below (SceneResources.hpp:96-99), so they
         // must be un-published before those maps die. Safe because every host
@@ -377,6 +401,13 @@ namespace Arcane
         if (!im.services.runtime)
             return;
 
+        // Idempotent per key; the host resolves the device now (none before the
+        // graph context exists).
+        if (im.services.ensureAlbedoSlotObserver)
+            im.services.ensureAlbedoSlotObserver(m_impl, im.slotObserver);
+        if (im.services.stampReferencedAlbedoSlots)
+            im.services.stampReferencedAlbedoSlots();
+
         im.globals.time           = (float)frame.sceneTime.value_or(frame.now);
         im.globals.deltaTime      = (float)frame.dt;
         im.globals.viewportWidth  = frame.viewportWidth;
@@ -485,6 +516,11 @@ namespace Arcane
                 if (slot.material.IsValid())
                     im.meshMaterials->Request(slot.material);
         });
+
+        // The mesh sweep above re-acquired every slot a still-referenced material
+        // needs; only now is a zero-reference slot really unreferenced.
+        if (im.services.flushMeshAlbedoReleases)
+            im.services.flushMeshAlbedoReleases();
 
         // Census, logged once per distinct outcome. "Nothing draws" has too many
         // indistinguishable causes to debug from a silent log: no SpriteRenderer in

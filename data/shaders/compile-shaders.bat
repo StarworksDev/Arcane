@@ -31,6 +31,9 @@ setlocal
 set DXC=%~dp0..\..\ThirdParty\tools\dxc\dxc.exe
 set SRC=%~dp0
 set OUT=%~dp0generated
+:: bindless-capacity.hlsli (mesh.hlsl includes it) is generated from build/engine-constants.lua;
+:: the writer leaves an up-to-date output untouched.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\..\scripts\generate-engine-constants.ps1" || exit /b 1
 if not exist "%OUT%\dxil"  mkdir "%OUT%\dxil"
 if not exist "%OUT%\spirv" mkdir "%OUT%\spirv"
 

@@ -55,6 +55,10 @@ for t in $ARCANE_SHADER_TARGETS; do
     esac
 done
 
+# bindless-capacity.hlsli (mesh.hlsl includes it) is generated from build/engine-constants.lua;
+# the writer leaves an up-to-date output untouched. The .bat runs its own powershell line.
+sh "$ROOT/scripts/generate-engine-constants.sh"
+
 mkdir -p "$OUT/dxil" "$OUT/spirv"
 
 # `set SPIRV_FLAGS=...` -> the flag string (CR stripped: the .bat is CRLF-safe).
