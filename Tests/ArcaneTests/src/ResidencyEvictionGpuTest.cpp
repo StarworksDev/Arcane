@@ -49,6 +49,7 @@
 #include <string>
 #include <vector>
 
+#include "App/DeferredTextureDrops.hpp"   // the editor's UI-phase drop seam (N1)
 #include "Helpers/GpuCapability.hpp"
 
 namespace
@@ -703,6 +704,100 @@ namespace
         v->ctx.reset();
     }
 
+    // ---- 7b. N1: a drop raised in the UI phase, after this frame's draw list named the texture -------------
+    // The editor's shape: a Browser row draws a texture's thumbnail as a raw handle, and later in the SAME
+    // DrawEditorUi a Delete confirm (or an asset-op undo) runs InvalidateAssetCaches. That drop goes through
+    // the editor's DeferredTextureDrops: raised here mid-UI, drained where MainLoop drains it, after the
+    // frame's submit. The texture the draw list names must be alive when ImGui records it.
+    void CheckUiPhaseDropWaitsForTheFrame(Arcane::GraphicsBackend backend)
+    {
+        const std::uint64_t errorsBefore = Arcane::RenderErrorCount();
+        constexpr auto kDisplay = Arcane::NriTextureCache::ColorSpace::Display;
+        Images images;
+        images.Add(1);
+        images.Add(2);
+        const Arcane::Guid logo = Id(1), thumb = Id(2);
+
+        ImGuiScope scope;
+        Arcane::NriGraphContext::NodeSet nodes;
+        nodes.hostHud = true;
+        auto v = MakeVehicle(backend, nullptr, nodes);
+        auto* const hud = dynamic_cast<Arcane::ImGuiNriNode*>(v->ctx->ImGuiHud());
+        REQUIRE(hud != nullptr);
+        hud->AdoptImGuiContext(scope.imgui);
+        v->ctx->SetPixelSupply([&](const Arcane::Guid& id) { return images.Find(id); });
+        Arcane::NriTextureCache& cache = *v->ctx->Textures();
+        auto batch = Arcane::Batcher2D::Create();
+        REQUIRE(batch != nullptr);
+
+        // EditorApp's sink: one device-wide invalidation (InvalidateAssetCaches' texture branch).
+        Arcane::Editor::DeferredTextureDrops drops([&](const Arcane::Guid& id) { v->ctx->InvalidateTextureOnDevice(id); });
+
+        // One UI phase: draw what the cache answers, then (optionally) raise a drop, as a later panel action does.
+        const auto frameOf = [&](const std::vector<Arcane::Guid>& ids, const Arcane::Guid& raise) -> nri::Texture*
+        {
+            ImGui::NewFrame();
+            ImDrawList* draw = ImGui::GetForegroundDrawList();
+            nri::Texture* last = nullptr;
+            float x = 8.0f;
+            for (const Arcane::Guid& id : ids)
+            {
+                if (nri::Texture* texture = cache.Resolve(id, kDisplay))
+                {
+                    draw->AddImage((ImTextureID)(intptr_t)texture, ImVec2(x, 8.0f), ImVec2(x + 24.0f, 32.0f));
+                    last = texture;
+                }
+                x += 28.0f;
+            }
+            if (raise.IsValid())
+                drops.Raise(raise);   // after the draw, before the frame is recorded
+            ImGui::Render();
+            batch->Begin(kW, kH);
+            FrameDesc frame;
+            frame.batch   = batch.get();
+            frame.imgui   = ImGui::GetDrawData();
+            frame.capture = true;     // each capture idles, so the last frame has finished: a burial reaps at once
+            REQUIRE(v->ctx->RenderFrameOffscreen(frame) == FrameOutcome::Presented);
+            (void)Capture(*v->ctx);
+            return last;
+        };
+
+        const std::uint32_t pastTheFence = Arcane::FramesInFlight() + 2u;
+        nri::Texture* thumbTexture = nullptr;
+        for (std::uint32_t f = 0; f < pastTheFence + 4u; ++f)
+            thumbTexture = frameOf({ logo, thumb }, Arcane::Guid{});
+        REQUIRE(thumbTexture != nullptr);
+        REQUIRE(hud->Renderer().HasEntryFor(thumbTexture));
+        REQUIRE(Arcane::RenderErrorCount() == errorsBefore);
+
+        // The frame whose draw list names the thumbnail raises its drop.
+        nri::Texture* const drawn = frameOf({ logo, thumb }, thumb);
+        CHECK(drawn == thumbTexture);
+        CHECK(Arcane::RenderErrorCount() == errorsBefore);       // ImGui recorded a live texture
+        CHECK(cache.View(thumb, kDisplay) != nullptr);           // held: the drop has not run yet
+        CHECK(hud->Renderer().HasEntryFor(thumbTexture));
+
+        // MainLoop's drain, after PresentFrame: the drop runs, and its entry goes with it.
+        drops.Drain();
+        CHECK(drops.Pending() == 0u);
+        CHECK(cache.View(thumb, kDisplay) == nullptr);
+        CHECK_FALSE(hud->Renderer().HasEntryFor(thumbTexture));
+
+        // Past the fence the burial reaps; nothing names the texture.
+        for (std::uint32_t f = 0; f < pastTheFence + 4u; ++f)
+            (void)frameOf({ logo }, Arcane::Guid{});
+
+        // The row draws again: a new texture and a new entry.
+        nri::Texture* newThumb = nullptr;
+        for (std::uint32_t f = 0; f < pastTheFence + 4u; ++f)
+            newThumb = frameOf({ logo, thumb }, Arcane::Guid{});
+        CHECK(newThumb != nullptr);
+        CHECK(hud->Renderer().HasEntryFor(newThumb));
+        CHECK(Arcane::RenderErrorCount() == errorsBefore);
+
+        v->ctx.reset();
+    }
+
     // ---- meshes that sample through bindless slots ------------------------------------------------------------
     // What SceneRenderResolver and MeshMaterialCache do per frame, without a scene: stamp, re-acquire whatever the
     // device released, flush, draw one cube per albedo.
@@ -934,6 +1029,7 @@ EVICTION_GPU_BOTH("a material notices a changed view that another consumer re-re
 EVICTION_GPU_BOTH("a post chain's evicted declared image returns and draws the same picture", CheckPostChainRecovers, , false)
 EVICTION_GPU_BOTH("a post chain notices a changed view that another consumer re-resolved (the 1-then-1 hole)", CheckPostChainRecovers, , true)
 EVICTION_GPU_BOTH("a dropped texture takes its ImGui entry with it, and a raw handle holder re-asks", CheckImGuiEntryFollowsTheDrop)
+EVICTION_GPU_BOTH("a drop raised in the UI phase waits until the frame whose draw list names it is submitted", CheckUiPhaseDropWaitsForTheFrame)
 EVICTION_GPU_BOTH("a device-wide invalidation (a cook) reaches a sprite's baked set", CheckInvalidatedSpriteRecovers)
 EVICTION_GPU_BOTH("a visible albedo set over the allowance renders intact, with no churn", CheckVisibleAlbedosDoNotChurn)
 EVICTION_GPU_BOTH("a table full of unreferenced mappings serves a referenced acquire, which renders", CheckFullTableServesAReferencedAcquire)

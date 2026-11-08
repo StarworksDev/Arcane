@@ -679,7 +679,14 @@ namespace Arcane::Editor
             DrawViewportPanelPhase(fs);
             HandleViewportPick(fs);
             DrawSelectionPanels();
-            if (!PresentFrame())
+            const bool presented = PresentFrame();
+            // Plan C N1: the device-side texture drops the UI phase raised
+            // (InvalidateAssetCaches), run HERE and on every outcome: the
+            // chrome ImGui frame is discharged (RenderToDrawData), so no draw
+            // list that named one of these textures by raw pointer can be
+            // recorded again, and the next frame's renders have not begun.
+            m_textureDrops.Drain();
+            if (!presented)
             {
                 continue;
             }

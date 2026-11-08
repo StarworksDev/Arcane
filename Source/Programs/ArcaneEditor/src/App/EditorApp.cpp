@@ -1052,6 +1052,15 @@ namespace Arcane::Editor
                 std::make_unique<Arcane::SceneRenderResolver>(std::move(rs));
         }
 
+        // Plan C N1: the drop InvalidateAssetCaches raises and MainLoop drains
+        // after PresentFrame. Same [this]-capture idiom as the services above:
+        // the contexts are looked up when it runs, not now.
+        m_textureDrops.SetDrop([this](const Arcane::Guid& g)
+        {
+            if (Arcane::NriGraphContext* g0 = m_viewportTargets.graph ? m_viewportTargets.graph.get() : ChromeGraph())
+                g0->InvalidateTextureOnDevice(g);
+        });
+
         // Spec 2026-09-30 s4.2: the asset-reference cell's services, built
         // ONCE. Every callable reads app state at CALL time (a project switch,
         // a document opened during a boot stage). reveal/open only QUEUE into
@@ -2963,11 +2972,12 @@ namespace Arcane::Editor
     //     slot with no owner identity -- tearing this context down mid-session
     //     would disarm it and rebuild it, for nothing;
     //   * its ImGuiNri serves the EDITOR ImGui context, which survives;
-    //   * its NriTextureCache has exactly ONE possible tenant: the toolbar
-    //     logo, keyed by a synthetic per-run Guid answered by a pixel supply
-    //     that returns null for every other id. No project asset can enter it.
-    //     (The VIEWPORT context is the one that gets the project's resolver +
-    //     Assets pixel supply -- BuildGraphViewportContext, and only there.)
+    //   * its NriTextureCache serves the editor's own pictures, not the
+    //     scene: the toolbar logo and the thumbnail harvester's captures
+    //     (synthetic per-run Guids), and the Browser's texture thumbnails
+    //     (Assets PixelsFor, Display space). (The VIEWPORT context is the one
+    //     that gets the project's resolver and its scene content --
+    //     BuildGraphViewportContext, and only there.)
     // Destroying it would mean destroying and re-creating a graphics device
     // and a flip-model swapchain on a live HWND mid-session, taking every
     // borrower (the viewport context, every document preview) with it, in
@@ -2976,26 +2986,24 @@ namespace Arcane::Editor
     // TORN DOWN -- m_viewportTargets.graph, the offscreen viewport context.
     // Its SIZE is panel-scoped (so the replacement is created at the outgoing
     // one's extent, below, and the panel does not snap back to 1280x720), but
-    // its CONTENT is project-scoped through and through, and -- this is the
-    // part that decides it -- the content lives in caches that HAVE NO
-    // INVALIDATION HOOK BY DESIGN:
+    // its CONTENT is project-scoped through and through:
     //   * NriTextureCache holds nri::Textures uploaded from the OUTGOING
     //     project's asset pixels, keyed by asset Guid. Two projects can carry
     //     the same Guid (copying a project copies its asset ids), so a kept
     //     cache does not merely leak VRAM -- it can serve project A's pixels
-    //     for project B's asset. It does have Release(graves, fence)...
-    //   * ...but Batch2DNode::EnsureSpriteSet caches a DESCRIPTOR SET per
-    //     sprite Guid naming that cache's view, written ONCE and never
-    //     rewritten -- the discipline that keeps ResetDescriptorPool and its
-    //     fence rules out of that file. Flushing the texture cache under it
-    //     would leave those sets naming destroyed views, which is a fault
-    //     rather than a stale pixel. Same shape for the material sets and for
-    //     PostChainNode's declared-param views.
-    // So a "flush the content, keep the object" switch would have to re-open a
-    // deliberately-closed discipline in three nodes. Rebuilding the context
-    // achieves the same state by construction -- new pool, new sets, new cache
-    // -- with no new invalidation surface, and it is what this arc's two
-    // contract blocks (NriGraphContext.hpp's TWO CONTEXTS, TWO LANES item (2);
+    //     for project B's asset.
+    //   * The cache DOES have per-key invalidation (a cook's and an asset
+    //     op's InvalidateTextureOnDevice, an eviction), and since 3D-readiness
+    //     Plan C its baked consumers survive one: Batch2DNode's sprite sets
+    //     and material variants, the material sets and PostChainNode's
+    //     declared-param views ask the cache on every frame they draw and
+    //     rebuild on a changed ViewSerial, and the drop hook takes ImGui's
+    //     per-texture entries. A "flush the content, keep the object" switch
+    //     would still be a sweep over every key of caches (textures, meshes,
+    //     the GPU scene) whose every key is stale.
+    // Rebuilding the context reaches the same state by construction -- new
+    // pool, new sets, new caches -- and it is what this arc's two contract
+    // blocks (NriGraphContext.hpp's TWO CONTEXTS, TWO LANES item (2);
     // ImGuiNri.hpp's caller list) already named as the switch's shape.
     //
     // KEPT, AND IT MUST BE -- m_gameImgui. The viewport context's game

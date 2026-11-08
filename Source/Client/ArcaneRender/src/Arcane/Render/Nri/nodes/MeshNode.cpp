@@ -1022,7 +1022,8 @@ namespace Arcane
 
         // ---------------------------------------------------------------
         // Resident vertex + index buffers, looked up from Prepare's table.
-        // NEVER resolved here -- UploadData submits and waits internally.
+        // NEVER resolved here -- a Resolve creates buffers and queues their
+        // upload, which is declaration work (see Prepare in the header).
         // DEDUPED BY GUID: a scene of twenty cubes is one bind and twenty
         // draws. Offset is always 0: these are dedicated buffers, not a ring.
         // ---------------------------------------------------------------

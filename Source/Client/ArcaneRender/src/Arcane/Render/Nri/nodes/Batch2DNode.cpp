@@ -1368,9 +1368,11 @@ namespace Arcane
         // PASS 1: THE SPRITE TEXTURES (Task 2). Every span -- built-in or
         // material -- names an image asset or nil, and each distinct non-nil
         // one needs to be resident and to have a built-in descriptor set that
-        // binds it at t0. Both happen HERE and only here: the upload submits
-        // and waits, and a descriptor set must never be allocated or written
-        // inside the frame's open command buffer.
+        // binds it at t0. Both happen HERE and only here: a Resolve creates the
+        // texture and its view and queues the upload for a later frame's
+        // upload node (UploadNode.hpp; only the tests' Immediate mode still
+        // submits and waits), and a descriptor set must never be allocated or
+        // written inside the frame's open command buffer.
         //
         // The set is memoized in m_spriteSets, so a scene that draws the same sprites
         // every frame builds it once and only asks the cache after that.
@@ -1782,8 +1784,9 @@ namespace Arcane
                 drained = batcher->Drain();
                 // ...and the REGISTERED materials it names are resolved here
                 // too, for the same reason: this is the last point before the
-                // frame's command buffer opens, and making a material's texture
-                // resident goes through a helper that submits and waits. See
+                // frame's command buffer opens, and asking for a material's
+                // texture creates device objects and may queue an upload, and
+                // building its sets allocates and writes descriptors. See
                 // Prepare.
                 if (Batch2DNode* node = context->Batch2D())
                     node->Prepare(*batcher, drained, canvasFormat);

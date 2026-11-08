@@ -211,9 +211,11 @@ namespace Arcane
         // param textures. Called at DECLARATION time -- deliberately, and it
         // is the reason this is a separate entry point rather than the top of
         // Record():
-        //   * making a texture resident goes through NRI's HelperInterface,
-        //     which SUBMITS AND WAITS internally, and that must not happen with
-        //     the frame's command buffer open;
+        //   * asking the cache for a texture creates the texture and its view
+        //     and queues the upload for a later frame's upload node
+        //     (UploadNode.hpp; only the tests' Immediate mode still submits and
+        //     waits), and none of that belongs inside the frame's open command
+        //     buffer;
         //   * so does ALLOCATING a descriptor set and writing it: a set the GPU
         //     may still be reading must never be rewritten, and a set allocated
         //     mid-recording could exhaust the pool inside a frame that is

@@ -40,6 +40,7 @@
 #include <Arcane/Config/Settings.hpp>
 #include "Panels/CreateAssetDialog.hpp"
 #include "Panels/DiagnosticStore.hpp"
+#include "App/DeferredTextureDrops.hpp"   // m_textureDrops (Plan C N1)
 #include "App/DialogSlot.hpp"
 #include "App/InputEdges.hpp"
 #include "App/ModalErrorQueue.hpp"
@@ -2427,6 +2428,13 @@ namespace Arcane::Editor
         // T5 s7.7: the post-op selection step every RunAssetOp caller runs on a returned plan (B17 and B20 extend it).
         void AfterAssetOp(const Arcane::Editor::AssetOpPlan&);
         void InvalidateAssetCaches(const Arcane::Guid&, Arcane::Editor::AssetKind);
+        // Plan C N1: InvalidateAssetCaches' device-wide texture drop is RAISED here,
+        // never run on the spot: its callers can run inside the UI phase, after this
+        // frame's draw lists may already name the texture by raw pointer. MainLoop
+        // drains it right after PresentFrame (DeferredTextureDrops.hpp says why).
+        // Its drop, installed in StageSpriteTables beside the resolver services, is the ONE
+        // device-wide invalidation, on the viewport context, else the chrome's.
+        Arcane::Editor::DeferredTextureDrops m_textureDrops;
         // T5 s7.6: the asset page's Rename modal (requestRename opens it).
         Arcane::Editor::RenameModalState m_renameModal;
         // T5 s7.5: the ONE Delete confirm modal (requestDelete opens it). Its

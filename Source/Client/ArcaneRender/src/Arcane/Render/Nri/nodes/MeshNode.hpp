@@ -485,12 +485,12 @@ namespace Arcane
         //
         // Resolves the PIPELINE **and** this frame's mesh residency. The residency half
         // is here for the same reason the pipeline half is: NriMeshBufferCache::Resolve
-        // uploads through HelperInterface::UploadData, which SUBMITS AND WAITS
-        // INTERNALLY -- doing that inside an open command buffer is exactly the shape
-        // the graph's no-hand-barriers rule exists to prevent (NriTextureCache.hpp's NO
-        // BARRIERS section states it for images; geometry is the same hazard with a
-        // bigger payload). Record() therefore only ever LOOKS UP what Prepare made
-        // resident, and never resolves.
+        // creates the device buffers and queues their upload for a later frame's
+        // upload node (UploadNode.hpp; only the tests' Immediate mode still uploads
+        // through HelperInterface::UploadData, which SUBMITS AND WAITS), and creating
+        // device objects and charging the residency account belong to declaration,
+        // not to an open command buffer. Record() therefore only ever LOOKS UP what
+        // Prepare made resident, and never resolves.
         //
         // Safe to skip entirely -- Record() then reports the missing pipeline
         // once and draws nothing. Device-less [nri] frame-shape cases pass a
