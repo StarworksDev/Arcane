@@ -2055,9 +2055,14 @@ namespace Arcane::Editor
         Arcane::Guid      m_graphLogoId;
         Arcane::PixelData m_graphLogoPixels;
         // The toolbar's mark as an ImTextureID (raw nri::Texture*), asked of the chrome cache
-        // on every draw and never kept: 0 = no mark, or not uploaded (again) yet, which
-        // DrawSimTimeToolbar already treats as "skip it".
+        // on every draw and never kept: 0 = no mark, or not uploaded (again) yet. While it is
+        // not uploaded, ToolbarLogoPending keeps the mark's box in the strip.
         [[nodiscard]] std::uint64_t ToolbarLogoTextureId() const noexcept;
+        // True while the mark's upload is queued or in flight (spec Revision 4: first use
+        // returns not-ready). Ask it AFTER ToolbarLogoTextureId in the same frame, so a
+        // re-queue after an eviction counts. The toolbar keeps the mark's box while it is
+        // true, so the strip's height never depends on residency; a refused mark is false.
+        [[nodiscard]] bool ToolbarLogoPending() const noexcept;
 
         // File -> Open Project (soft-restart). The menu sets menuReq.openProject;
         // DrawEditorUi launches the async .arcproj FILE dialog via the shared

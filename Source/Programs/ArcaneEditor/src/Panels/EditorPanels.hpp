@@ -238,6 +238,7 @@ namespace Arcane::Editor
         TitleParts               title;      // 6.4: EditorApp::CurrentTitleParts()
         std::string              scenePath;  // tooltip only; empty = never saved
         std::optional<StripChip> problems;   // s8.2 (T6); nullopt = nothing drawn, no space reserved
+        bool                     logoPending = false;   // the mark is queued, not drawable yet: keep its box (logoTex == 0)
     };
     struct ToolbarResult
     {

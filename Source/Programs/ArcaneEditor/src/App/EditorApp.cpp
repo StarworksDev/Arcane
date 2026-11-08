@@ -1240,6 +1240,18 @@ namespace Arcane::Editor
         return 0;
     }
 
+    bool EditorApp::ToolbarLogoPending() const noexcept
+    {
+        // The first frames of every run: the mark is queued, not yet drawable. Without this the
+        // strip is shorter until it lands, and a seed-less run builds its default dock layout
+        // on frame 1 against the taller dockspace (CI 42436409532, E6: SizeRef 653, not 647).
+        if (m_graphLogoId.IsValid())
+            if (Arcane::NriGraphContext* chrome = ChromeGraph())
+                if (Arcane::NriTextureCache* cache = chrome->Textures())
+                    return cache->UploadQueued(m_graphLogoId, Arcane::NriTextureCache::ColorSpace::Display);
+        return false;
+    }
+
     bool EditorApp::StagePluginLoad(Arcane::HostBoot::BootContext&)
     {
         if (const Arcane::Project* project = m_runtime->CurrentProject())

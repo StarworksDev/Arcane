@@ -781,7 +781,10 @@ namespace Arcane::Editor
         const ImGuiStyle& st = ImGui::GetStyle();
         const float btnH     = ImGui::GetFrameHeight();
         const EditorUiToolbarSettings& toolbar = Arcane::Settings<EditorUiToolbarSettings>();   // editor.ui.toolbar.*
-        const float logoH    = (logoTex != 0) ? std::floor(btnH * toolbar.logoScale) : btnH;
+        // A queued mark keeps its box: the strip's height must not change when the upload
+        // lands, or a dock layout built on frame 1 is sized for the wrong dockspace.
+        const bool  logoBox  = (logoTex != 0) || status.logoPending;
+        const float logoH    = logoBox ? std::floor(btnH * toolbar.logoScale) : btnH;
         const float overhang = (logoH - btnH) * 0.5f;   // logo extends this far above/below the row
         ImGui::Dummy(ImVec2(0.0f, Ui::Px(3.0f) + overhang));
 
@@ -796,11 +799,16 @@ namespace Arcane::Editor
         // never perturbs the transport's own placement. leftX tracks the running right edge.
         const float leftPad = Ui::Px(8.0f);
         float leftX = lineStartX + leftPad;
-        if (logoTex != 0)
+        if (logoBox)
         {
             ImGui::SetCursorPos(ImVec2(leftX, rowY - overhang));
-            ImGui::Image((ImTextureID)logoTex, ImVec2(logoH, logoH));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Arcane");
+            if (logoTex != 0)
+            {
+                ImGui::Image((ImTextureID)logoTex, ImVec2(logoH, logoH));
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Arcane");
+            }
+            else
+                ImGui::Dummy(ImVec2(logoH, logoH));   // queued: same box, nothing drawn
             leftX += logoH + Ui::Px(8.0f);   // gap between logo and wordmark
         }
         if (ImFont* brand = GetEditorFonts().brand)

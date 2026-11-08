@@ -2864,10 +2864,12 @@ namespace Arcane::Editor
         const Arcane::Editor::PlayLaunchMode publishedPlayMode =
             Arcane::Settings<Arcane::Editor::EditorPlaySettings>().launchMode;
         Arcane::Editor::PlayLaunchMode playMode = publishedPlayMode;
+        const std::uint64_t logoTex = ToolbarLogoTextureId();   // the ask first: it may (re)queue the mark
+        stripStatus.logoPending = (logoTex == 0) && ToolbarLogoPending();
         const Arcane::Editor::ToolbarResult toolbar =
             Arcane::Editor::DrawSimTimeToolbar(m_play, m_runtime->Core(),
                                                m_plugin ? &*m_plugin : nullptr, playMode,
-                                               ToolbarLogoTextureId(), stripStatus,
+                                               logoTex, stripStatus,
                                                [this]() { BeforePlayStart(); });   // T1-B14's beforePlay (s3.3b)
         if (playMode != publishedPlayMode)
             Arcane::Editor::SetPlayLaunchMode(playMode);
