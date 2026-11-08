@@ -1294,3 +1294,35 @@ TEST_CASE("Dist refuses the remote flags at parse", "[host][dist]")
     }
 }
 #endif
+
+// --print-registry exits before any frame, so a loop-bound flag beside it
+// would be silently ignored with exit 0 -- refused at parse time (rule 3).
+TEST_CASE("host config: --print-registry refuses flags it would silently ignore", "[hostconfig]")
+{
+    struct Case { std::vector<std::string> extra; const char* named; };
+    std::vector<Case> cases = {
+        { { "--frames", "5" },                  "--frames" },
+        { { "--headless", "--report", "r.json" }, "--report" },
+        { { "--headless", "--probe", "census" }, "--probe" },
+        { { "--headless", "--settle", "3" },    "--settle" },
+#if !defined(ARC_BUILD_DIST)
+        { { "--remote" },                       "--remote" },
+#endif
+    };
+    for (const Case& c : cases)
+    {
+        INFO("with " << c.named);
+        std::vector<std::string> args = { "--project", "P", "--print-registry" };
+        args.insert(args.end(), c.extra.begin(), c.extra.end());
+        const auto o = RunCapturingStderr(std::move(args));
+        REQUIRE_FALSE(o.outcome.config.has_value());
+        CHECK(o.outcome.exitCode == 2);
+        REQUIRE(o.captured);
+        CHECK(o.err.find(std::string("--print-registry")) != std::string::npos);
+        CHECK(o.err.find(std::string(c.named) + " would be silently ignored") != std::string::npos);
+    }
+    // --headless alone is allowed: the query still boots (headless or not).
+    const auto ok = Run({ "--project", "P", "--print-registry", "--headless" });
+    REQUIRE(ok.config.has_value());
+    CHECK(ok.config->printRegistry);
+}

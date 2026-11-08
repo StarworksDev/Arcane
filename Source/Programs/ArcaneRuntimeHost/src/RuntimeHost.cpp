@@ -136,10 +136,12 @@ int Arcane::RuntimeHost::Run(int argc, char** argv, const PackageInfo* package)
             Arcane::Diagnostics::ConfigFromSettings(Arcane::Settings<Arcane::DiagnosticsSettings>());
         diag.appName     = (package && package->appName) ? package->appName : "ArcaneRuntime";
         diag.productName = ProductNameFor(parsed.config->projectPath);
-        diag.unattended  = parsed.config->headless;   // nobody to answer a reporter window
+        // nobody to answer a reporter window (a --print-registry query neither)
+        const bool scripted = parsed.config->headless || parsed.config->printRegistry;
+        diag.unattended  = scripted;
         // Spec S5.8 (plan 2, task 9): windowed runs pre-launch the crash monitor;
         // headless runs, build machines and debugged runs launch none.
-        diag.launchMonitor = !parsed.config->headless;
+        diag.launchMonitor = !scripted;
         // Element 0 is ExecutablePathUtf8(), NOT argv[0] -- the same reason the
         // probe above gives for not printing argv[0]: a bare relative name in
         // ANSI-codepage bytes is not something a reporter can relaunch or put
@@ -260,7 +262,7 @@ int Arcane::RuntimeHost::Run(int argc, char** argv, const PackageInfo* package)
     // the identical pattern. Destruction order is unchanged -- `app` still
     // lives in the nested scope below and is destroyed before this object.
     std::optional<Arcane::BootSplashWindow> splash;
-    if (!parsed.config->headless)
+    if (!parsed.config->headless && !parsed.config->printRegistry)   // a registry query shows no splash
         splash.emplace("data/images/arcane_logo.png");
 
     // Scoped so ~RuntimeApp runs while the watchdog is still armed, then joined

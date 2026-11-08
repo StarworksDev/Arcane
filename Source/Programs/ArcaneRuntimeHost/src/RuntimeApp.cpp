@@ -154,12 +154,15 @@ bool RuntimeApp::StageRuntimeCreate(Arcane::HostBoot::BootContext& ctx)
     // Opt into a real audio device only for an INTERACTIVE run (maxFrames == 0 = run
     // until quit). The scripted "ArcaneRuntime --frames N" GPU-verify is not interactive ->
     // false -> miniaudio's device-less null backend (no real device grabbed on a CI box).
-    m_runtime.emplace(*m_process, m_config.maxFrames == 0);
+    // --print-registry is a scripted query too (it exits before any frame).
+    const bool interactive = m_config.maxFrames == 0 && !m_config.printRegistry;
+    m_runtime.emplace(*m_process, interactive);
     // The player's settings persist (settings spec s8.2): an INTERACTIVE run writes
     // the User rung's Archive values back to the per-user directory (Paths
     // GameUserDir/Config) at exit, exactly as the editor does. A scripted --frames
-    // or --headless run reads them but never writes: a verify run must not.
-    m_runtime->Core().SetUserCVarArchiving(m_config.maxFrames == 0 && !m_config.headless);
+    // or --headless run (or a --print-registry query) reads them but never
+    // writes: a verify run must not.
+    m_runtime->Core().SetUserCVarArchiving(interactive && !m_config.headless);
     // THIS EXE asks about ITS OWN caches (2026-09-16), for the same reason the
     // editor now does: VerifySharedTypeContext is inline, so ProjectBoot.cpp's
     // type_context_install stage answers for ArcaneClient.dll and no other module.
@@ -1953,7 +1956,8 @@ int RuntimeApp::Run()
         return boot.quitRequested ? 0 : 1;
 
     // --print-registry (engine modularization s6, registrar survival): the
-    // booted roster as one JSON line on stdout (logs may share it), then the
+    // booted roster as one JSON line on stdout (host logs go to stderr, so only
+    // an outer wrapper such as xvfb-run can interleave them), then the
     // same teardown as a finished run. scripts/ci/package.sh compares the
     // modular runtime's line with the packaged game's.
     if (m_config.printRegistry)

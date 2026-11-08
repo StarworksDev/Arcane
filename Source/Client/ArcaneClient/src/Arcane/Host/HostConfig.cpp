@@ -421,6 +421,40 @@ namespace Arcane
             return { std::nullopt, 2 };
         }
 
+        // --print-registry boots, prints one JSON line and exits BEFORE the main
+        // loop, so a flag that belongs to the loop (frames, capture, probes,
+        // report, compare, remote, the DEV fault triggers) would silently do
+        // nothing and still exit 0 -- rule 3: refuse at parse time, exit 2. It
+        // is a scripted query: --headless, --project, --plugin, --scene, --set
+        // and --backend still apply to its boot and stay allowed.
+        if (cfg.printRegistry)
+        {
+            const char* clash = nullptr;
+            if      (cfg.maxFrames != 0)              clash = "--frames";
+            else if (!cfg.screenshotPath.empty())     clash = "--screenshot";
+            else if (!cfg.reportPath.empty())         clash = "--report";
+            else if (!cfg.probes.empty())             clash = "--probe";
+            else if (!cfg.compareReference.empty())   clash = "--compare";
+            else if (cfg.bless)                       clash = "--bless";
+            else if (r.Supplied("settle"))            clash = "--settle";
+            else if (r.Supplied("settle-timeout"))    clash = "--settle-timeout";
+            else if (r.Supplied("window-size"))       clash = "--window-size";
+            else if (r.Supplied("dump-layout"))       clash = "--dump-layout";
+#if !defined(ARC_BUILD_DIST)
+            else if (cfg.remote)                      clash = "--remote";
+            else if (cfg.crashGpuFrame != 0)          clash = "--crash-gpu";
+            else if (cfg.hangMainFrame != 0)          clash = "--hang-main";
+            else if (r.Supplied("pick-probe"))        clash = "--pick-probe";
+#endif
+            if (clash)
+            {
+                std::fprintf(stderr, "error: --print-registry boots, prints the registry and exits "
+                                     "before any frame; %s would be silently ignored
+", clash);
+                return { std::nullopt, 2 };
+            }
+        }
+
         // Refused rather than ignored -- rule 3. A flag that silently does nothing is
         // the worst failure mode an agent can meet: it exits 0 having done nothing,
         // and an agent reads that as success.
