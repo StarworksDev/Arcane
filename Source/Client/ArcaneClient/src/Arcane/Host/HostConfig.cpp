@@ -449,8 +449,7 @@ namespace Arcane
             if (clash)
             {
                 std::fprintf(stderr, "error: --print-registry boots, prints the registry and exits "
-                                     "before any frame; %s would be silently ignored
-", clash);
+                                     "before any frame; %s would be silently ignored\n", clash);
                 return { std::nullopt, 2 };
             }
         }
