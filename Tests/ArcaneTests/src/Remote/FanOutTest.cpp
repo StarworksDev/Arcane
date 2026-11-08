@@ -4,6 +4,7 @@
 #include <Servitor/FanOut.hpp>
 #include <Arcane/Remote/Protocol.hpp>
 #include <Json.hpp>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -28,9 +29,9 @@ Servitor::LiveHost MakeHost(std::uint32_t pid, Arcane::Remote::HostKind kind, co
 TEST_CASE("fan-out worst exit is 7 when one host is dead and one is busy", "[servitor][client]") {
     Servitor::Scan scan;
     scan.live = {MakeHost(1, Arcane::Remote::HostKind::Runtime), MakeHost(2, Arcane::Remote::HostKind::Server)};
-    int sends = 0;
+    std::atomic<int> sends{0};   // two hosts = two worker threads
     auto post = [](const Arcane::Remote::Descriptor& d, const nlohmann::json&, Arcane::Remote::Envelope* out, void* user) {
-        *static_cast<int*>(user) += 1;
+        static_cast<std::atomic<int>*>(user)->fetch_add(1);
         if (d.pid == 1)
             *out = Arcane::Remote::MakeError("cvar.get", "host.busy", "full", "retry");
         else
@@ -40,7 +41,7 @@ TEST_CASE("fan-out worst exit is 7 when one host is dead and one is busy", "[ser
     const auto result = Servitor::FanOut(scan, {}, true,
         nlohmann::json{{"command", "cvar.get"}, {"args", {{"name", "render.vsync"}}}},
         false, false, Servitor::Format::Json, post, &sends);
-    CHECK(sends == 2);
+    CHECK(sends.load() == 2);
     CHECK(result.exitCode == 7);
     REQUIRE(result.wrapper["hosts"].size() == 2);
     CHECK(result.wrapper["hosts"][0]["pid"] == 1);
