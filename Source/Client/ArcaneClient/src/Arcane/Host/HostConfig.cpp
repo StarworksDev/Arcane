@@ -425,8 +425,9 @@ namespace Arcane
         // loop, so a flag that belongs to the loop (frames, capture, probes,
         // report, compare, remote, the DEV fault triggers) would silently do
         // nothing and still exit 0 -- rule 3: refuse at parse time, exit 2. It
-        // is a scripted query: --headless, --project, --plugin, --scene, --set
-        // and --backend still apply to its boot and stay allowed.
+        // is a scripted query: --project, --plugin, --scene, --set and
+        // --backend still apply to its boot and stay allowed (a bare
+        // --headless is refused further down: it needs --frames or --remote).
         if (cfg.printRegistry)
         {
             const char* clash = nullptr;

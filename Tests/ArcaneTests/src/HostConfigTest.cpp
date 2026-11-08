@@ -1321,8 +1321,4 @@ TEST_CASE("host config: --print-registry refuses flags it would silently ignore"
         CHECK(o.err.find(std::string("--print-registry")) != std::string::npos);
         CHECK(o.err.find(std::string(c.named) + " would be silently ignored") != std::string::npos);
     }
-    // --headless alone is allowed: the query still boots (headless or not).
-    const auto ok = Run({ "--project", "P", "--print-registry", "--headless" });
-    REQUIRE(ok.config.has_value());
-    CHECK(ok.config->printRegistry);
 }
